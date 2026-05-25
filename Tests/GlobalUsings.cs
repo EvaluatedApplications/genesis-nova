@@ -4,18 +4,21 @@ global using System.Linq;
 global using System.Threading;
 global using System.Threading.Tasks;
 global using EvalApp.Consumer;
-global using EvalApp.Solid.Starter.Features.BatchSync;
-global using EvalApp.Solid.Starter.Features.BatchSync.Pipelines;
-global using EvalApp.Solid.Starter.Features.Ingestion;
-global using EvalApp.Solid.Starter.Features.Ingestion.Pipelines;
-global using EvalApp.Solid.Starter.Features.OrderSaga;
-global using EvalApp.Solid.Starter.Features.OrderSaga.Pipelines;
-global using EvalApp.Solid.Starter.Features.OrderSaga.Services;
-global using EvalApp.Solid.Starter.Features.RulesEngine;
-global using EvalApp.Solid.Starter.Features.RulesEngine.Pipelines;
+global using EvalApp.Solid.Starter.Accounting;
+global using EvalApp.Solid.Starter.Accounting.Pipelines;
+global using EvalApp.Solid.Starter.Catalog;
+global using EvalApp.Solid.Starter.Catalog.Pipelines;
+global using EvalApp.Solid.Starter.Orders;
+global using EvalApp.Solid.Starter.Orders.Pipelines;
+global using EvalApp.Solid.Starter.Orders.Services;
+global using EvalApp.Solid.Starter.Pricing;
+global using EvalApp.Solid.Starter.Pricing.Pipelines;
 global using EvalApp.Solid.Starter.Shared;
-global using EvalApp.Solid.Starter.Tests.Features.BatchSync.Shared;
-global using EvalApp.Solid.Starter.Tests.Features.Ingestion.Shared;
-global using EvalApp.Solid.Starter.Tests.Features.OrderSaga.Shared;
+global using EvalApp.Solid.Starter.Tests.Accounting.Shared;
+global using EvalApp.Solid.Starter.Tests.Catalog.Shared;
+global using EvalApp.Solid.Starter.Tests.Orders.Shared;
 global using EvalApp.Solid.Starter.Tests.Shared;
 global using Xunit;
+
+
+

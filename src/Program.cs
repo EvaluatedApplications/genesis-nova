@@ -1,28 +1,28 @@
 using EvalApp.Consumer;
-using EvalApp.Solid.Starter.Features.ApiSurface;
-using EvalApp.Solid.Starter.Features.ApiSurface.Events;
-using EvalApp.Solid.Starter.Features.ApiSurface.Merge;
-using EvalApp.Solid.Starter.Features.ApiSurface.Pipelines;
-using EvalApp.Solid.Starter.Features.ApiSurface.Steps;
-using EvalApp.Solid.Starter.Features.ApiSurface.Support;
-using EvalApp.Solid.Starter.Features.AdvancedPatterns;
-using EvalApp.Solid.Starter.Features.AdvancedPatterns.Middleware;
-using EvalApp.Solid.Starter.Features.AdvancedPatterns.Pipelines;
-using EvalApp.Solid.Starter.Features.Orchestration;
-using EvalApp.Solid.Starter.Features.Orchestration.Contexts;
-using EvalApp.Solid.Starter.Features.Orchestration.Pipelines;
-using EvalApp.Solid.Starter.Features.Orchestration.Steps;
-using EvalApp.Solid.Starter.Features.RulesEngine.Context;
-using EvalApp.Solid.Starter.Features.RulesEngine.Pipelines;
-using EvalApp.Solid.Starter.Features.OrderSaga.Steps;
-using EvalApp.Solid.Starter.Features.BatchSync.Pipelines;
-using EvalApp.Solid.Starter.Features.Ingestion.Pipelines;
+using EvalApp.Solid.Starter.Platform;
+using EvalApp.Solid.Starter.Platform.Events;
+using EvalApp.Solid.Starter.Platform.Merge;
+using EvalApp.Solid.Starter.Platform.Steps;
+using EvalApp.Solid.Starter.Platform.Support;
+using EvalApp.Solid.Starter.Analytics;
+using EvalApp.Solid.Starter.Analytics.Middleware;
+using EvalApp.Solid.Starter.Commerce;
+using EvalApp.Solid.Starter.Commerce.Contexts;
+using EvalApp.Solid.Starter.Commerce.Steps;
+using EvalApp.Solid.Starter.Pricing.Context;
+using EvalApp.Solid.Starter.Orders.Steps;
+using EvalApp.Solid.Starter.Accounting;
+using EvalApp.Solid.Starter.Catalog;
 using System.Collections.Immutable;
 
 // ═══════════════════════════════════════════════════════════════════════════════
-//  EvalApp SOLID Starter — Unified Application Manifest
-//  All 7 features wired in a single Eval.App() declaration.
-//  Each domain below maps to one SOLID tutorial chapter.
+//  Northstar Commerce Platform — Application Manifest
+//
+//  Single unified Eval.App declaration orchestrating all business domains:
+//  Pricing, Orders, Catalog, Accounting, Commerce, Analytics, Platform.
+//
+//  This file is the system's source of truth. Resource management, tuning,
+//  and cross-domain orchestration are all visible here.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 // Pipeline handles — set via Run(out ...) during builder evaluation
@@ -64,12 +64,9 @@ Eval.App("SolidStarter")
     .WithTuning()
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  DOMAIN 1 · RulesEngine
-//  Pure business rules pipeline. No I/O — all PureStep / ContextPureStep.
-//  Teaches: SRP (one step = one rule), OCP (add rules without topology changes),
-//           DIP (ContextPureStep depends on PricingContext abstraction, not config).
-//  Flow: CalculateNetPrice → EvaluateEligibility → ApplyPromoRules →
-//        ApplyTax [ContextPureStep] → CalculateFinalPrice
+//  PRICING DOMAIN
+//  Deterministic discount and tax calculation. All rules are pure (no I/O).
+//  Policy adjustments flow through context injection — no code changes needed.
 // ─────────────────────────────────────────────────────────────────────────────
     .DefineDomain("Pricing", PricingContext.Default)
         .DefineTask<PricingData>("CalculatePrice")
@@ -81,11 +78,9 @@ Eval.App("SolidStarter")
             .Run(out rulesPipeline)
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  DOMAIN 2 · BatchSync
-//  Async I/O with partial failure. Items that fail are tracked, not fatal.
-//  Teaches: SRP (fetch / process / summarize separation),
-//           OCP (swap ProcessBatchStep without changing topology).
-//  Flow: FetchItems → ProcessBatch → CalculateSummary
+//  ACCOUNTING DOMAIN
+//  Nightly partner settlement reconciliation. Partial success is normal.
+//  Retry/failure tracking support controlled rollback and audit workflows.
 // ─────────────────────────────────────────────────────────────────────────────
     .DefineDomain("Processing")
         .DefineTask<BatchSyncData>("SyncBatch")
@@ -95,10 +90,9 @@ Eval.App("SolidStarter")
             .Run(out batchPipeline)
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  DOMAIN 3 · Ingestion
-//  Stream validation with collect-all-errors semantics.
-//  Teaches: SRP (materialize / validate / summarize), ISP (no forced dependencies).
-//  Flow: Materialize → ProcessAllItems → Summarize
+//  CATALOG DOMAIN
+//  Real-time product feed validation. Bad records are quarantined, good ones flow.
+//  Error-as-data model allows single-pass processing of mixed validity.
 // ─────────────────────────────────────────────────────────────────────────────
     .DefineDomain("BatchProcessing")
         .DefineTask<IngestionData>("ProcessStream")
@@ -108,12 +102,9 @@ Eval.App("SolidStarter")
             .Run(out ingestionPipeline)
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  DOMAIN 4 · OrderSaga
-//  Sequential distributed transaction. Each step records its side-effect ID so
-//  the caller can compensate on partial failure by inspecting the result data.
-//  Teaches: DIP (inject IInventoryService / IPaymentService / IShipmentService),
-//           LSP (all saga steps honour the same AsyncStep<T> contract).
-//  Flow: ReserveInventory → ChargePayment → Ship
+//  ORDERS DOMAIN
+//  Three-stage distributed transaction: reserve → charge → ship.
+//  Each step records IDs for controlled rollback if any stage fails.
 // ─────────────────────────────────────────────────────────────────────────────
     .DefineDomain("Fulfillment", NullGlobalContext.Instance)
         .DefineTask<OrderSagaData>("ProcessOrder")
@@ -126,9 +117,8 @@ Eval.App("SolidStarter")
             .Run(out sagaPipeline)
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  DOMAIN 5a · CommercePricing  (sub-pipeline — piped into CommerceOrchestration)
-//  Prices a CommerceWorkflowData through a domain-specific quote calculation.
-//  Flow: CalculateQuote [ContextPureStep]
+//  COMMERCE · Pricing Subdomain
+//  Computes net total, discounts, tax for CommerceWorkflowData.
 // ─────────────────────────────────────────────────────────────────────────────
     .DefineDomain("CommercePricing", PricingDomainContext.Default)
         .DefineTask<CommerceWorkflowData>("PriceOrder")
@@ -136,10 +126,9 @@ Eval.App("SolidStarter")
             .Run(out commercePricingPipeline)
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  DOMAIN 5b · CommerceFulfillment  (sub-pipeline — piped into CommerceOrchestration)
-//  Demonstrates ForEach parallelism, If/Else branching, and two resource gates.
-//  Flow: PrepareLines → ForEach(PackLine) → If(FreeShipping?) →
-//        Gate:Network(GenerateLabel) → Gate:Database(ArchiveOrder)
+//  COMMERCE · Fulfillment Subdomain
+//  Prepares lines, applies per-item packaging rules, selects shipping method.
+//  Parallelizes line packing; branches on order total; gates external integrations.
 // ─────────────────────────────────────────────────────────────────────────────
     .DefineDomain("CommerceFulfillment", FulfillmentDomainContext.Default)
         .DefineTask<CommerceWorkflowData>("FulfillOrder")
@@ -166,11 +155,9 @@ Eval.App("SolidStarter")
             .Run(out commerceFulfillPipeline)
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  DOMAIN 5c · CommerceOrchestration
-//  Composes the two sub-pipelines as recursive pipeline dependencies.
-//  The output of CommercePricing is the input to CommerceFulfillment.
-//  Teaches: pipeline composition, recursive data flow, cross-domain orchestration.
-//  Flow: PriceOrder(→ commercePricingPipeline) → FulfillOrder(→ commerceFulfillPipeline)
+//  COMMERCE DOMAIN
+//  End-to-end order flow: price → fulfill. Composes two sub-pipelines
+//  demonstrating recursive pipeline dependencies and cross-domain orchestration.
 // ─────────────────────────────────────────────────────────────────────────────
     .DefineDomain("Orchestration", NullGlobalContext.Instance)
         .DefineTask<CommerceWorkflowData>("RunCommerce")
@@ -179,14 +166,9 @@ Eval.App("SolidStarter")
             .Run(out orchestrationPipeline)
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  DOMAIN 6 · AdvancedPatterns
-//  Full middleware stack, Materialize, SubTask, Fallback, ForEach, WindowBudget,
-//  CPU gate (SHA-256 digest), and DiskIO gate (temp-file snapshot).
-//  Teaches: middleware pipeline, adaptive tuning, fault-tolerance via fallback.
-//  Flow: [TraceMiddleware → RetryOnce → TimeoutGuard] →
-//        SeedMeta → Materialize → SubTask(StampMeta) →
-//        Gate:Network(FetchQuote+Fallback) → ForEach(TransformItem) →
-//        WindowBudget → Gate:Cpu(ComputeDigest) → Gate:DiskIO(PersistSnapshot)
+//  ANALYTICS DOMAIN
+//  Real-time metrics collection under load. Demonstrates resilient quoting
+//  with middleware, fallback paths, resource gates, and ForEach failure modes.
 // ─────────────────────────────────────────────────────────────────────────────
     .DefineDomain("Advanced", NullGlobalContext.Instance)
         .DefineTask<AdvancedDemoData>("DemonstrateEvalApp")
@@ -256,15 +238,10 @@ Eval.App("SolidStarter")
             .Run(out advancedPipeline)
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  DOMAIN 7 · ApiSurface
-//  Full API coverage lab — exercises every builder surface in a single task.
-//  WithEvents, WithStepFactory (DI-resolved step), AddParallelGroup (custom merge),
-//  AddReadOnlyBridge, BeginSaga / EndSaga (Materialize + ForEach + StepWithCompensation
-//  + AddGate with compensation), Pressure scope, WindowBudget scope.
-//  Flow: FactoryResolved → ParallelGroup(L+R, CustomMerge) → ReadOnlyBridge →
-//        Saga[ Materialize → ForEach(ScaleItem) → StepWithCompensation(Reserve) →
-//              Gate:Network(SagaCall) ] → Pressure(Marker) → WindowBudget(Marker) →
-//        Finalize
+//  PLATFORM DOMAIN
+//  Internal validation suite exercising all EvalApp builder surfaces in one task.
+//  Service factory resolution, saga compensation, tuning variants, resource gates,
+//  pressure scopes, and event logging — all in a single controlled pipeline.
 // ─────────────────────────────────────────────────────────────────────────────
     .DefineDomain("Coverage", NullGlobalContext.Instance)
         .DefineTask<ApiSurfaceData>("RunApiSurface")
@@ -340,16 +317,16 @@ Eval.App("SolidStarter")
         .Build();
 
 // ═══════════════════════════════════════════════════════════════════════════════
-//  Execution
+//  Demo Execution — Northstar Commerce Platform
 // ═══════════════════════════════════════════════════════════════════════════════
 
 Console.WriteLine("╔═══════════════════════════════════════════════════════════════╗");
-Console.WriteLine("║   EvalApp SOLID Starter Tutorial - All 7 Features Demo        ║");
+Console.WriteLine("║   Northstar Commerce — Platform Verification                 ║");
 Console.WriteLine("╚═══════════════════════════════════════════════════════════════╝\n");
 
-// 1 · RulesEngine
-Console.WriteLine("📋 [1/7] RulesEngine: Pure Logic & Business Rules");
-Console.WriteLine("─────────────────────────────────────────────────");
+// Pricing subsystem
+Console.WriteLine("📋 Pricing: Discount eligibility and tax calculation");
+Console.WriteLine("─────────────────────────────────────────────────────");
 try
 {
     var items = ImmutableList.Create(
@@ -362,25 +339,25 @@ try
     var data     = result is PipelineResult<PricingData>.Success s ? s.Data : ((PipelineResult<PricingData>.Failure)result).Data;
     Console.WriteLine($"  Shopper: {shopper.CustomerId} (VIP: {shopper.IsVip})");
     Console.WriteLine($"  Net: ${data.NetPrice:F2}  Discount: {data.DiscountPercent:P0}  Final: ${data.FinalPrice:F2}");
-    Console.WriteLine($"✅ RulesEngine completed. Final price: {data.FinalPrice:C}\n");
+    Console.WriteLine($"✅ Completed. Final price: {data.FinalPrice:C}\n");
 }
-catch (Exception ex) { Console.WriteLine($"❌ RulesEngine failed: {ex.Message}\n"); }
+catch (Exception ex) { Console.WriteLine($"❌ Failed: {ex.Message}\n"); }
 
-// 2 · BatchSync
-Console.WriteLine("📦 [2/7] BatchSync: Async I/O & Partial Failure Handling");
-Console.WriteLine("─────────────────────────────────────────────────");
+// Accounting subsystem
+Console.WriteLine("📦 Accounting: Partner settlement reconciliation");
+Console.WriteLine("─────────────────────────────────────────────────────");
 try
 {
     var result = await batchPipeline.RunAsync(new BatchSyncData(new List<int>()));
     var data   = result is PipelineResult<BatchSyncData>.Success bs ? bs.Data : ((PipelineResult<BatchSyncData>.Failure)result).Data;
     Console.WriteLine($"  Processed: {data.ItemIds.Count}  Success: {data.SuccessCount}  Failed: {data.ErrorCount}");
-    Console.WriteLine($"✅ BatchSync completed. Success: {data.SuccessCount}, Failed: {data.ErrorCount}\n");
+    Console.WriteLine($"✅ Completed. Success: {data.SuccessCount}, Failed: {data.ErrorCount}\n");
 }
-catch (Exception ex) { Console.WriteLine($"❌ BatchSync failed: {ex.Message}\n"); }
+catch (Exception ex) { Console.WriteLine($"❌ Failed: {ex.Message}\n"); }
 
-// 3 · Ingestion
-Console.WriteLine("🔄 [3/7] Ingestion: Stream Processing & Validation");
-Console.WriteLine("─────────────────────────────────────────────────");
+// Catalog subsystem
+Console.WriteLine("🔄 Catalog: Product intake and validation");
+Console.WriteLine("─────────────────────────────────────────────────────");
 try
 {
     var rawItems = new List<RawRecord>
@@ -393,13 +370,13 @@ try
     var result = await ingestionPipeline.RunAsync(new IngestionData(rawItems));
     var data   = result is PipelineResult<IngestionData>.Success ins ? ins.Data : ((PipelineResult<IngestionData>.Failure)result).Data;
     Console.WriteLine($"  Total: {data.TotalProcessed}  Valid: {data.SuccessCount}  Invalid: {data.ErrorCount}");
-    Console.WriteLine($"✅ Ingestion completed. Valid: {data.SuccessCount}, Invalid: {data.ErrorCount}\n");
+    Console.WriteLine($"✅ Completed. Valid: {data.SuccessCount}, Invalid: {data.ErrorCount}\n");
 }
-catch (Exception ex) { Console.WriteLine($"❌ Ingestion failed: {ex.Message}\n"); }
+catch (Exception ex) { Console.WriteLine($"❌ Failed: {ex.Message}\n"); }
 
-// 4 · OrderSaga
-Console.WriteLine("💳 [4/7] OrderSaga: Distributed Transactions & Compensation");
-Console.WriteLine("─────────────────────────────────────────────────");
+// Orders subsystem
+Console.WriteLine("💳 Orders: Distributed transaction (inventory → payment → shipment)");
+Console.WriteLine("─────────────────────────────────────────────────────");
 try
 {
     var order = new OrderSagaData(
@@ -409,13 +386,13 @@ try
     var result = await sagaPipeline.RunAsync(order);
     var data   = result is PipelineResult<OrderSagaData>.Success ss ? ss.Data : ((PipelineResult<OrderSagaData>.Failure)result).Data;
     Console.WriteLine($"  Order: {data.OrderId}  State: {data.State}  Charge: ${data.ChargeAmount:F2}");
-    Console.WriteLine($"✅ OrderSaga completed. Order: {data.OrderId}, Status: {data.State}\n");
+    Console.WriteLine($"✅ Completed. Order: {data.OrderId}, Status: {data.State}\n");
 }
-catch (Exception ex) { Console.WriteLine($"❌ OrderSaga failed: {ex.Message}\n"); }
+catch (Exception ex) { Console.WriteLine($"❌ Failed: {ex.Message}\n"); }
 
-// 5 · Commerce Orchestration (sub-pipelines composed recursively)
-Console.WriteLine("🧭 [5/7] Commerce Orchestration: Multiple Domains & Pipeline Composition");
-Console.WriteLine("─────────────────────────────────────────────────");
+// Commerce orchestration
+Console.WriteLine("🧭 Commerce: End-to-end order (pricing + fulfillment)");
+Console.WriteLine("─────────────────────────────────────────────────────");
 try
 {
     var order = new OrderContext(
@@ -429,13 +406,13 @@ try
     var data   = result is PipelineResult<CommerceWorkflowData>.Success cs ? cs.Data : ((PipelineResult<CommerceWorkflowData>.Failure)result).Data;
     Console.WriteLine($"  Net: {data.NetTotal:C}  Discount: {data.Discount:C}  Tax: {data.Tax:C}");
     Console.WriteLine($"  Shipping: {data.ShippingMethod} / {data.Shipping:C}  Label: {data.LabelId}");
-    Console.WriteLine($"✅ Commerce orchestration completed. Final total: {data.FinalTotal:C}\n");
+    Console.WriteLine($"✅ Completed. Final total: {data.FinalTotal:C}\n");
 }
-catch (Exception ex) { Console.WriteLine($"❌ Commerce orchestration failed: {ex.Message}\n"); }
+catch (Exception ex) { Console.WriteLine($"❌ Failed: {ex.Message}\n"); }
 
-// 6 · Advanced Patterns
-Console.WriteLine("🧪 [6/7] Advanced Patterns: Tuning, Fallback, Materialize, Middleware, CPU/Disk Gates");
-Console.WriteLine("─────────────────────────────────────────────────");
+// Analytics subsystem
+Console.WriteLine("🧪 Analytics: Quote retrieval with resilience and tuning");
+Console.WriteLine("─────────────────────────────────────────────────────");
 try
 {
     var input  = new AdvancedDemoData(InputItems: [2, 4, -1, 8], ForcePrimaryQuoteFailure: true);
@@ -443,13 +420,13 @@ try
     var data   = result is PipelineResult<AdvancedDemoData>.Success ads ? ads.Data : ((PipelineResult<AdvancedDemoData>.Failure)result).Data;
     Console.WriteLine($"  Quote: {data.Quote:C} ({data.QuoteSource})  Items: {data.SuccessCount} ok / {data.ErrorCount} err");
     Console.WriteLine($"  Digest: {data.CpuDigest?[..Math.Min(12, data.CpuDigest?.Length ?? 0)]}...");
-    Console.WriteLine($"✅ Advanced patterns completed. Snapshot: {data.SnapshotPath}\n");
+    Console.WriteLine($"✅ Completed. Snapshot: {data.SnapshotPath}\n");
 }
-catch (Exception ex) { Console.WriteLine($"❌ Advanced patterns failed: {ex.Message}\n"); }
+catch (Exception ex) { Console.WriteLine($"❌ Failed: {ex.Message}\n"); }
 
-// 7 · API Surface
-Console.WriteLine("🧩 [7/7] API Surface: Events, Pressure, Parallel Group, ReadOnlyBridge, Saga APIs");
-Console.WriteLine("─────────────────────────────────────────────────");
+// Platform validation
+Console.WriteLine("🧩 Platform: Internal capability verification");
+Console.WriteLine("─────────────────────────────────────────────────────");
 try
 {
     var result = await apiSurfacePipeline.RunAsync(new ApiSurfaceData(Input: 5));
@@ -457,10 +434,11 @@ try
     Console.WriteLine($"  Parallel: L={data.ParallelLeft}, R={data.ParallelRight}  Bridged: {data.BridgedValue}");
     Console.WriteLine($"  Saga Counter: {data.SagaCounter}  Pressure Scoped: {data.PressureScoped}");
     Console.WriteLine($"  Events captured: {eventLog.Count}");
-    Console.WriteLine($"✅ API surface completed.\n");
+    Console.WriteLine($"✅ Completed.\n");
 }
-catch (Exception ex) { Console.WriteLine($"❌ API surface failed: {ex.Message}\n"); }
+catch (Exception ex) { Console.WriteLine($"❌ Failed: {ex.Message}\n"); }
 
 Console.WriteLine("╔═══════════════════════════════════════════════════════════════╗");
-Console.WriteLine("║                   All Features Completed ✨                   ║");
+Console.WriteLine("║                   Platform Verified ✨                       ║");
 Console.WriteLine("╚═══════════════════════════════════════════════════════════════╝");
+

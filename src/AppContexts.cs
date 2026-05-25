@@ -5,3 +5,4 @@ namespace EvalApp.Solid.Starter.Shared;
 /// </summary>
 public record GlobalContext;
 
+

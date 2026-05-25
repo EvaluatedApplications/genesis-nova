@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/EvalApp.Solid.Starter.csproj" />
+  </Folder>
+  <Folder Name="/Tests/">
+    <Project Path="Tests/EvalApp.Solid.Starter.Tests.csproj" />
+  </Folder>
+</Solution>

@@ -1,18 +1,12 @@
 namespace EvalApp.Solid.Starter.Features.Ingestion.Pipelines;
 
 /// <summary>
-/// IngestionPipeline — demonstrates batch processing with tunable concurrency.
+/// IngestionPipeline — demonstrates stream validation and partial success.
 /// 
 /// Flow:
 ///   1. Materialize — Initialize output collections (ValidItems, InvalidItems)
 ///   2. ProcessAllItems — Iterate stream, validate each, collect successes and failures
 ///   3. SummarizeResults — Count successes/errors, build summary string
-///
-/// Concurrency Pattern:
-/// - WithResource registers Cpu resource with tuning configuration
-/// - Tuning adapts item processing concurrency based on performance
-/// - ProcessAllItemsStep can leverage concurrent item processing
-/// - Default: 5 concurrent items, min 1, max 20
 ///
 /// SOLID Benefits:
 /// - SRP: Each step is a single, focused responsibility
@@ -27,7 +21,8 @@ namespace EvalApp.Solid.Starter.Features.Ingestion.Pipelines;
 public static class IngestionPipeline
 {
     /// <summary>
-    /// Build pipeline for stream processing with validation.
+    /// Build the foundational stream-processing pipeline.
+    /// The capstone orchestration feature demonstrates ForEach and adaptive concurrency.
     /// </summary>
     public static ICompiledPipeline<IngestionData> Build()
     {

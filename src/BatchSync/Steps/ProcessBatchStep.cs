@@ -60,14 +60,13 @@ public class ProcessBatchStep : AsyncStep<BatchSyncData>
 
     private async Task<ApiResponse> CallApiAsync(int itemId, CancellationToken ct)
     {
-        var random = new Random();
-
-        // Simulate variable latency
-        var delay = random.Next(_minDelayMs, _maxDelayMs);
+        // Deterministic latency keeps tests stable while still simulating variance.
+        var delayRange = Math.Max(1, _maxDelayMs - _minDelayMs + 1);
+        var delay = _minDelayMs + (itemId % delayRange);
         await Task.Delay(delay, ct);
 
-        // Simulate success/failure based on configured rate
-        var randomValue = random.NextDouble();
+        // Deterministic routing keeps success/failure scenarios repeatable in CI.
+        var randomValue = ((itemId - 1) % 10) / 10.0;
 
         if (randomValue < _successRate)
         {

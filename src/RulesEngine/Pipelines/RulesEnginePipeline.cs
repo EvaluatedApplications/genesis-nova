@@ -1,3 +1,4 @@
+using EvalApp.Consumer;
 using EvalApp.Solid.Starter.Features.RulesEngine;
 using EvalApp.Solid.Starter.Features.RulesEngine.Context;
 
@@ -15,14 +16,12 @@ namespace EvalApp.Solid.Starter.Features.RulesEngine.Pipelines;
 ///
 /// Phase 4 Pattern:
 /// - Introduces PricingContext for domain-specific configuration
-/// - Prepares for ContextPureStep migration for better DI pattern teaching
+/// - Uses ContextPureStep for tax calculation so policy is injected, not hardcoded
 /// - Each step operates on immutable PricingData records
 /// 
 /// If/Else Pattern Demonstration:
-/// - Pipeline applies same logic regardless of VIP status (logic is data-driven, not control-flow)
-/// - The EvaluateEligibility and ApplyPromoRules steps handle VIP vs standard logic internally
-/// - Demonstrates that not all conditional logic needs If/Else branching in the pipeline
-/// - Sometimes data-driven rules within steps are cleaner than pipeline branching
+/// - The tutorial still uses data-driven rules inside steps for pricing decisions
+/// - Branching is shown in the cross-domain orchestration capstone instead
 /// 
 /// SOLID Benefits:
 /// - SRP: Each step is a single, focused responsibility.
@@ -36,12 +35,13 @@ public static class RulesEnginePipeline
         ICompiledPipeline<PricingData> pipeline = null!;
 
         Eval.App("RulesEngine")
-            .DefineDomain("Pricing")
+            .WithContext(NullGlobalContext.Instance)
+            .DefineDomain("Pricing", PricingContext.Default)
                 .DefineTask<PricingData>("CalculatePrice")
                     .AddStep("CalculateNetPrice", new CalculateNetPriceStep())
                     .AddStep("EvaluateEligibility", new EvaluateDiscountEligibilityStep())
-                    .AddStep("ApplyPromoRules", new ApplyPromotionRulesStep())
-                    .AddStep("ApplyTax", new ApplyTaxStep())
+                    .AddStep<ApplyPromotionRulesStep>("ApplyPromoRules")
+                    .AddStep<ApplyTaxStep>("ApplyTax")
                     .AddStep("CalculateFinalPrice", new CalculateFinalPriceStep())
                     .Run(out pipeline)
                 .Build();

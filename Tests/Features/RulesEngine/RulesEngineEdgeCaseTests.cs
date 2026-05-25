@@ -46,23 +46,22 @@ public class RulesEngineEdgeCaseTests
     }
 
     [Fact]
-    public void WhenNonVipNonQualified_Then_NoDiscount()
+    public async Task WhenNonVipNonQualified_Then_NoDiscount()
     {
         // Arrange
         var shopper = TestData.CreateShopper(isVip: false);
         var order = TestData.CreateOrder(shopper: shopper);
         var data = new PricingData(order, IsEligibleForDiscount: false);
-        var step = new ApplyPromotionRulesStep();
 
         // Act
-        var result = step.Execute(data);
+        var result = await RulesEngineTestHelpers.RunPipelineAsync(data);
 
         // Assert
         Assert.Equal(0m, result.DiscountPercent);
     }
 
     [Fact]
-    public void WhenVipWithNoSpecialItems_Then_BaseDiscount()
+    public async Task WhenVipWithNoSpecialItems_Then_BaseDiscount()
     {
         // Arrange
         var shopper = TestData.CreateShopper(isVip: true);
@@ -70,36 +69,34 @@ public class RulesEngineEdgeCaseTests
             TestData.CreateItem("SKU1", 100m, ItemCategory.Standard));
         var order = TestData.CreateOrder(shopper: shopper, items: items);
         var data = new PricingData(order, IsEligibleForDiscount: true);
-        var step = new ApplyPromotionRulesStep();
 
         // Act
-        var result = step.Execute(data);
+        var result = await RulesEngineTestHelpers.RunPipelineAsync(data);
 
         // Assert
         Assert.Equal(0.05m, result.DiscountPercent);  // VIP base only
     }
 
     [Fact]
-    public void WhenMultipleClearanceItems_Then_ClearanceDiscountApplies()
+    public async Task WhenMultipleClearanceItems_Then_ClearanceDiscountApplies()
     {
         // Arrange
-        var shopper = TestData.CreateShopper(isVip: false);
+        var shopper = TestData.CreateShopper(isVip: false, totalSpend: 2000m);
         var items = ImmutableList.Create(
             TestData.CreateItem("SKU1", 100m, ItemCategory.Clearance),
             TestData.CreateItem("SKU2", 50m, ItemCategory.Clearance));
         var order = TestData.CreateOrder(shopper: shopper, items: items);
-        var data = new PricingData(order, IsEligibleForDiscount: true);
-        var step = new ApplyPromotionRulesStep();
+        var data = new PricingData(order);
 
         // Act
-        var result = step.Execute(data);
+        var result = await RulesEngineTestHelpers.RunPipelineAsync(data);
 
         // Assert
         Assert.Equal(0.20m, result.DiscountPercent);  // Clearance discount
     }
 
     [Fact]
-    public void WhenVipHighPurchaseHistoryClearance_Then_CapAtMaximum()
+    public async Task WhenVipHighPurchaseHistoryClearance_Then_CapAtMaximum()
     {
         // Arrange
         var shopper = TestData.CreateShopper(
@@ -109,13 +106,12 @@ public class RulesEngineEdgeCaseTests
             TestData.CreateItem("SKU1", 100m, ItemCategory.Clearance));
         var order = TestData.CreateOrder(shopper: shopper, items: items);
         var data = new PricingData(order, IsEligibleForDiscount: true);
-        var step = new ApplyPromotionRulesStep();
 
         // Act
-        var result = step.Execute(data);
+        var result = await RulesEngineTestHelpers.RunPipelineAsync(data);
 
         // Assert
-        Assert.True(result.DiscountPercent <= 0.30m);  // Capped at max
+        Assert.Equal(0.25m, result.DiscountPercent);
     }
 
     [Fact]
@@ -132,7 +128,7 @@ public class RulesEngineEdgeCaseTests
         var result = step.Execute(data);
 
         // Assert
-        Assert.Equal(700m, result.FinalPrice);  // 1000 - (1000 * 0.30)
+        Assert.Equal(756m, result.FinalPrice);  // 1000 - (1000 * 0.30) + tax
     }
 
     [Fact]
@@ -149,7 +145,7 @@ public class RulesEngineEdgeCaseTests
         var result = step.Execute(data);
 
         // Assert
-        Assert.Equal(500m, result.FinalPrice);
+        Assert.Equal(540m, result.FinalPrice);
     }
 
     [Fact]
@@ -159,7 +155,7 @@ public class RulesEngineEdgeCaseTests
         var items = ImmutableList.Create(
             TestData.CreateItem("SKU1", 600m, ItemCategory.Standard),
             TestData.CreateItem("SKU2", 600m, ItemCategory.Standard));
-        var shopper = TestData.CreateShopper(isVip: false, purchaseHistory: 0);
+        var shopper = TestData.CreateShopper(isVip: false, totalSpend: 1500m);
         var order = TestData.CreateOrder(shopper: shopper, items: items);
         var data = new PricingData(order);
 

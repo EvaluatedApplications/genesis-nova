@@ -47,20 +47,20 @@ The **Saga pattern** (also called long-running transactions) solves this by:
 3. **Clear data flow** — saga data stores IDs needed for rollback
 4. **Testable failure paths** — mock services trigger failures, assert compensation
 
-### Saga Topology
+### Saga Topology (Simplified)
 
 ```
-BeginSagaStep (validate)
-  ↓
-ReserveInventoryStep [→ ReleaseReservationStep]
-  ↓ [gate: Database]
-ChargePaymentStep [→ RefundPaymentStep]
-  ↓ [gate: Network]
-ShipStep [→ CancelShipmentStep]
-  ↓ [gate: Network]
-EndSagaStep (finalize)
+ReserveInventoryStep (Database I/O)
+  ↓ [stores ReservationId for potential rollback]
+ChargePaymentStep (Payment Service I/O)
+  ↓ [stores ChargeAmount for potential refund]
+ShipStep (Shipment Service I/O)
+  ↓ [stores ShipmentId for potential cancellation]
+Complete
 
-If any step fails, compensations run in REVERSE order.
+Compensation Concept:
+- If Ship fails, ChargePayment and ReserveInventory failed as well (since pipeline stops)
+- Data record retains IDs needed for manual/async compensation in external system
 ```
 
 ### Data Model
@@ -79,14 +79,24 @@ public record OrderSagaData(
 public enum OrderState { Pending, Reserved, Charged, Shipped, Cancelled }
 ```
 
-### Compensation Semantics
+### Compensation Semantics (Fail-Stop Pattern)
 
-| Scenario | Happens | Compensation |
-|----------|---------|--------------|
-| All succeed | Pending → Reserved → Charged → Shipped | None |
-| Charge fails | Pending → Reserved → ✗ Charge | Release reservation |
-| Ship fails | Pending → Reserved → Charged → ✗ Ship | Refund + Release |
-| Refund fails | ✗ Refund (compensation itself fails) | Mark as orphaned/manual-review |
+In this simplified pipeline implementation, compensation is demonstrated through:
+
+1. **Pipeline Stops on First Failure** — If Ship fails, no further steps execute
+2. **Data Captures State** — ReservationId, ChargeAmount, ShipmentId are stored for reference
+3. **Manual/Async Compensation** — External system can read the saga data and:
+   - Use ShipmentId to cancel shipment
+   - Use ChargeAmount to initiate refund
+   - Use ReservationId to release inventory
+4. **Clear Responsibility** — Each step knows ONLY its forward logic; compensation is left to caller
+
+| Scenario | Result | What's Available for Cleanup |
+|----------|--------|------------------------------|
+| All succeed | OrderState = Shipped | (None needed) |
+| Charge fails | OrderState = Reserved, error set | ReservationId available for manual release |
+| Ship fails | OrderState = Charged, error set | ChargeAmount + ReservationId for manual refund/release |
+| Manual compensation | Cleanup happens in external system | Saga data provides all IDs needed |
 
 ### SOLID Principles Applied
 
@@ -207,7 +217,7 @@ public class ReleaseReservationStep : SideEffectStep<OrderSagaData>
 }
 ```
 
-### 4. Pipeline Builder
+### 4. Pipeline Builder (Simplified)
 
 ```csharp
 public static ICompiledPipeline<OrderSagaData> Build(
@@ -219,19 +229,22 @@ public static ICompiledPipeline<OrderSagaData> Build(
     ICompiledPipeline<OrderSagaData> pipeline = null!;
 
     Eval.App("OrderSaga")
-        .DefineDomain("Fulfillment")
+        .WithContext(NullGlobalContext.Instance)
+        .DefineDomain("Fulfillment", NullGlobalContext.Instance)
             .DefineTask<OrderSagaData>("ProcessOrder")
-                .AddStep("BeginSaga", new BeginSagaStep())
-                .AddStep("ReserveInventory", new ReserveInventoryStep(inventoryService),
-                    ResourceKind.Database)
-                // Compensation: if later steps fail, ReleaseReservationStep runs
-                .AddStep("ChargePayment", new ChargePaymentStep(paymentService, orderAmount),
-                    ResourceKind.Network)
-                // Compensation: if later steps fail, RefundPaymentStep runs
-                .AddStep("Ship", new ShipStep(shipmentService),
-                    ResourceKind.Network)
-                // Compensation: if saga fails here, CancelShipmentStep runs
-                .AddStep("EndSaga", new EndSagaStep())
+                // Sequential steps: if any fails, pipeline stops
+                .AddStep(
+                    "ReserveInventory",
+                    async (data, ct) =>
+                        await new ReserveInventoryStep(inventoryService).ExecuteAsync(data, ct))
+                .AddStep(
+                    "ChargePayment",
+                    async (data, ct) =>
+                        await new ChargePaymentStep(paymentService, orderAmount).ExecuteAsync(data, ct))
+                .AddStep(
+                    "Ship",
+                    async (data, ct) =>
+                        await new ShipStep(shipmentService).ExecuteAsync(data, ct))
                 .Run(out pipeline)
             .Build();
 
@@ -239,23 +252,13 @@ public static ICompiledPipeline<OrderSagaData> Build(
 }
 ```
 
-### 5. Gate Assignment (Resource Tuning)
+**Architecture:**
+- No explicit BeginSaga/EndSaga API — simpler pattern
+- Each step stores state in the data record (ReservationId, ChargeAmount, ShipmentId)
+- If a step fails, caller has all IDs needed for manual compensation
+- Test mocks can inject failures at any step
 
-```csharp
-.AddStep("ReserveInventory", new ReserveInventoryStep(...), ResourceKind.Database)
-//                                                           ↑ Database gate
-.AddStep("ChargePayment", new ChargePaymentStep(...), ResourceKind.Network)
-//                                                    ↑ Network gate
-.AddStep("Ship", new ShipStep(...), ResourceKind.Network)
-//                                ↑ Network gate
-```
-
-**Why?**
-- `WithTuning()` uses these gates to adaptively control concurrency
-- Database gate prevents connection pool exhaustion
-- Network gate prevents request flooding
-
-## Testing Saga Compensation
+## Testing Saga Pattern (Fail-Stop)
 
 ### Test: All Steps Succeed
 
@@ -279,38 +282,55 @@ public async Task WhenAllStepsSucceed_Then_OrderShipped()
 }
 ```
 
-### Test: Charge Fails, Reserve Compensated
+### Test: Charge Fails After Reserve
+
+In the fail-stop pattern, if Charge fails, the pipeline stops. ReservationId is available for caller to manually release:
 
 ```csharp
 [Fact]
-public async Task WhenChargeFailsAfterReserve_Then_ReservationCompensated()
+public async Task WhenChargeFailsAfterReserve_Then_DataHasReservationId()
 {
     var mockInventory = new MockInventoryService();
     var mockPayment = new MockPaymentService(shouldFail: true);  // ← Inject failure
+    var mockShipment = new MockShipmentService();
     
     var pipeline = OrderSagaPipeline.Build(mockInventory, mockPayment, mockShipment, 500m);
     var result = await pipeline.RunAsync(testOrder);
 
-    // After compensation runs:
-    Assert.Empty(mockInventory.GetActiveReservations());  // Released
-    Assert.Null(finalData.ReservationId);                 // Cleared
+    // Pipeline fails at ChargePayment step
+    Assert.True(result.IsFailure);
+    
+    // But ReservationId was captured for manual cleanup
+    if (result is PipelineResult<OrderSagaData>.Failure f)
+    {
+        // Caller can access f.Data.ReservationId to manually release inventory
+        Assert.NotNull(f.Data.ReservationId);
+    }
 }
 ```
 
-### Test: Compensation Failures Caught
+### Test: Ship Fails After Charge
 
 ```csharp
 [Fact]
-public async Task WhenCompensationFails_Then_ErrorLogged()
+public async Task WhenShipFailsAfterCharge_Then_DataHasIds()
 {
-    // Create mocks where refund itself fails
-    var mockPayment = new MockPaymentService(refundShouldFail: true);
+    var mockInventory = new MockInventoryService();
+    var mockPayment = new MockPaymentService();
+    var mockShipment = new MockShipmentService(shouldFail: true);  // ← Inject failure
     
+    var pipeline = OrderSagaPipeline.Build(mockInventory, mockPayment, mockShipment, 500m);
     var result = await pipeline.RunAsync(testOrder);
-    
-    // Saga framework catches this and marks order as orphaned/manual-review
+
+    // Pipeline fails at Ship step
     Assert.True(result.IsFailure);
-    Assert.Contains("compensation", result.Error);
+    
+    // Caller has both ReservationId and ChargeAmount for manual compensation
+    if (result is PipelineResult<OrderSagaData>.Failure f)
+    {
+        Assert.NotNull(f.Data.ReservationId);    // For release
+        Assert.NotNull(f.Data.ChargeAmount);     // For refund
+    }
 }
 ```
 

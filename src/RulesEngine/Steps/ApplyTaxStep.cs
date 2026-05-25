@@ -1,30 +1,28 @@
-namespace EvalApp.Solid.Starter.Features.RulesEngine;
+using EvalApp.Consumer;
 
 using EvalApp.Solid.Starter.Features.RulesEngine.Context;
+
+namespace EvalApp.Solid.Starter.Features.RulesEngine;
 
 /// <summary>
 /// Apply tax calculations based on order and pricing context.
 /// Demonstrates context-driven tax rate selection.
-/// Pure step: one responsibility, no I/O.
+/// ContextPureStep: one responsibility, no I/O, with injected domain policy.
 /// </summary>
-public class ApplyTaxStep : PureStep<PricingData>
+public class ApplyTaxStep : ContextPureStep<NullGlobalContext, PricingContext, PricingData>
 {
-    public override PricingData Execute(PricingData data)
+    protected override ValueTask<PricingData> TransformAsync(
+        PricingData data,
+        NullGlobalContext global,
+        PricingContext pricing,
+        CancellationToken ct)
     {
-        // For now, use default tax rate until we migrate to ContextPureStep
-        var pricingContext = PricingContext.Default;
-        return ApplyTax(data, pricingContext);
-    }
-
-    private static PricingData ApplyTax(PricingData data, PricingContext pricing)
-    {
-        // Calculate tax based on the current price (which includes discount)
+        ct.ThrowIfCancellationRequested();
         var tax = data.SubTotal * pricing.TaxRate;
-        
-        return data with
+        return ValueTask.FromResult(data with
         {
             Tax = tax,
             FinalPrice = data.SubTotal + tax
-        };
+        });
     }
 }

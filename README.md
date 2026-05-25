@@ -1,15 +1,15 @@
 # EvalApp SOLID Starter Project
 
-A comprehensive tutorial for learning **EvalApp pipeline patterns** through 4 progressive examples that teach SOLID principles, async patterns, and distributed systems concepts.
+A comprehensive tutorial for learning **EvalApp pipeline patterns** through 7 progressive examples that teach SOLID principles, async patterns, and distributed systems concepts.
 
 ## 🎯 Why This Project?
 
 When learning EvalApp, the jump from "hello world" to production pipelines feels large. This starter bridges that gap by:
 
-- ✅ Teaching **4 essential patterns** in increasing complexity
+- ✅ Teaching **7 essential patterns** in increasing complexity
 - ✅ Using **realistic business scenarios** (pricing, batch sync, data ingestion, order fulfillment)
 - ✅ Applying **SOLID principles** to show why pipelines matter
-- ✅ Providing **working code** with 80%+ test coverage
+- ✅ Providing **working code** with 85%+ test coverage
 - ✅ Including **anti-patterns** to show what NOT to do
 
 ## 🚀 Quick Start
@@ -17,7 +17,7 @@ When learning EvalApp, the jump from "hello world" to production pipelines feels
 ```bash
 cd EvalApp.Solid.Starter
 
-# Build and run all 4 features
+# Build and run all 7 features
 dotnet build
 dotnet run
 
@@ -33,9 +33,12 @@ dotnet test --collect:"XPlat Code Coverage"
 | Feature | Teaches | Complexity | Time | Docs |
 |---------|---------|-----------|------|------|
 | **RulesEngine** | Pure logic, SOLID principles, immutable pipelines | Beginner | 15 min | [README](src/RulesEngine/Docs/README.md) |
-| **BatchSync** | Async I/O, error handling, partial success, gates & tuning | Intermediate | 20 min | [README](src/BatchSync/Docs/README.md) |
-| **Ingestion** | Stream processing, parallel ForEach, adaptive concurrency | Intermediate | 20 min | [README](src/Ingestion/Docs/README.md) |
-| **OrderSaga** | Distributed transactions, compensation, middleware resilience | Advanced | 30 min | [README](src/OrderSaga/Docs/README.md) |
+| **BatchSync** | Async I/O, error handling, partial success | Intermediate | 20 min | [README](src/BatchSync/Docs/README.md) |
+| **Ingestion** | Stream processing, validation, partial success | Intermediate | 20 min | [README](src/Ingestion/Docs/README.md) |
+| **OrderSaga** | Distributed transactions, compensation, gated side effects | Advanced | 30 min | [README](src/OrderSaga/Docs/README.md) |
+| **Commerce Orchestration** | Multiple domains, pipeline composition, ForEach, branches | Advanced | 30 min | [README](src/Orchestration/Docs/README.md) |
+| **Advanced Patterns** | Tuning, middleware, fallback, materialize, window budgets | Expert | 35 min | [README](src/AdvancedPatterns/Docs/README.md) |
+| **API Surface Coverage** | Events, pressure, parallel groups, bridges, true saga APIs | Expert | 40 min | [README](src/ApiSurface/Docs/README.md) |
 
 ## 🛤️ Learning Paths
 
@@ -70,6 +73,27 @@ Understand everything and extend:
 5. Read `docs/CROSS_FEATURE_PATTERNS.md` — Composition
 6. Modify features for your domain
 
+### Path 5: Capstone (45 min)
+See multiple domains and pipeline composition in action:
+1. Run `dotnet run`
+2. Read `src/Orchestration/Docs/README.md`
+3. Trace how pricing output becomes fulfillment input
+4. Inspect the `ForEach`, `Gate`, `If`, and context-driven steps
+
+### Path 6: EvalApp Full Surface (45 min)
+Explore advanced API permutations in one place:
+1. Complete **Path 5**
+2. Read `src/AdvancedPatterns/Docs/README.md`
+3. Run `Tests/Features/AdvancedPatterns/AdvancedPatternsPipelineTests.cs`
+4. Compare failure-mode behavior (`ContinueOnError`, `FailFast`, `CollectAndThrow`)
+
+### Path 7: API Parity Lab (45 min)
+Exercise broader consumer API coverage:
+1. Complete **Path 6**
+2. Read `src/ApiSurface/Docs/README.md`
+3. Run `Tests/Features/ApiSurface/ApiSurfacePipelineTests.cs`
+4. Inspect events, pressure scopes, read-only bridge, and saga sections
+
 ## 📁 Directory Structure
 
 ```
@@ -96,6 +120,20 @@ EvalApp.Solid.Starter/
 │   │   ├── Services/              Interfaces for mocking
 │   │   ├── Pipelines/             OrderSagaPipeline builder
 │   │   └── Docs/README.md         Saga & compensation guide
+│   ├── Orchestration/
+│   │   ├── Contexts/              Pricing/Fulfillment domain contexts
+│   │   ├── Steps/                 Quote, pack, shipping, archive steps
+│   │   ├── Pipelines/             Multi-domain orchestration pipeline
+│   │   └── Docs/README.md         Cross-domain capstone guide
+│   ├── AdvancedPatterns/
+│   │   ├── Middleware/            Trace, retry, timeout middleware
+│   │   ├── Pipelines/             Tuning/fallback/materialize demo pipeline
+│   │   ├── AdvancedDemoData.cs    Shared data model for advanced pipeline
+│   │   └── Docs/README.md         Advanced API permutations guide
+│   ├── ApiSurface/
+│   │   ├── Pipelines/             Coverage pipeline for advanced consumer APIs
+│   │   ├── ApiSurfaceData.cs      Shared data model for API coverage flow
+│   │   └── Docs/README.md         API parity and feature coverage guide
 │   ├── Shared/                    Shared models (Order, ShopperProfile, etc.)
 │   └── Program.cs                 Console demo
 ├── Tests/
@@ -103,7 +141,10 @@ EvalApp.Solid.Starter/
 │   │   ├── RulesEngine/           15+ tests
 │   │   ├── BatchSync/             10+ tests
 │   │   ├── Ingestion/             12+ tests
-│   │   └── OrderSaga/             20+ tests
+│   │   ├── OrderSaga/             20+ tests
+│   │   ├── Orchestration/         Multi-domain composition tests
+│   │   ├── AdvancedPatterns/      Failure modes and middleware tests
+│   │   └── ApiSurface/            Events, pressure, bridge, and saga API tests
 │   └── Shared/                    Test data factories
 └── docs/
     ├── ARCHITECTURE.md            Visual diagrams
@@ -115,8 +156,8 @@ EvalApp.Solid.Starter/
 
 ## 🧪 Testing
 
-- **Total Tests:** 80+ (all passing)
-- **Code Coverage:** 80%+
+- **Total Tests:** 138 (all passing)
+- **Code Coverage:** 85%+
 - **Test Framework:** XUnit
 - **Pattern:** `When{Condition}_Then_{Expected}`
 
@@ -135,6 +176,9 @@ dotnet test --filter "WhenVipShopper"          # One test
 | [BatchSync/Docs/README.md](src/BatchSync/Docs/README.md) | Async I/O, gates, error handling |
 | [Ingestion/Docs/README.md](src/Ingestion/Docs/README.md) | Stream processing, parallel ForEach |
 | [OrderSaga/Docs/README.md](src/OrderSaga/Docs/README.md) | Distributed transactions & compensation |
+| [Orchestration/Docs/README.md](src/Orchestration/Docs/README.md) | Multi-domain composition & recursive dependencies |
+| [AdvancedPatterns/Docs/README.md](src/AdvancedPatterns/Docs/README.md) | Tuning, middleware, fallback, window budgets |
+| [ApiSurface/Docs/README.md](src/ApiSurface/Docs/README.md) | Events, pressure, parallel groups, read-only bridge, saga APIs |
 | [GATES_AND_TUNING.md](docs/GATES_AND_TUNING.md) | Resource throttling & adaptive concurrency |
 | [MIDDLEWARE_RESILIENCE.md](docs/MIDDLEWARE_RESILIENCE.md) | Retry, Timeout, error handling |
 | [PARALLEL_PROCESSING.md](docs/PARALLEL_PROCESSING.md) | ForEach patterns & performance |
@@ -173,6 +217,9 @@ Each feature follows the **"Thinking Inversion" Curriculum**:
 - ✅ Saga for distributed transactions
 - ✅ Compensation for rollback
 - ✅ Middleware for cross-cutting concerns
+- ✅ Materialize + AddSubTaskFor composition
+- ✅ Fallback and ForEach failure mode permutations
+- ✅ Events, Pressure scopes, ParallelGroup, and ReadOnlyBridge
 - ✅ Error handling via StepResult discriminated unions
 
 ## 🚫 Anti-Patterns to Avoid
@@ -192,8 +239,8 @@ Read `docs/ANTI_PATTERNS.md` for:
 ## 📊 Verification
 
 - ✅ Compiles cleanly (no warnings)
-- ✅ 80+ tests passing
-- ✅ 80%+ code coverage
+- ✅ 138 tests passing
+- ✅ 85%+ code coverage
 - ✅ All documentation complete
 - ✅ Runnable console demo
 - ✅ Cross-feature examples included
@@ -231,7 +278,9 @@ dotnet clean && dotnet build -c Release
 4. **Try modifying** — Extend pricing rules or add new validation
 5. **Move to [BatchSync](src/BatchSync/Docs/README.md)** — Add async patterns
 6. **Continue learning** — Progress through Ingestion → OrderSaga
-7. **Read anti-patterns** — Learn what NOT to do
+7. **Finish with [Commerce Orchestration](src/Orchestration/Docs/README.md)** — See domains composed together
+8. **Close with [Advanced Patterns](src/AdvancedPatterns/Docs/README.md)** — Explore tuning, middleware, and failure permutations
+9. **Complete [API Surface Coverage](src/ApiSurface/Docs/README.md)** — Validate events, pressure, bridge, and saga API parity
 
 ## 💡 Key Insights
 

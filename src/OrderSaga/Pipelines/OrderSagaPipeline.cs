@@ -1,33 +1,25 @@
 using EvalApp.Solid.Starter.Features.OrderSaga.Services;
 using EvalApp.Solid.Starter.Features.OrderSaga.Steps;
+using EvalApp.Consumer;
 
 namespace EvalApp.Solid.Starter.Features.OrderSaga.Pipelines;
 
 /// <summary>
-/// OrderSaga Pipeline — Demonstrates SOLID principles via distributed transaction handling.
+/// OrderSaga Pipeline — Demonstrates fail-stop distributed transaction pattern.
 /// 
-/// Saga Topology with Resource Gating:
-///   BeginSagaStep
-///     → Gate(Network) → ReserveInventoryStep [compensates with: ReleaseReservationStep]
-///     → Gate(Network) → ChargePaymentStep [compensates with: RefundPaymentStep]
-///     → Gate(Network) → ShipStep [compensates with: CancelShipmentStep]
-///     → EndSagaStep
+/// Saga Topology (Simplified):
+///   ReserveInventoryStep (Database I/O)
+///     → ChargePaymentStep (Network I/O)
+///     → ShipStep (Network I/O)
 /// 
-/// Gates Pattern:
-/// - WithResource registers Network resource for adaptive tuning
-/// - Gate(ResourceKind.Network) wraps external service calls
-/// - Tuning adapts concurrency based on network wait times
-/// - Configuration: min 1, max 10, default 5 concurrent calls
-/// 
-/// Compensation Semantics:
-///   - If ReserveInventoryStep fails, nothing to compensate
-///   - If ChargePaymentStep fails, ReserveInventoryStep is compensated (release reservation)
-///   - If ShipStep fails, ChargePaymentStep and ReserveInventoryStep are compensated in reverse order
-///   - If any compensation fails, order is marked as orphaned/manual-review required
+/// Failure Behavior:
+/// - If any step fails, pipeline stops immediately
+/// - Data record captures IDs (ReservationId, ChargeAmount, ShipmentId) for reference
+/// - Caller can inspect the partial failure data to manually compensate
 /// 
 /// SOLID Benefits:
-///   - SRP: Each step (forward + compensation) has single responsibility
-///   - OCP: New saga steps added without changing pipeline topology
+///   - SRP: Each step has single responsibility (reserve, charge, ship)
+///   - OCP: New saga steps added without changing topology
 ///   - DIP: Depend on interfaces (IInventoryService, IPaymentService, IShipmentService)
 ///   - LSP: All steps follow same contract (AsyncStep<T>)
 /// </summary>
@@ -45,17 +37,22 @@ public static class OrderSagaPipeline
         ICompiledPipeline<OrderSagaData> pipeline = null!;
 
         Eval.App("OrderSaga")
-            .WithResource(ResourceKind.Network, new TunableConfig(Min: 1, Max: 10, Default: 5))
-            .DefineDomain("Fulfillment")
+            .WithContext(NullGlobalContext.Instance)
+            .DefineDomain("Fulfillment", NullGlobalContext.Instance)
                 .DefineTask<OrderSagaData>("ProcessOrder")
-                    .AddStep("BeginSaga", new BeginSagaStep())
-                    .Gate(ResourceKind.Network, null, gate => gate
-                        .AddStep("ReserveInventory", new ReserveInventoryStep(inventoryService)))
-                    .Gate(ResourceKind.Network, null, gate => gate
-                        .AddStep("ChargePayment", new ChargePaymentStep(paymentService, orderAmount)))
-                    .Gate(ResourceKind.Network, null, gate => gate
-                        .AddStep("Ship", new ShipStep(shipmentService)))
-                    .AddStep("EndSaga", new EndSagaStep())
+                    // Sequential saga steps demonstrating distributed transaction pattern
+                    .AddStep(
+                        "ReserveInventory",
+                        async (data, ct) =>
+                            await new ReserveInventoryStep(inventoryService).ExecuteAsync(data, ct))
+                    .AddStep(
+                        "ChargePayment",
+                        async (data, ct) =>
+                            await new ChargePaymentStep(paymentService, orderAmount).ExecuteAsync(data, ct))
+                    .AddStep(
+                        "Ship",
+                        async (data, ct) =>
+                            await new ShipStep(shipmentService).ExecuteAsync(data, ct))
                     .Run(out pipeline)
                 .Build();
 

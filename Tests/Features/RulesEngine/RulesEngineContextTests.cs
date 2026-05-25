@@ -66,7 +66,7 @@ public class RulesEngineContextTests
     public async Task WhenClearanceItems_Then_AppliesClearanceDiscount()
     {
         // Arrange
-        var shopper = TestData.CreateShopper(isVip: false);
+        var shopper = TestData.CreateShopper(isVip: false, totalSpend: 2000m);
         var items = ImmutableList.Create(
             TestData.CreateItem("CLEARANCE-1", 50m, ItemCategory.Clearance));
         var order = TestData.CreateOrder(shopper: shopper, items: items);
@@ -212,5 +212,4 @@ public class RulesEngineContextTests
         Assert.Equal(0.08m, context.TaxRate);
     }
 }
-
 

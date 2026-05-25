@@ -1,3 +1,5 @@
+using EvalApp.Consumer;
+using EvalApp.Solid.Starter.Features.RulesEngine.Context;
 using EvalApp.Solid.Starter.Shared;
 
 namespace EvalApp.Solid.Starter.Features.RulesEngine;
@@ -6,27 +8,42 @@ namespace EvalApp.Solid.Starter.Features.RulesEngine;
 /// Apply discount rules based on promotion code and eligibility.
 /// Pure step: one responsibility, no I/O.
 /// </summary>
-public class ApplyPromotionRulesStep : PureStep<PricingData>
+public class ApplyPromotionRulesStep : ContextPureStep<NullGlobalContext, PricingContext, PricingData>
 {
-    public override PricingData Execute(PricingData data)
+    protected override ValueTask<PricingData> TransformAsync(
+        PricingData data,
+        NullGlobalContext global,
+        PricingContext pricing,
+        CancellationToken ct)
     {
-        decimal discount = 0m;
+        ct.ThrowIfCancellationRequested();
 
         if (!data.IsEligibleForDiscount)
-            return data with { DiscountPercent = 0m };
+        {
+            return ValueTask.FromResult(data with
+            {
+                DiscountPercent = 0m,
+                PromotionDiscount = 0m
+            });
+        }
+
+        var specialDiscount = data.Order.Shopper.IsVip ? 0m : pricing.BaseDiscount;
 
         // Rule: Clearance items get 20% off
         if (data.Order.Items.Any(i => i.Category == ItemCategory.Clearance))
-            discount = 0.20m;
+            specialDiscount = Math.Max(specialDiscount, 0.20m);
 
         // Rule: SUMMER20 promo = 15% off
         if (data.Order.PromotionCode == "SUMMER20")
-            discount = Math.Max(discount, 0.15m);
+            specialDiscount = Math.Max(specialDiscount, 0.15m);
 
-        // Rule: VIP gets additional 5% on top
-        if (data.Order.Shopper.IsVip)
-            discount = Math.Min(discount + 0.05m, 0.50m); // Cap at 50%
+        var vipBonus = data.Order.Shopper.IsVip ? pricing.VipLoyaltyBonus : 0m;
+        var discount = Math.Min(specialDiscount + vipBonus, pricing.VipDiscount);
 
-        return data with { DiscountPercent = discount };
+        return ValueTask.FromResult(data with
+        {
+            DiscountPercent = discount,
+            PromotionDiscount = specialDiscount
+        });
     }
 }

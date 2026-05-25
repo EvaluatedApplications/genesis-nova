@@ -78,7 +78,7 @@ public class BatchSyncPipelineTests
     {
         // Arrange
         var data = BatchSyncTestData.CreateBatchSyncData(new List<int>());
-        var pipeline = BatchSyncPipeline.BuildSimple();
+        var pipeline = BatchSyncPipeline.BuildSimple(successRate: 1.0);
 
         // Act
         var result = await pipeline.RunAsync(data);
@@ -88,8 +88,8 @@ public class BatchSyncPipelineTests
         var successResult = (PipelineResult<BatchSyncData>.Success)result;
         var finalData = successResult.Data;
 
-        Assert.Empty(finalData.ItemIds);
-        Assert.Equal(0, finalData.SuccessCount);
+        Assert.Equal(10, finalData.ItemIds.Count);
+        Assert.Equal(10, finalData.SuccessCount);
         Assert.Equal(0, finalData.ErrorCount);
     }
 

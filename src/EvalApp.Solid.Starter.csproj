@@ -6,6 +6,6 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="EvalApp.Consumer" Version="1.0.7" />
+    <PackageReference Include="EvalApp.Consumer" Version="1.0.12" />
   </ItemGroup>
 </Project>

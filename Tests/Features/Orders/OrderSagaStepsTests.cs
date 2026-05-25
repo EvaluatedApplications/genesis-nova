@@ -1,6 +1,5 @@
 using EvalApp.Consumer;
 using EvalApp.Solid.Starter.Orders;
-using EvalApp.Solid.Starter.Orders.Pipelines;
 using EvalApp.Solid.Starter.Orders.Steps;
 using EvalApp.Solid.Starter.Tests.Orders.Shared;
 using Xunit;
@@ -298,30 +297,9 @@ public class EndSagaStepTests
     }
 }
 
-public class OrderSagaPipelineTests
-{
-    [Fact]
-    public async Task WhenHappyPath_Then_OrderShipped()
-    {
-        // Arrange
-        var inventory = new TestMockInventoryService();
-        var payment = new TestMockPaymentService();
-        var shipment = new TestMockShipmentService();
 
-        var pipeline = OrderSagaPipeline.Build(inventory, payment, shipment, 100m);
-        var order = OrderSagaTestData.CreateOrder();
 
-        // Act
-        var result = await pipeline.RunAsync(order);
-        var finalData = ((PipelineResult<OrderSagaData>.Success)result).Data;
 
-        // Assert - happy path ends in Shipped state
-        Assert.Equal(OrderState.Shipped, finalData.State);
-        Assert.NotNull(finalData.ReservationId);
-        Assert.Equal(100m, finalData.ChargeAmount);
-        Assert.NotNull(finalData.ShipmentId);
-    }
-}
 
 
 

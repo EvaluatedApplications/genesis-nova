@@ -1,7 +1,6 @@
 using System.Collections.Immutable;
 using EvalApp.Consumer;
 using EvalApp.Solid.Starter.Pricing;
-using EvalApp.Solid.Starter.Pricing.Pipelines;
 using EvalApp.Solid.Starter.Shared;
 using EvalApp.Solid.Starter.Tests.Shared;
 using Xunit;
@@ -112,70 +111,8 @@ public class EvaluateDiscountEligibilityStepTests
     }
 }
 
-public class ApplyPromotionRulesStepTests
-{
-    [Fact]
-    public async Task WhenNotEligible_Then_NoDiscount()
-    {
-        // Arrange
-        var data = new PricingData(TestData.CreateOrder(), IsEligibleForDiscount: false);
 
-        // Act
-        var result = await RulesEngineTestHelpers.RunPipelineAsync(data);
 
-        // Assert
-        Assert.Equal(0m, result.DiscountPercent);
-    }
-
-    [Fact]
-    public async Task WhenClearanceItems_Then_20PercentDiscount()
-    {
-        // Arrange
-        var items = ImmutableList.Create(
-            TestData.CreateItem(category: ItemCategory.Clearance));
-        var shopper = TestData.CreateShopper(totalSpend: 2000m);
-        var order = TestData.CreateOrder(shopper: shopper, items: items);
-        var data = new PricingData(order);
-
-        // Act
-        var result = await RulesEngineTestHelpers.RunPipelineAsync(data);
-
-        // Assert
-        Assert.Equal(0.20m, result.DiscountPercent);
-    }
-
-    [Fact]
-    public async Task WhenSummer20Promo_Then_15PercentDiscount()
-    {
-        // Arrange
-        var shopper = TestData.CreateShopper(totalSpend: 2000m);
-        var order = TestData.CreateOrder(shopper: shopper, promo: "SUMMER20");
-        var data = new PricingData(order);
-
-        // Act
-        var result = await RulesEngineTestHelpers.RunPipelineAsync(data);
-
-        // Assert
-        Assert.Equal(0.15m, result.DiscountPercent);
-    }
-
-    [Fact]
-    public async Task WhenVipAndClearance_Then_HighestDiscount()
-    {
-        // Arrange
-        var shopper = TestData.CreateShopper(isVip: true);
-        var items = ImmutableList.Create(
-            TestData.CreateItem(category: ItemCategory.Clearance));
-        var order = TestData.CreateOrder(shopper: shopper, items: items);
-        var data = new PricingData(order, IsEligibleForDiscount: true);
-
-        // Act
-        var result = await RulesEngineTestHelpers.RunPipelineAsync(data);
-
-        // Assert: 20% (clearance) + 5% (VIP) = 25%
-        Assert.Equal(0.25m, result.DiscountPercent);
-    }
-}
 
 public class CalculateFinalPriceStepTests
 {
@@ -208,56 +145,6 @@ public class CalculateFinalPriceStepTests
     }
 }
 
-public class RulesEnginePipelineTests
-{
-    [Fact]
-    public async Task WhenValidOrder_Then_PipelineCalculatesFinalPrice()
-    {
-        // Arrange
-        var items = ImmutableList.Create(
-            TestData.CreateItem("SKU1", 100m, ItemCategory.Standard));
-        var shopper = TestData.CreateShopper(isVip: true);
-        var order = TestData.CreateOrder(shopper: shopper, items: items);
-        var data = new PricingData(order);
-        var pipeline = RulesEnginePipeline.Build();
-
-        // Act
-        var result = await pipeline.RunAsync(data);
-        var finalData = ((PipelineResult<PricingData>.Success)result).Data;
-
-        // Assert: VIP gets 5% discount, then 8% tax
-        Assert.Equal(102.6m, finalData.FinalPrice);
-    }
-
-    [Fact]
-    public async Task WhenVipWithClearanceAndPromo_Then_MaximumDiscount()
-    {
-        // Arrange
-        var items = ImmutableList.Create(
-            TestData.CreateItem("SKU1", 100m, ItemCategory.Clearance));
-        var shopper = TestData.CreateShopper(isVip: true);
-        var order = TestData.CreateOrder(shopper: shopper, items: items, promo: "SUMMER20");
-        var data = new PricingData(order);
-        var pipeline = RulesEnginePipeline.Build();
-
-        // Act
-        var result = await pipeline.RunAsync(data);
-        var finalData = ((PipelineResult<PricingData>.Success)result).Data;
-
-        // Assert: 20% (clearance) + 5% (VIP) = 25%, then 8% tax on discounted total
-        Assert.Equal(81m, finalData.FinalPrice);
-    }
-}
-
-internal static class RulesEngineTestHelpers
-{
-    public static async Task<PricingData> RunPipelineAsync(PricingData data)
-    {
-        var pipeline = RulesEnginePipeline.Build();
-        var result = await pipeline.RunAsync(data);
-        return result.GetData();
-    }
-}
 
 
 

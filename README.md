@@ -67,14 +67,16 @@ dotnet test
 
 ## Service Documentation
 
-Each feature README links EvalApp capabilities to SOLID decisions:
+Each service README links EvalApp capabilities to SOLID principles:
 
-- `src/Pricing/Docs/README.md`
-- `src/Accounting/Docs/README.md`
-- `src/Catalog/Docs/README.md`
-- `src/Orders/Docs/README.md`
-- `src/Commerce/Docs/README.md`
-- `src/Analytics/Docs/README.md`
-- `src/Platform/Docs/README.md`
+| Service | Purpose | Documentation |
+|---------|---------|---|
+| **Pricing** | Personalized, policy-driven pricing | [Read](src/Pricing/Docs/README.md) |
+| **Orders** | Multi-step fulfillment with saga pattern | [Read](src/Orders/Docs/README.md) |
+| **Catalog** | Feed intake with validation and quarantine | [Read](src/Catalog/Docs/README.md) |
+| **Accounting** | Nightly settlement reconciliation | [Read](src/Accounting/Docs/README.md) |
+| **Commerce** | End-to-end quote-to-fulfillment orchestration | [Read](src/Commerce/Docs/README.md) |
+| **Analytics** | Resilient low-latency processing under load | [Read](src/Analytics/Docs/README.md) |
+| **Platform** | API surface and parity validation | [Read](src/Platform/Docs/README.md) |
 
 

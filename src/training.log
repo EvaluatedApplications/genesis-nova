@@ -1,0 +1,16 @@
+Using launch settings from C:\Users\cex\repos-working\genesis-nova\src\Properties\launchSettings.json...
+Building...
+runtime backend=Cpu hidden=32 deterministic=False parallelMath=True threads=16
+Unhandled exception. System.InvalidOperationException: Pipeline failed.
+ ---> System.IO.FileNotFoundException: Training file not found: C:\Users\cex\repos-working\genesis-nova\data\simple_patterns.txt
+File name: 'C:\Users\cex\repos-working\genesis-nova\data\simple_patterns.txt'
+   at GenesisNova.Train.GenesisTrainingDataLoader.LoadFromFile(String path) in C:\Users\cex\repos-working\genesis-nova\src\GenesisNova\Train\GenesisTrainingDataLoader.cs:line 10
+   at GenesisNova.Runtime.GenesisEvalAppRuntime.<>c.<.ctor>b__12_0(GenesisTrainTaskData data) in C:\Users\cex\repos-working\genesis-nova\src\GenesisNova\Runtime\GenesisEvalAppRuntime.cs:line 48
+   at EvalApp.Steps.FuncStep`1.<>c__DisplayClass1_0.<.ctor>b__0(T data, CancellationToken _)
+   at EvalApp.Steps.FuncStep`1.ExecuteAsync(T data, StepContext context, CancellationToken ct)
+   --- End of inner exception stack trace ---
+   at GenesisNova.Runtime.GenesisEvalAppRuntime.ExtractData[T](PipelineResult`1 result) in C:\Users\cex\repos-working\genesis-nova\src\GenesisNova\Runtime\GenesisEvalAppRuntime.cs:line 425
+   at GenesisNova.Runtime.GenesisEvalAppRuntime.TrainAsync(String filePath, Int32 epochs, Nullable`1 introspectionCyclesPerEpoch, String savePath, String logPath) in C:\Users\cex\repos-working\genesis-nova\src\GenesisNova\Runtime\GenesisEvalAppRuntime.cs:line 227
+   at GenesisNova.Runtime.GenesisCli.TryHandleAsync(String[] args) in C:\Users\cex\repos-working\genesis-nova\src\GenesisNova\Runtime\GenesisCli.cs:line 81
+   at Program.<Main>$(String[] args) in C:\Users\cex\repos-working\genesis-nova\src\Program.cs:line 2
+   at Program.<Main>(String[] args)

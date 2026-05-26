@@ -1,0 +1,10 @@
+what is -9 plus 3? => -6
+ok => ok!
+9 minus 1 => 8
+the difference of -6 and 4 => -10
+-7 plus -5 => -12
+7 * 3 => 21
+6 divided by 7 => 0.86
+hello => hello!
+help => I can answer questions and solve problems.
+what is the capital of france => Paris.

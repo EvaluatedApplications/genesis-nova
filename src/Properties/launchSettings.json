@@ -1,0 +1,14 @@
+{
+  "profiles": {
+    "Genesis Nova Platform": {
+      "commandName": "Project",
+      "dotnetRunMessages": true
+    },
+    "Genesis Nova REPL": {
+      "commandName": "Project",
+      "dotnetRunMessages": true,
+      "commandLineArgs": "--genesis-repl"
+    }
+  }
+}
+

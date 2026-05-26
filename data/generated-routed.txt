@@ -1,0 +1,50 @@
+what is the capital of spain => Madrid. | route=7
+ok => ok! | route=6
+-7 plus -9 => -16 | route=1
+what is -9 plus 3? => -6 | route=1
+add 7 -6 => 1 | route=1
+what is -8 minus -6? => -2 | route=2
+9 times 7 => 63 | route=3
+-8 + -1 => -9 | route=1
+how are you => I'm doing well, thanks! | route=5
+good morning => good morning! | route=5
+sub -6 4 => -10 | route=2
+got it => got it! | route=6
+hey => hey! | route=5
+start => ready! | route=8
+hi => hi there! | route=5
+what is the capital of france => Paris. | route=7
+good afternoon => good afternoon! | route=5
+go => going! | route=8
+the product of 6 and 5 => 30 | route=3
+9 - 1 => 8 | route=2
+what is -7 plus -5? => -12 | route=1
+9 / 1 => 9 | route=4
+help => I can answer questions and solve problems. | route=8
+sure => sure! | route=6
+what is the sun => The sun is a star. | route=7
+8 / 7 => 1.14 | route=4
+add -8 -8 => -16 | route=1
+what is 6 divided by 7? => 0.86 | route=4
+wait => waiting. | route=8
+the difference of 8 and 6 => 2 | route=2
+the product of 7 and 6 => 42 | route=3
+what is the capital of england => London. | route=7
+hello => hello! | route=5
+what is the capital of japan => Tokyo. | route=7
+yes => yes! | route=6
+stop => ok. | route=8
+what is 8 plus -5? => 3 | route=1
+8 minus 1 => 7 | route=2
+understood => understood! | route=6
+7 divided by 4 => 1.75 | route=4
+what is the capital of germany => Berlin. | route=7
+the product of 7 and 3 => 21 | route=3
+divide 6 by 8 => 0.75 | route=4
+what is 8 divided by 4? => 2 | route=4
+multiply 10 by 2 => 20 | route=3
+thank you => you're welcome! | route=6
+what is 6 times 5? => 30 | route=3
+what is -8 minus 7? => -15 | route=2
+think => thinking... | route=8
+sub -8 -9 => 1 | route=2

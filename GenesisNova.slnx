@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/Solution Items/">
+    <File Path="README.md" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/GenesisNova.csproj" />
+  </Folder>
+  <Folder Name="/Tests/">
+    <Project Path="Tests/GenesisNova.Tests.csproj" />
+  </Folder>
+</Solution>

@@ -1,0 +1,8 @@
+# Minimal bootstrap corpus
+2+2 => 4 | route=1
+3+5 => 8 | route=1
+6*7 => 42 | route=1
+say hello => hello | route=2
+say green => green | route=2
+who are you => i am genesis nova | route=3
+add 1 1 => 2 | route=1

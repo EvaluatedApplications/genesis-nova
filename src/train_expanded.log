@@ -1,0 +1,3 @@
+Using launch settings from C:\Users\cex\repos-working\genesis-nova\src\Properties\launchSettings.json...
+autoscale vram totalMb=6144 freeMb=5994 targetUtil=0.90 reserveMb=512 hidden=8192
+runtime backend=Gpu hidden=8192 deterministic=False parallelMath=True threads=16

@@ -1,11 +1,15 @@
 using GenesisNova.Data;
 using GenesisNova.Runtime;
+using System.Diagnostics;
 
 namespace GenesisNova.Repl;
 
 public sealed class GenesisRepl
 {
     private readonly GenesisEvalAppRuntime _runtime;
+    private CancellationTokenSource? _idleIntrospectionCts;
+    private Task? _idleIntrospectionTask;
+    private bool _verbose = false;
 
     public GenesisRepl(GenesisEvalAppRuntime? runtime = null)
     {
@@ -15,7 +19,7 @@ public sealed class GenesisRepl
     public async Task RunAsync(CancellationToken ct = default)
     {
         Console.WriteLine("Genesis Nova REPL (differentiable core)");
-        Console.WriteLine("Commands: train, trainfile, predict, introspect, concept, relate, queue, save, load, stats, context, compact, reset, help, exit");
+        Console.WriteLine("Type 'help' for commands. Type 'introspect-idle' to enable background introspection.");
 
         while (!ct.IsCancellationRequested)
         {
@@ -37,7 +41,7 @@ public sealed class GenesisRepl
 
             try
             {
-                var output = await HandleAsync(trimmed);
+                var output = await HandleAsync(trimmed, ct);
                 if (!string.IsNullOrWhiteSpace(output))
                     Console.WriteLine(output);
                 await _runtime.ObserveConversationAsync(trimmed, output ?? string.Empty, resetSignal: trimmed.Equals("reset", StringComparison.OrdinalIgnoreCase));
@@ -48,16 +52,40 @@ public sealed class GenesisRepl
             }
         }
 
+        // Stop idle introspection on exit
+        await StopIdleIntrospectionAsync();
     }
 
-    private async Task<string?> HandleAsync(string line)
+    private async Task<string?> HandleAsync(string line, CancellationToken ct)
     {
+        if (line.Equals("introspect-idle", StringComparison.OrdinalIgnoreCase))
+        {
+            if (_idleIntrospectionTask != null)
+                return "idle introspection already running";
+            StartIdleIntrospection();
+            return "idle introspection started (runs continuously in background)";
+        }
+
+        if (line.Equals("introspect-stop", StringComparison.OrdinalIgnoreCase))
+        {
+            await StopIdleIntrospectionAsync();
+            return "idle introspection stopped";
+        }
+
+        if (line.Equals("verbose", StringComparison.OrdinalIgnoreCase))
+        {
+            _verbose = !_verbose;
+            return $"verbose mode: {(_verbose ? "ON" : "OFF")}";
+        }
+
         if (line.StartsWith("trainfile ", StringComparison.OrdinalIgnoreCase))
         {
             var payload = line["trainfile ".Length..].Trim();
             var (path, epochs) = ParsePathAndEpochs(payload);
+            var sw = Stopwatch.StartNew();
             var report = await _runtime.TrainAsync(path, epochs);
-            return $"trained examples={report.ExampleCount} epochs={report.Epochs} loss={report.AverageLoss.TotalLoss:F4}";
+            sw.Stop();
+            return $"trained examples={report.ExampleCount} epochs={report.Epochs} loss={report.AverageLoss.TotalLoss:F4} time={sw.ElapsedMilliseconds / 1000.0:F2}s";
         }
 
         if (line.StartsWith("train ", StringComparison.OrdinalIgnoreCase))
@@ -144,6 +172,57 @@ public sealed class GenesisRepl
         return "unknown command";
     }
 
+    private void StartIdleIntrospection()
+    {
+        _idleIntrospectionCts = new CancellationTokenSource();
+        _idleIntrospectionTask = Task.Run(async () =>
+        {
+            var cycleCount = 0;
+            while (!_idleIntrospectionCts.Token.IsCancellationRequested)
+            {
+                try
+                {
+                    cycleCount++;
+                    var state = await _runtime.IntrospectAsync(1);
+                    if (_verbose && cycleCount % 10 == 0)
+                        Console.WriteLine($"[idle] introspected={cycleCount} queue={state.QueueDepth}");
+                    await Task.Delay(100, _idleIntrospectionCts.Token);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    if (_verbose)
+                        Console.WriteLine($"[idle] error: {ex.Message}");
+                }
+            }
+        });
+    }
+
+    private async Task StopIdleIntrospectionAsync()
+    {
+        if (_idleIntrospectionCts != null)
+        {
+            _idleIntrospectionCts.Cancel();
+            if (_idleIntrospectionTask != null)
+            {
+                try
+                {
+                    await _idleIntrospectionTask;
+                }
+                catch (OperationCanceledException)
+                {
+                    // Expected
+                }
+            }
+            _idleIntrospectionCts.Dispose();
+            _idleIntrospectionCts = null;
+            _idleIntrospectionTask = null;
+        }
+    }
+
     private static (string Path, int Epochs) ParsePathAndEpochs(string payload)
     {
         var parts = payload.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
@@ -185,19 +264,28 @@ public sealed class GenesisRepl
 
     private static void PrintHelp()
     {
-        Console.WriteLine("train <input> => <output> [| route=N]");
-        Console.WriteLine("trainfile <path> [epochs]");
-        Console.WriteLine("predict <input>");
-        Console.WriteLine("introspect [cycles]");
-        Console.WriteLine("concept <name>");
-        Console.WriteLine("relate <left> <right> <contradiction0to1>");
-        Console.WriteLine("queue");
-        Console.WriteLine("save <path>");
-        Console.WriteLine("load <path>");
-        Console.WriteLine("stats");
-        Console.WriteLine("context");
-        Console.WriteLine("compact");
-        Console.WriteLine("reset");
-        Console.WriteLine("exit");
+        Console.WriteLine("\n=== Training ===");
+        Console.WriteLine("train <input> => <output> [| route=N]     - Train single example");
+        Console.WriteLine("trainfile <path> [epochs]                 - Train from file");
+        Console.WriteLine("\n=== Introspection ===");
+        Console.WriteLine("introspect [cycles]                       - Manual introspection");
+        Console.WriteLine("introspect-idle                           - Start background introspection");
+        Console.WriteLine("introspect-stop                           - Stop background introspection");
+        Console.WriteLine("\n=== Queries ===");
+        Console.WriteLine("predict <input>                           - Generate output");
+        Console.WriteLine("concept <name>                            - Describe concept");
+        Console.WriteLine("relate <left> <right> <contradiction>    - Add relation");
+        Console.WriteLine("queue                                     - Queue depth");
+        Console.WriteLine("stats                                     - Model statistics");
+        Console.WriteLine("context                                   - Conversation brief");
+        Console.WriteLine("\n=== State ===");
+        Console.WriteLine("save <path>                               - Save checkpoint");
+        Console.WriteLine("load <path>                               - Load checkpoint");
+        Console.WriteLine("compact                                   - Compact memory");
+        Console.WriteLine("reset                                     - Reset signal");
+        Console.WriteLine("verbose                                   - Toggle verbose mode");
+        Console.WriteLine("help                                      - This help");
+        Console.WriteLine("exit                                      - Exit REPL");
+        Console.WriteLine();
     }
 }

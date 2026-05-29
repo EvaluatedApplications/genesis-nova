@@ -1,68 +1,76 @@
 # Genesis Nova
 
-Genesis Nova is a compact ML research runtime for learning symbolic and conversational transforms on top of EvalApp.
+Genesis Nova is an experimental ML system for learning how text, symbols, and conceptual structure map to one another. It is not a productized chatbot; it is a research runtime for training a small neural model, observing what it learns, and checking whether learned structure is reusable at inference time.
 
-## What this release contains
+## What it is trying to do
 
-- An immutable-record training pipeline
-- A token-based neural model with inference-time routing
-- Platonic memory / concept tracking for learned structure
-- A REPL for training, querying, and inspection
-- A UI training panel for model compression presets
-- Checkpoint persistence and local conversation memory
-- Genesis-focused tests covering training, inference, and discovery
+At a high level, the app learns from paired examples like:
 
-## What changed in this iteration
+```text
+input -> output
+```
 
-- Removed route labels from the training data contract
-- Removed the old supervised route head path from training
-- Kept routing as an inference-time behavior
-- Added optional L2 compression, but defaulted it to `0.0`
-- Added UI and REPL controls so compression can be enabled later
-- Removed the legacy introspection engine and related dead surfaces
+Over time it tries to discover:
 
-## Architecture
+- direct token patterns
+- arithmetic transforms
+- concept relationships in memory
+- when a request should be answered by the neural model vs. by learned structure
 
-The system is organized around a few core pieces:
+The goal is to keep the core model simple and general-purpose, while letting learned representations carry the useful structure instead of hardcoded rules.
 
-- `src/GenesisNova/Data/` defines training examples and data generators
-- `src/GenesisNova/Train/` loads examples, shapes batches, and runs optimization
-- `src/GenesisNova/Model/` owns the neural model, training step, and inference primitives
-- `src/GenesisNova/Cognition/` tracks concepts, transforms, and platonic-space structure
-- `src/GenesisNova/Infer/` decides how a request is answered at runtime
-- `src/GenesisNova/Runtime/` ties together CLI, memory, and checkpoint state
-- `src/GenesisNova/UI/` exposes the training controls in the desktop UI
+## What is inside
 
-The design goal is to keep the model representation and inference path central, while moving away from hand-coded routing heuristics and dead complexity.
+- **Training pipeline**: reads examples, tokenizes them, and updates the model
+- **Neural model**: predicts next tokens and supports inference-time routing
+- **Platonic memory**: stores concepts, relations, and discovered transforms
+- **Inference engine**: decides how to answer a request
+- **REPL and UI**: tools for training, inspection, and hyperparameter control
+- **Checkpointing**: saves and restores model state locally
 
-## Training flow
+## How training works
 
-1. Read a `GenesisExample`
-2. Tokenize input and target text
-3. Run the neural training step
-4. Update platonic memory and transform discovery
-5. Clone parameters when needed to break the autograd graph
+1. Load an example such as `say hello -> hello`
+2. Convert the text into tokens
+3. Train the neural model on the target sequence
+4. Update concept memory and transform discovery from the same example
+5. Repeat across many examples so the model generalizes
 
-Compression is opt-in only. The default setting is `L2 = 0.0` so learning is not constrained during normal training.
+The current default keeps L2 compression off (`0.0`) so the model can learn freely. Compression is still available as an option if the model starts to grow too large later.
 
-## Inference flow
+## How inference works
 
-1. Encode the request
-2. Decide whether the request can be answered directly or should use learned structure
-3. Generate tokens
-4. Optionally consult platonic memory and checkpoint context
+When you ask the model something, it:
+
+1. Encodes the input
+2. Checks whether a learned transform or concept chain can answer directly
+3. Falls back to neural token generation when needed
+4. Optionally uses memory or checkpoint context to bias the output
+
+So the system is trying to combine two things:
+
+- **neural prediction**
+- **structured learned memory**
+
+## Main code areas
+
+- `src/GenesisNova/Data/` — example definitions and data generators
+- `src/GenesisNova/Train/` — training orchestration
+- `src/GenesisNova/Model/` — neural model and optimization step
+- `src/GenesisNova/Cognition/` — concepts, transforms, and memory structures
+- `src/GenesisNova/Infer/` — routing and generation logic
+- `src/GenesisNova/Runtime/` — CLI, conversation memory, checkpoint flow
+- `src/GenesisNova/UI/` — training controls in the desktop UI
 
 ## Controls
 
 ### REPL
 
-Run:
-
 ```bash
 dotnet run --project src\GenesisNova.csproj -- --genesis-repl
 ```
 
-Useful commands include:
+Useful commands:
 
 - `train <input> => <output>`
 - `trainfile <path> [epochs]`
@@ -74,7 +82,7 @@ Useful commands include:
 
 ### UI
 
-The Training tab includes L2 preset selection:
+The Training tab includes L2 presets:
 
 - `off`
 - `mild`
@@ -96,4 +104,3 @@ Training examples live in `data/`. The main corpus is:
 ```text
 data\genesis-nova-train-expanded.txt
 ```
-

@@ -1,56 +1,46 @@
 # Genesis Nova
 
-Genesis Nova is an experimental ML system for learning how text, symbols, and conceptual structure map to one another. It is not a productized chatbot; it is a research runtime for training a small neural model, observing what it learns, and checking whether learned structure is reusable at inference time.
+Genesis Nova is a research prototype for building a learned reasoning substrate around text, symbols, and reusable concept structure. It is not a finished assistant or a productized chatbot; it is an experimental ML app that was built to show what the system can learn, retain, and reuse.
 
-## What it is trying to do
+## What we built
 
-At a high level, the app learns from paired examples like:
+At the user level, this project gives you a small but complete research environment:
 
-```text
-input -> output
-```
+- a training loop for example-driven learning
+- a model that can generate outputs from prompts
+- a structured memory layer for concepts and discovered transforms
+- a REPL for experimentation
+- a desktop UI for training controls
+- checkpoint save/load support
+- a test suite focused on arithmetic, language, routing, and memory behavior
 
-Over time it tries to discover:
+In plain terms, we built a hybrid ML research runtime where the model is expected to learn useful structure from examples instead of relying on hand-written rules.
 
-- direct token patterns
-- arithmetic transforms
-- concept relationships in memory
-- when a request should be answered by the neural model vs. by learned structure
+## What it demonstrates
 
-The goal is to keep the core model simple and general-purpose, while letting learned representations carry the useful structure instead of hardcoded rules.
+This release shows that the system can:
 
-## What is inside
+- learn simple conversation patterns
+- learn compact symbolic forms like arithmetic
+- store and reuse concept relationships
+- route between direct generation and learned structure
+- train repeatedly on generated curricula
+- persist state across sessions
 
-- **Training pipeline**: reads examples, tokenizes them, and updates the model
-- **Neural model**: predicts next tokens and supports inference-time routing
-- **Platonic memory**: stores concepts, relations, and discovered transforms
-- **Inference engine**: decides how to answer a request
-- **REPL and UI**: tools for training, inspection, and hyperparameter control
-- **Checkpointing**: saves and restores model state locally
+## Current shape of the app
 
-## How training works
+- **Training**: consumes paired examples and updates the model
+- **Inference**: produces text and can use learned structure when available
+- **Memory**: tracks concepts, relations, and discovered transform-like behavior
+- **Controls**: REPL and UI expose training, configuration, and inspection
+- **Persistence**: checkpoints and local conversation state are saved on disk
 
-1. Load an example such as `say hello -> hello`
-2. Convert the text into tokens
-3. Train the neural model on the target sequence
-4. Update concept memory and transform discovery from the same example
-5. Repeat across many examples so the model generalizes
+## Important choices in this iteration
 
-The current default keeps L2 compression off (`0.0`) so the model can learn freely. Compression is still available as an option if the model starts to grow too large later.
-
-## How inference works
-
-When you ask the model something, it:
-
-1. Encodes the input
-2. Checks whether a learned transform or concept chain can answer directly
-3. Falls back to neural token generation when needed
-4. Optionally uses memory or checkpoint context to bias the output
-
-So the system is trying to combine two things:
-
-- **neural prediction**
-- **structured learned memory**
+- Route labels were removed from the training data contract
+- Compression exists, but the default is `L2 = 0.0`
+- The old supervised route head path is no longer part of training
+- Legacy introspection code was removed so the release surface is smaller
 
 ## Main code areas
 

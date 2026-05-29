@@ -45,9 +45,101 @@ public sealed class GenesisInferenceEngine
 
     private GenerationResult GenerateSingle(GenerationRequest request)
     {
-        var inputTokens = _tokenizer.Encode(request.Input);
         _model.EnsureVocabularySize(_tokenizer.VocabularySize);
+        var chunkBudget = Math.Max(1, request.ChunkTokenBudget);
 
+        if (request.MaxNewTokens <= chunkBudget)
+        {
+            var singlePassTokens = _tokenizer.Encode(request.Input);
+            return GenerateSinglePass(request, singlePassTokens);
+        }
+
+        var generatedTokens = new List<int>();
+        var decisionPaths = new List<string>();
+        var usedPlatonicQuery = false;
+        var usedNeuralFallback = false;
+        var totalBiasCount = 0;
+        var totalBiasMagnitude = 0.0;
+        var totalPlatonicConfidence = 0.0;
+        var platonicConfidenceCount = 0;
+        var totalPlatonicHops = 0;
+        string? routedTransform = null;
+        string? transformIntercept = null;
+
+        while (generatedTokens.Count < request.MaxNewTokens)
+        {
+            var remainingTokens = request.MaxNewTokens - generatedTokens.Count;
+            var currentBudget = Math.Min(chunkBudget, remainingTokens);
+            var contextInput = BuildChunkContext(request.Input, generatedTokens, _tokenizer);
+            var contextTokens = _tokenizer.Encode(contextInput);
+            _model.EnsureVocabularySize(_tokenizer.VocabularySize);
+            var chunkRequest = request with { Input = contextInput, MaxNewTokens = currentBudget };
+            var chunkResult = GenerateSinglePass(chunkRequest, contextTokens);
+
+            if (chunkResult.GeneratedTokens.Length == 0)
+                break;
+
+            generatedTokens.AddRange(chunkResult.GeneratedTokens);
+            decisionPaths.Add(chunkResult.DecisionPath);
+            usedPlatonicQuery |= chunkResult.UsedPlatonicQuery;
+            usedNeuralFallback |= chunkResult.UsedNeuralFallback;
+            totalBiasCount += chunkResult.AppliedBiasCount;
+            totalBiasMagnitude += chunkResult.AverageBiasMagnitude * Math.Max(1, chunkResult.AppliedBiasCount);
+            if (chunkResult.UsedPlatonicQuery)
+            {
+                totalPlatonicConfidence += chunkResult.PlatonicConfidence;
+                platonicConfidenceCount++;
+                totalPlatonicHops += chunkResult.PlatonicHopCount;
+            }
+
+            routedTransform ??= chunkResult.RoutedTransform;
+            transformIntercept ??= chunkResult.TransformIntercept;
+
+            if (chunkResult.GeneratedTokens[^1] == _tokenizer.EosTokenId)
+                break;
+        }
+
+        if (generatedTokens.Count == 0)
+        {
+            return new GenerationResult(
+                Output: string.Empty,
+                GeneratedTokens: Array.Empty<int>(),
+                UsedPlatonicQuery: false,
+                UsedNeuralFallback: false,
+                DecisionPath: "neural-token",
+                PlatonicConfidence: 0.0,
+                AppliedBiasCount: 0,
+                AverageBiasMagnitude: 0.0,
+                ChunksGenerated: 0,
+                PlatonicHopCount: 0);
+        }
+
+        var decisionPath = decisionPaths.Count switch
+        {
+            0 => "neural-token",
+            1 => decisionPaths[0],
+            _ => $"chunked[{decisionPaths.Count}]: {string.Join(" -> ", decisionPaths)}"
+        };
+
+        return new GenerationResult(
+            Output: _tokenizer.Decode(generatedTokens),
+            GeneratedTokens: generatedTokens.ToArray(),
+            UsedPlatonicQuery: usedPlatonicQuery,
+            UsedNeuralFallback: usedNeuralFallback,
+            DecisionPath: decisionPath,
+            PlatonicConfidence: platonicConfidenceCount > 0 ? totalPlatonicConfidence / platonicConfidenceCount : 0.0,
+            AppliedBiasCount: totalBiasCount,
+            AverageBiasMagnitude: totalBiasCount > 0 ? totalBiasMagnitude / totalBiasCount : 0.0,
+            ChunksGenerated: Math.Max(1, decisionPaths.Count),
+            PlatonicHopCount: totalPlatonicHops,
+            RoutedTransform: routedTransform,
+            TransformIntercept: transformIntercept);
+    }
+
+    private GenerationResult GenerateSinglePass(
+        GenerationRequest request,
+        IReadOnlyList<int> inputTokens)
+    {
         var (routeId, _) = _model.PredictRoute(inputTokens);
         if (routeId == 1)
         {
@@ -110,6 +202,15 @@ public sealed class GenesisInferenceEngine
             AverageBiasMagnitude: totalBiasCount > 0 ? biasMagnitudeSum / Math.Max(1, generated.Count) : 0.0,
             ChunksGenerated: 1,
             PlatonicHopCount: 0);
+    }
+
+    private static string BuildChunkContext(string baseInput, IReadOnlyList<int> generatedTokens, IGenesisTokenizer tokenizer)
+    {
+        if (generatedTokens.Count == 0)
+            return baseInput;
+
+        var generatedText = tokenizer.Decode(generatedTokens);
+        return $"{baseInput}\n{generatedText}";
     }
 
     private bool TryGenerateFromDiscoveredTransform(GenerationRequest request, out GenerationResult result)

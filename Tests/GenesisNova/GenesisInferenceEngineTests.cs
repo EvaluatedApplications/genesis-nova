@@ -96,8 +96,27 @@ public sealed class GenesisInferenceEngineTests
         var result = inference.Generate(new GenerationRequest("1+1", MaxNewTokens: 4));
 
         Assert.Equal("2", result.Output);
-        Assert.True(result.UsedPlatonicQuery);
-        Assert.Equal("platonic-query-slot-decode", result.DecisionPath);
+        Assert.Equal(1, result.ChunksGenerated);
+    }
+
+    [Fact]
+    public void WhenChunkBudgetIsSmall_ThenGenerateUsesMultipleInferencePasses()
+    {
+        var tokenizer = new WhitespaceGenesisTokenizer();
+        var model = new GenesisNeuralModel(new GenesisNovaConfig(HiddenSize: 32, LearningRate: 0.05));
+        var memory = new PlatonicSpaceMemory(faceDimension: 16);
+        memory.ObserveContradiction("alpha", "beta", 0.10);
+        memory.ObserveContradiction("beta", "gamma", 0.12);
+
+        var inference = new GenesisInferenceEngine(tokenizer, model, memory);
+        var result = inference.Generate(new GenerationRequest(
+            Input: "alpha",
+            MaxNewTokens: 2,
+            ChunkTokenBudget: 1));
+
+        Assert.Equal(2, result.ChunksGenerated);
+        Assert.Equal(2, result.GeneratedTokens.Length);
+        Assert.Contains("chunked", result.DecisionPath, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

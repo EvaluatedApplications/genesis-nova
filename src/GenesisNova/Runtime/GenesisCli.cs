@@ -38,7 +38,6 @@ public static class GenesisCli
             throw new ArgumentException("Missing --file for --genesis-train.");
 
         var epochs = ParseInt(args, "--epochs", fallback: 3);
-        var introspectionCycles = ParseNullableInt(args, "--introspect-cycles");
         var evalSamples = ParseNullableInt(args, "--eval-samples");
         var savePath = ResolvePath(ReadArg(args, "--save"));
         var logPath = ResolvePath(ReadArg(args, "--log"));
@@ -55,7 +54,7 @@ public static class GenesisCli
         var maxExactDrop = ParseDouble(args, "--max-exact-drop", fallback: 0.01);
         var effectiveThreads = deterministic ? 1 : (threads ?? 0);
 
-        var resolvedHidden = hiddenSize ?? 48;
+        var resolvedHidden = hiddenSize ?? 8192;
         if (autoScaleVram && backend == ComputeBackend.Gpu)
         {
             var examples = GenesisTrainingDataLoader.LoadFromFile(file);
@@ -84,7 +83,7 @@ public static class GenesisCli
             Deterministic: deterministic,
             Backend: backend,
             AutoPersist: true,
-            AutoResume: true,
+            AutoResume: false,
             AutoScaleVram: autoScaleVram,
             TargetVramUtilization: targetVramUtil,
             ReserveVramMb: reserveVramMb));
@@ -96,14 +95,12 @@ public static class GenesisCli
         var report = await runtime.TrainAsync(
             filePath: file,
             epochs: epochs,
-            introspectionCyclesPerEpoch: introspectionCycles,
             savePath: savePath,
             logPath: logPath);
 
         Console.WriteLine(
             $"done examples={report.ExampleCount} epochs={report.Epochs} " +
-            $"loss={report.AverageLoss.TotalLoss:F4} contradiction={report.ContradictionRate:F4} " +
-            $"introspection={report.IntrospectionCycles} queue={report.PendingQueueDepth}");
+            $"loss={report.AverageLoss.TotalLoss:F4} contradiction={report.ContradictionRate:F4}");
 
         var eval = await runtime.EvaluateFileAsync(file, evalSamples);
         Console.WriteLine(
@@ -137,7 +134,13 @@ public static class GenesisCli
             Console.WriteLine($"saved={savePath}");
 
         var preview = await runtime.PredictAsync("hello", 8);
-        Console.WriteLine($"preview output={preview.Result?.Output ?? string.Empty}");
+        Console.WriteLine(
+            $"preview output={preview.Result?.Output ?? string.Empty} " +
+            $"route={preview.Result?.DecisionPath ?? "unknown"} " +
+            $"confidence={(preview.Result?.PlatonicConfidence ?? 0.0):F2} " +
+            $"hops={(preview.Result?.PlatonicHopCount ?? 0)} " +
+            $"fallback={(preview.Result?.UsedNeuralFallback ?? false)} " +
+            $"chunks={(preview.Result?.ChunksGenerated ?? 0)}");
 
         return true;
     }

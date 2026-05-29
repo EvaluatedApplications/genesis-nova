@@ -44,23 +44,15 @@ public static class GenesisTrainingDataLoader
 
         var input = line[..arrow].Trim();
         var right = line[(arrow + 2)..].Trim();
-        int? route = null;
 
         var pipe = right.IndexOf('|');
         if (pipe < 0)
-            return new GenesisExample(input, right, route);
+            return new GenesisExample(input, right);
 
         var output = right[..pipe].Trim();
-        var metadata = right[(pipe + 1)..].Trim();
-        foreach (var field in metadata.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-        {
-            if (!field.StartsWith("route=", StringComparison.OrdinalIgnoreCase))
-                continue;
-            if (int.TryParse(field[6..].Trim(), out var parsed))
-                route = parsed;
-        }
-
-        return new GenesisExample(input, output, route);
+        // Note: route metadata is parsed but no longer used (routes are inferred by model)
+        
+        return new GenesisExample(input, output);
     }
 }
 

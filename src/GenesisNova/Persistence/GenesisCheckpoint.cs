@@ -11,7 +11,7 @@ public sealed record GenesisCheckpoint(
     double[] RouteBias,
     MatrixSnapshot OutputWeights,
     double[] OutputBias,
-    PlatonicCognitionSnapshot? Cognition = null,
+    PlatonicMemorySnapshot? PlatonicSpace = null,
     GenesisConversationSnapshot? Conversation = null);
 
 public sealed record MatrixSnapshot(int Rows, int Cols, double[] Values)

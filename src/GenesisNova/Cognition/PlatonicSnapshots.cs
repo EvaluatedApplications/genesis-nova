@@ -41,3 +41,22 @@ public sealed record PlatonicCognitionSnapshot(
     PlatonicMemorySnapshot Memory,
     PlatonicQueueSnapshot Queue);
 
+public sealed record IntrospectionCycleDetail(
+    int Cycle,
+    string Kind,
+    double NoveltyScore,
+    int ConceptCount,
+    string[] Concepts,
+    double BaseContradiction,
+    double EnergyBefore,
+    double EnergyAfter,
+    double Yield,
+    int QueueDepthAfter);
+
+public sealed record IntrospectionRunReport(
+    int RequestedCycles,
+    int Processed,
+    int QueueDepthBefore,
+    int QueueDepthAfter,
+    double AverageYield,
+    IntrospectionCycleDetail[] Details);

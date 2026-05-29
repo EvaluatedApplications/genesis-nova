@@ -15,8 +15,25 @@ public static class GenesisLocalStateStore
         if (!string.IsNullOrWhiteSpace(config.LocalStateDirectory))
             return config.LocalStateDirectory;
 
-        var root = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        return Path.Combine(root, "GenesisNova", "state");
+        // Use models folder in repo root (committed to GitHub)
+        var repoRoot = FindRepoRoot();
+        return Path.Combine(repoRoot, "models");
+    }
+
+    private static string FindRepoRoot()
+    {
+        var current = Directory.GetCurrentDirectory();
+        while (!string.IsNullOrEmpty(current))
+        {
+            if (Directory.Exists(Path.Combine(current, "src")) &&
+                Directory.Exists(Path.Combine(current, ".git")))
+            {
+                return current;
+            }
+            current = Path.GetDirectoryName(current);
+        }
+        // Fallback to current directory
+        return Directory.GetCurrentDirectory();
     }
 
     public static string ResolveCheckpointPath(GenesisNovaConfig config)
@@ -56,21 +73,6 @@ public static class GenesisLocalStateStore
         {
             path = autoPath;
             return true;
-        }
-
-        var modelsDir = Path.Combine(Directory.GetCurrentDirectory(), "models");
-        if (Directory.Exists(modelsDir))
-        {
-            var candidate = Directory.EnumerateFiles(modelsDir, "*.checkpoint.json", SearchOption.TopDirectoryOnly)
-                .Select(file => new FileInfo(file))
-                .OrderByDescending(file => file.LastWriteTimeUtc)
-                .FirstOrDefault();
-
-            if (candidate is not null)
-            {
-                path = candidate.FullName;
-                return true;
-            }
         }
 
         path = autoPath;

@@ -1,7 +1,9 @@
 using EvalApp.Consumer;
+using GenesisNova.Cognition;
 using GenesisNova.Core;
 using GenesisNova.Data;
 using GenesisNova.Infer;
+using GenesisNova.Licensing;
 using GenesisNova.Persistence;
 using GenesisNova.Train;
 
@@ -14,25 +16,34 @@ public sealed class GenesisEvalAppRuntime
     private readonly ICompiledPipeline<GenesisTrainTaskData> _trainPipeline;
     private readonly ICompiledPipeline<GenesisTrainOneTaskData> _trainOnePipeline;
     private readonly ICompiledPipeline<GenesisPredictTaskData> _predictPipeline;
-    private readonly ICompiledPipeline<GenesisIntrospectTaskData> _introspectPipeline;
-    private readonly ICompiledPipeline<GenesisRelateTaskData> _relatePipeline;
-    private readonly ICompiledPipeline<GenesisConceptTaskData> _conceptPipeline;
     private readonly ICompiledPipeline<GenesisSaveTaskData> _savePipeline;
     private readonly ICompiledPipeline<GenesisLoadTaskData> _loadPipeline;
     private readonly ICompiledPipeline<GenesisConversationTaskData> _conversationPipeline;
     private readonly ICompiledPipeline<GenesisCompactConversationTaskData> _compactConversationPipeline;
+    
+    private double _bestTrainingLoss = double.MaxValue;  // Track best loss for conditional saving
+    private AxiomaticPermutationEngine? _permutationEngine;
+    private readonly SemaphoreSlim _modelOpsGate = new(1, 1);
 
     public GenesisEvalAppRuntime(GenesisNovaConfig? config = null)
     {
         _runtimeConfig = config ?? new GenesisNovaConfig();
         _state = new GenesisRuntimeState(_runtimeConfig);
 
+        // Validate license for adaptive tuning
+        var licenseMode = GenesisPipelineValidator.ValidateLicense();
+        if (licenseMode == LicenseMode.Licensed)
+        {
+            Console.WriteLine("[License] ✓ Genesis Nova licensed - full adaptive tuning enabled");
+        }
+        else
+        {
+            Console.WriteLine("[License] ⓘ Genesis Nova unlicensed - running in sequential mode");
+        }
+
         ICompiledPipeline<GenesisTrainTaskData> train = null!;
         ICompiledPipeline<GenesisTrainOneTaskData> trainOne = null!;
         ICompiledPipeline<GenesisPredictTaskData> predict = null!;
-        ICompiledPipeline<GenesisIntrospectTaskData> introspect = null!;
-        ICompiledPipeline<GenesisRelateTaskData> relate = null!;
-        ICompiledPipeline<GenesisConceptTaskData> concept = null!;
         ICompiledPipeline<GenesisSaveTaskData> save = null!;
         ICompiledPipeline<GenesisLoadTaskData> load = null!;
         ICompiledPipeline<GenesisConversationTaskData> conversation = null!;
@@ -40,9 +51,10 @@ public sealed class GenesisEvalAppRuntime
 
         Eval.App("GenesisNovaRuntime")
             .WithContext(NullGlobalContext.Instance)
-            .WithResource(ResourceKind.Cpu, new TunableConfig(Min: 1, Max: 8, Default: 4))
+            .WithResource(ResourceKind.Cpu, new TunableConfig(Min: 1, Max: Environment.ProcessorCount, Default: Math.Max(2, Environment.ProcessorCount / 2)))
+            .WithResource(ResourceKind.Of("gpu"), new TunableConfig(Min: 1, Max: 1, Default: 1))  // GPU serialized to 1
             .WithResource(ResourceKind.DiskIO, new TunableConfig(Min: 1, Max: 2, Default: 1))
-            .WithTuning()
+            .WithTuning()  // Enable adaptive tuning (requires license)
             .DefineDomain("GenesisNova", _state)
                 .DefineTask<GenesisTrainTaskData>("Train")
                     .AddStep("LoadExamples", data => data with
@@ -59,11 +71,31 @@ public sealed class GenesisEvalAppRuntime
                             if (!string.IsNullOrWhiteSpace(dir))
                                 Directory.CreateDirectory(dir);
                             writer = new StreamWriter(data.LogPath, append: false);
-                            logger = line =>
+                            
+                            if (data.UiLogger != null)
                             {
-                                writer.WriteLine(line);
-                                writer.Flush();
-                            };
+                                // Chain both file logging and UI logger
+                                logger = line =>
+                                {
+                                    writer.WriteLine(line);
+                                    writer.Flush();
+                                    data.UiLogger?.Invoke(line);
+                                };
+                            }
+                            else
+                            {
+                                // File logging only
+                                logger = line =>
+                                {
+                                    writer.WriteLine(line);
+                                    writer.Flush();
+                                };
+                            }
+                        }
+                        else if (data.UiLogger != null)
+                        {
+                            // UI logger only (no file)
+                            logger = data.UiLogger;
                         }
 
                         try
@@ -71,7 +103,6 @@ public sealed class GenesisEvalAppRuntime
                             var report = _state.Orchestrator.Train(
                                 data.Examples ?? [],
                                 data.Epochs,
-                                data.IntrospectionCyclesPerEpoch,
                                 logger);
                             return data with { Report = report };
                         }
@@ -82,13 +113,18 @@ public sealed class GenesisEvalAppRuntime
                     })
                     .Gate(ResourceKind.DiskIO, null, g => g.AddStep("SaveCheckpoint", data =>
                     {
-                        PersistCheckpoint(
-                            reason: "train",
-                            explicitPath: data.SavePath,
-                            detail: $"epochs={data.Epochs}",
-                            exampleCount: data.Examples?.Count ?? 0,
-                            loss: data.Report?.AverageLoss.TotalLoss ?? 0.0,
-                            queueDepth: _state.Trainer.QueueSize);
+                        // Only persist if loss improved or is first checkpoint
+                        var currentLoss = data.Report?.AverageLoss.TotalLoss ?? double.MaxValue;
+                        if (currentLoss < _bestTrainingLoss)
+                        {
+                            _bestTrainingLoss = currentLoss;
+                            PersistCheckpoint(
+                                reason: "train-improved",
+                                explicitPath: data.SavePath,
+                                detail: $"epochs={data.Epochs} loss={currentLoss:F4}",
+                                exampleCount: data.Examples?.Count ?? 0,
+                                loss: currentLoss);
+                        }
                         return data;
                     }))
                     .Run(out train)
@@ -96,43 +132,19 @@ public sealed class GenesisEvalAppRuntime
                     .AddStep("TrainOneStep", data =>
                     {
                         var loss = _state.Trainer.TrainStep(data.Example);
-                        return data with { Loss = loss, QueueDepth = _state.Trainer.QueueSize };
+                        return data with { Loss = loss };
                     })
                     .Run(out trainOne)
                 .DefineTask<GenesisPredictTaskData>("Predict")
-                    .AddStep("Predict", data =>
+                    .Gate(ResourceKind.Of("gpu"), null, g => g.AddStep("PredictGpu", data =>
                     {
-                        var result = _state.Inference.Generate(new GenerationRequest(data.Input, data.MaxNewTokens));
+                        var result = _state.Inference.Generate(new GenerationRequest(
+                            Input: data.Input,
+                            MaxNewTokens: data.MaxNewTokens));
+                        _state.Trainer.ObserveInferenceResult(data.Input, result.Output);
                         return data with { Result = result };
-                    })
-                    .AddStep("BackgroundIntrospect", data =>
-                    {
-                        if (!data.EnableIntrospection)
-                            return data with { IntrospectionProcessed = 0, QueueDepth = _state.Trainer.QueueSize };
-                        var processed = _state.Trainer.RunIntrospectionCycles(1);
-                        return data with { IntrospectionProcessed = processed, QueueDepth = _state.Trainer.QueueSize };
-                    })
+                    }))
                     .Run(out predict)
-                .DefineTask<GenesisIntrospectTaskData>("Introspect")
-                    .AddStep("Introspect", data =>
-                    {
-                        var processed = _state.Trainer.RunIntrospectionCycles(Math.Max(1, data.Cycles));
-                        return data with { Processed = processed, QueueDepth = _state.Trainer.QueueSize };
-                    })
-                    .Run(out introspect)
-                .DefineTask<GenesisRelateTaskData>("Relate")
-                    .AddStep("Relate", data =>
-                    {
-                        _state.Trainer.ObserveDirectContradiction(data.Left, data.Right, data.Contradiction);
-                        return data with { QueueDepth = _state.Trainer.QueueSize };
-                    })
-                    .Run(out relate)
-                .DefineTask<GenesisConceptTaskData>("Concept")
-                    .AddStep("Describe", data => data with
-                    {
-                        Description = _state.Trainer.DescribeConcept(data.Concept)
-                    })
-                    .Run(out concept)
                 .DefineTask<GenesisSaveTaskData>("Save")
                     .Gate(ResourceKind.DiskIO, null, g => g.AddStep("Save", data =>
                     {
@@ -147,11 +159,11 @@ public sealed class GenesisEvalAppRuntime
                     .Gate(ResourceKind.DiskIO, null, g => g.AddStep("Load", data =>
                     {
                         var loaded = GenesisCheckpointStore.LoadForRuntime(data.Path, _runtimeConfig);
-                        _state.Replace(loaded.Config, loaded.Tokenizer, loaded.Model, loaded.Cognition, loaded.Conversation);
+                        _state.Replace(loaded.Config, loaded.Tokenizer, loaded.Model, loaded.PlatonicSpace, loaded.Conversation);
                         PersistCheckpoint(
                             reason: "load",
                             detail: data.Path);
-                        return data with { Loaded = true, Cognition = loaded.Cognition };
+                    return data with { Loaded = true };
                     }))
                     .Run(out load)
                 .DefineTask<GenesisConversationTaskData>("Conversation")
@@ -169,8 +181,7 @@ public sealed class GenesisEvalAppRuntime
                     {
                         PersistCheckpoint(
                             reason: data.ResetSignal ? "conversation-reset" : "conversation",
-                            detail: data.Note ?? data.UserInput,
-                            queueDepth: _state.Trainer.QueueSize);
+                            detail: data.Note ?? data.UserInput);
                         return data;
                     }))
                     .Run(out conversation)
@@ -189,8 +200,7 @@ public sealed class GenesisEvalAppRuntime
                     {
                         PersistCheckpoint(
                             reason: "conversation-compact",
-                            detail: data.Note ?? "manual-compact",
-                            queueDepth: _state.Trainer.QueueSize);
+                            detail: data.Note ?? "manual-compact");
                         return data;
                     }))
                     .Run(out compactConversation)
@@ -198,13 +208,11 @@ public sealed class GenesisEvalAppRuntime
 
         TryBootstrapLatestState();
         EnsureConfiguredHiddenSize();
+        InitializePermutationEngine();
 
         _trainPipeline = train;
         _trainOnePipeline = trainOne;
         _predictPipeline = predict;
-        _introspectPipeline = introspect;
-        _relatePipeline = relate;
-        _conceptPipeline = concept;
         _savePipeline = save;
         _loadPipeline = load;
         _conversationPipeline = conversation;
@@ -214,58 +222,51 @@ public sealed class GenesisEvalAppRuntime
     public async Task<GenesisTrainingReport> TrainAsync(
         string filePath,
         int epochs,
-        int? introspectionCyclesPerEpoch = null,
         string? savePath = null,
-        string? logPath = null)
+        string? logPath = null,
+        Action<string>? uiLogger = null)
     {
-        var result = await _trainPipeline.RunAsync(new GenesisTrainTaskData(
-            FilePath: filePath,
-            Epochs: epochs,
-            IntrospectionCyclesPerEpoch: introspectionCyclesPerEpoch,
-            SavePath: savePath,
-            LogPath: logPath));
-        var data = ExtractData(result);
-        return data.Report ?? throw new InvalidOperationException("Training report missing.");
+        return await WithModelGateAsync(async () =>
+        {
+            var result = await _trainPipeline.RunAsync(new GenesisTrainTaskData(
+                FilePath: filePath,
+                Epochs: epochs,
+                SavePath: savePath,
+                LogPath: logPath,
+                UiLogger: uiLogger));
+            var data = ExtractData(result);
+            return data.Report ?? throw new InvalidOperationException("Training report missing.");
+        });
     }
 
     public async Task<GenesisStepLoss> TrainOneAsync(GenesisExample example)
     {
-        var result = await _trainOnePipeline.RunAsync(new GenesisTrainOneTaskData(example));
-        var data = ExtractData(result);
-        return data.Loss ?? throw new InvalidOperationException("Loss missing.");
+        return await WithModelGateAsync(async () =>
+        {
+            var result = await _trainOnePipeline.RunAsync(new GenesisTrainOneTaskData(example));
+            var data = ExtractData(result);
+            return data.Loss ?? throw new InvalidOperationException("Loss missing.");
+        });
     }
 
-    public async Task<GenesisPredictTaskData> PredictAsync(string input, int maxTokens = 48, bool enableIntrospection = true)
+    public async Task<GenesisPredictTaskData> PredictAsync(
+        string input,
+        int maxTokens = 48)
     {
-        var result = await _predictPipeline.RunAsync(new GenesisPredictTaskData(
-            Input: input,
-            MaxNewTokens: maxTokens,
-            EnableIntrospection: enableIntrospection));
-        return ExtractData(result);
-    }
-
-    public async Task<GenesisIntrospectTaskData> IntrospectAsync(int cycles)
-    {
-        var result = await _introspectPipeline.RunAsync(new GenesisIntrospectTaskData(cycles));
-        return ExtractData(result);
-    }
-
-    public async Task RelateAsync(string left, string right, double contradiction)
-    {
-        await _relatePipeline.RunAsync(new GenesisRelateTaskData(left, right, contradiction));
-    }
-
-    public async Task<string> DescribeConceptAsync(string concept)
-    {
-        var result = await _conceptPipeline.RunAsync(new GenesisConceptTaskData(concept));
-        return ExtractData(result).Description;
+        return await WithModelGateAsync(async () =>
+        {
+            var result = await _predictPipeline.RunAsync(new GenesisPredictTaskData(
+                Input: input,
+                MaxNewTokens: maxTokens));
+            return ExtractData(result);
+        });
     }
 
     public async Task SaveAsync(string path)
-        => _ = await _savePipeline.RunAsync(new GenesisSaveTaskData(path));
+        => _ = await WithModelGateAsync(async () => await _savePipeline.RunAsync(new GenesisSaveTaskData(path)));
 
     public async Task LoadAsync(string path)
-        => _ = await _loadPipeline.RunAsync(new GenesisLoadTaskData(path));
+        => _ = await WithModelGateAsync(async () => await _loadPipeline.RunAsync(new GenesisLoadTaskData(path)));
 
     public async Task<GenesisConversationTaskData> ObserveConversationAsync(
         string userInput,
@@ -296,7 +297,7 @@ public sealed class GenesisEvalAppRuntime
         var exact = 0;
         foreach (var ex in examples)
         {
-            var pred = await PredictAsync(ex.Input, maxTokens: 48, enableIntrospection: false);
+            var pred = await PredictAsync(ex.Input, maxTokens: 48);
             var output = pred.Result?.Output?.Trim().ToLowerInvariant() ?? string.Empty;
             var expected = ex.Output.Trim().ToLowerInvariant();
             if (output == expected)
@@ -314,10 +315,106 @@ public sealed class GenesisEvalAppRuntime
             RouteAccuracy: 0.0);
     }
 
-    public int QueueSize => _state.Trainer.QueueSize;
     public int VocabularySize => _state.Tokenizer.VocabularySize;
     public int HiddenSize => _state.Model.HiddenSize;
     public string ConversationBrief => _state.Conversation.BuildContextBrief();
+    public bool AutoResumeEnabled => _runtimeConfig.AutoResume;
+    public string AutoCheckpointPath => GenesisLocalStateStore.ResolveCheckpointPath(_runtimeConfig);
+    public GenesisNovaConfig Config => _runtimeConfig;
+    
+    public void UpdateConfig(Func<GenesisNovaConfig, GenesisNovaConfig> updater)
+    {
+        var updated = updater(_runtimeConfig);
+        // Update the model's internal config reference
+        _state.Model.UpdateConfig(updated);
+    }
+    
+    public int[] EncodeTokens(string text) => _state.Tokenizer.Encode(text);
+    public string DecodeTokens(IReadOnlyList<int> tokens) => _state.Tokenizer.Decode(tokens);
+    public string TokenText(int tokenId)
+    {
+        var vocab = _state.Tokenizer.Vocabulary;
+        return tokenId >= 0 && tokenId < vocab.Count
+            ? vocab[tokenId]
+            : $"<unk:{tokenId}>";
+    }
+
+    public PlatonicActivationView AnalyzePlatonicActivation(string input, int maxNodes = 24, int maxEdges = 40)
+    {
+        var safeInput = input ?? string.Empty;
+        var tokenIds = _state.Tokenizer.Encode(safeInput);
+        var tokenTexts = tokenIds.Select(TokenText).ToArray();
+        var lexicalParts = System.Text.RegularExpressions.Regex
+            .Matches(safeInput.ToLowerInvariant(), @"-?\d+(?:\.\d+)?|[a-z]+|[+\-*/x]")
+            .Select(m => m.Value)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        var anchorSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var token in tokenTexts.Concat(lexicalParts))
+        {
+            if (_state.Memory.ContainsConcept(token))
+                anchorSet.Add(token);
+        }
+
+        var anchors = anchorSet.OrderBy(a => a, StringComparer.OrdinalIgnoreCase).ToArray();
+        var snapshot = _state.Memory.ExportSnapshot();
+        var nodes = new List<PlatonicActivatedNode>(snapshot.Nodes.Length);
+        var anchorHash = new HashSet<string>(anchors, StringComparer.OrdinalIgnoreCase);
+
+        foreach (var node in snapshot.Nodes)
+        {
+            var isAnchor = anchorHash.Contains(node.Name);
+            var baseScore = isAnchor ? 1.0 : 0.0;
+            if (!isAnchor && anchors.Length > 0)
+            {
+                baseScore = anchors
+                    .Select(anchor => 1.0 - _state.Memory.GetContradiction(anchor, node.Name))
+                    .DefaultIfEmpty(0.0)
+                    .Max();
+            }
+
+            var obsBoost = Math.Min(0.20, Math.Log10(Math.Max(1, node.ObservationCount)) / 10.0);
+            var score = Math.Max(0.0, Math.Min(1.0, baseScore + obsBoost));
+            nodes.Add(new PlatonicActivatedNode(node.Name, score, node.ObservationCount, isAnchor));
+        }
+
+        var selectedNodes = nodes
+            .OrderByDescending(n => n.IsAnchor)
+            .ThenByDescending(n => n.Score)
+            .ThenByDescending(n => n.ObservationCount)
+            .Take(Math.Max(4, maxNodes))
+            .ToArray();
+
+        var selectedSet = new HashSet<string>(selectedNodes.Select(n => n.Name), StringComparer.OrdinalIgnoreCase);
+        var edges = snapshot.Relations
+            .Where(r =>
+                (selectedSet.Contains(r.Left) && selectedSet.Contains(r.Right)) ||
+                anchorHash.Contains(r.Left) || anchorHash.Contains(r.Right))
+            .Select(r =>
+            {
+                var confidence = 1.0 - r.SynthesisContradiction;
+                var obsBoost = Math.Min(0.15, Math.Log10(Math.Max(1, r.ObservationCount)) / 12.0);
+                var score = Math.Max(0.0, Math.Min(1.0, confidence + obsBoost));
+                return new PlatonicActivatedEdge(
+                    Left: r.Left,
+                    Right: r.Right,
+                    Score: score,
+                    Contradiction: r.SynthesisContradiction,
+                    ObservationCount: r.ObservationCount);
+            })
+            .OrderByDescending(e => e.Score)
+            .ThenByDescending(e => e.ObservationCount)
+            .Take(Math.Max(8, maxEdges))
+            .ToArray();
+
+        return new PlatonicActivationView(
+            Input: safeInput,
+            InputTokens: tokenTexts,
+            Anchors: anchors,
+            Nodes: selectedNodes,
+            Edges: edges);
+    }
 
     private void TryBootstrapLatestState()
     {
@@ -328,12 +425,11 @@ public sealed class GenesisEvalAppRuntime
             return;
 
         var loaded = GenesisCheckpointStore.LoadForRuntime(path, _runtimeConfig);
-        _state.Replace(loaded.Config, loaded.Tokenizer, loaded.Model, loaded.Cognition, loaded.Conversation);
+        _state.Replace(loaded.Config, loaded.Tokenizer, loaded.Model, loaded.PlatonicSpace, loaded.Conversation);
         GenesisLocalStateStore.AppendJournalEntry(
             _runtimeConfig,
             "bootstrap",
-            detail: path,
-            queueDepth: _state.Trainer.QueueSize);
+            detail: path);
     }
 
     private void EnsureConfiguredHiddenSize()
@@ -360,8 +456,7 @@ public sealed class GenesisEvalAppRuntime
         string? explicitPath = null,
         string? detail = null,
         int? exampleCount = null,
-        double? loss = null,
-        int? queueDepth = null)
+        double? loss = null)
     {
         var snapshotConfig = CreateCheckpointConfig();
         var autoPath = GenesisLocalStateStore.ResolveCheckpointPath(_runtimeConfig);
@@ -374,8 +469,8 @@ public sealed class GenesisEvalAppRuntime
                 snapshotConfig,
                 _state.Tokenizer,
                 _state.Model,
-                _state.Trainer.ExportCognitionSnapshot(),
-                _state.Conversation.ExportSnapshot());
+                platonicSpace: _state.Memory.ExportSnapshot(),
+                conversation: _state.Conversation.ExportSnapshot());
             wrote = true;
         }
 
@@ -389,8 +484,8 @@ public sealed class GenesisEvalAppRuntime
                     snapshotConfig,
                     _state.Tokenizer,
                     _state.Model,
-                    _state.Trainer.ExportCognitionSnapshot(),
-                    _state.Conversation.ExportSnapshot());
+                    platonicSpace: _state.Memory.ExportSnapshot(),
+                    conversation: _state.Conversation.ExportSnapshot());
                 wrote = true;
             }
         }
@@ -402,8 +497,7 @@ public sealed class GenesisEvalAppRuntime
                 reason,
                 detail,
                 exampleCount,
-                loss,
-                queueDepth ?? _state.Trainer.QueueSize);
+                loss);
         }
     }
 
@@ -414,4 +508,44 @@ public sealed class GenesisEvalAppRuntime
             PipelineResult<T>.Failure f => throw new InvalidOperationException(f.Message ?? "Pipeline failed.", f.Exception),
             _ => throw new InvalidOperationException("Unsupported pipeline result.")
         };
+
+    private async Task<T> WithModelGateAsync<T>(Func<Task<T>> action)
+    {
+        await _modelOpsGate.WaitAsync();
+        try
+        {
+            return await action();
+        }
+        finally
+        {
+            _modelOpsGate.Release();
+        }
+    }
+
+    /// <summary>Initialize permutation engine after model is ready.</summary>
+    private void InitializePermutationEngine()
+    {
+        try
+        {
+            _permutationEngine = new AxiomaticPermutationEngine(_state.Model, _state.Tokenizer);
+        }
+        catch
+        {
+            // Non-critical, permutations optional
+            _permutationEngine = null;
+        }
+    }
+
+    /// <summary>Delete N most recent REPL conversation turns.</summary>
+    public async Task DeleteConversationTurnsAsync(int count)
+    {
+        await _state.Conversation.DeleteRecentTurnsAsync(count);
+    }
+
+    /// <summary>Clear all REPL conversation history.</summary>
+    public async Task ClearConversationAsync()
+    {
+        await _state.Conversation.ClearAsync();
+    }
+
 }

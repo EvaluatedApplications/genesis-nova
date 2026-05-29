@@ -19,7 +19,6 @@ public sealed class GenesisTrainingDataLoaderTests
         {
             var examples = GenesisTrainingDataLoader.LoadFromFile(path);
             Assert.Equal(2, examples.Count);
-            Assert.Equal(1, examples[0].RouteLabel);
             Assert.Equal("hello", examples[1].Output);
         }
         finally

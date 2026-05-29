@@ -40,7 +40,7 @@ public sealed class GenesisTrainingOrchestrator
             foreach (var (input, output) in generated)
             {
                 // No route labels - implicit routing emerges from model training
-                examples.Add(new GenesisExample(input, output, null));
+                examples.Add(new GenesisExample(input, output));
             }
         }
 
@@ -57,7 +57,6 @@ public sealed class GenesisTrainingOrchestrator
     public GenesisTrainingReport Train(
         IReadOnlyList<GenesisExample> examples,
         int epochs,
-        int? introspectionCyclesPerEpoch = null,
         Action<string>? logger = null)
     {
         if (examples.Count == 0)
@@ -74,24 +73,35 @@ public sealed class GenesisTrainingOrchestrator
 
         var totalSteps = 0;
         var sumToken = 0.0;
-        var introspected = 0;
-        var batchSize = Math.Max(1, Math.Min(16, examples.Count / 2));
-        logger?.Invoke($"[CONFIG] batch_size={batchSize} examples={examples.Count}");
+        var spaceManagementCycles = 0;
+        var totalNodesPruned = 0;
+        var totalRelationsPruned = 0;
+        var lastNoiseRatio = 0.0;
+        var finalNodeCount = 0;
+        var finalRelationCount = 0;
+        var baseBatchSize = Math.Max(1, Math.Min(16, examples.Count / 2));
+        logger?.Invoke($"[CONFIG] batch_size={baseBatchSize} examples={examples.Count}");
 
         for (var e = 1; e <= Math.Max(1, epochs); e++)
         {
             var epochStart = System.Diagnostics.Stopwatch.StartNew();
             var epochSum = 0.0;
             var batchCount = 0;
+            var epochPool = preTokenized
+                .OrderBy(_ => Random.Shared.Next())
+                .ToList();
+
+            var batchSize = baseBatchSize;
+            logger?.Invoke(
+                $"[EPOCH-CONFIG] {e}/{epochs} pool={epochPool.Count} batch={batchSize}");
 
             // Process examples in batches
-            for (var batchStart = 0; batchStart < preTokenized.Count; batchStart += batchSize)
+            for (var batchStart = 0; batchStart < epochPool.Count; batchStart += batchSize)
             {
-                var batchEnd = Math.Min(batchStart + batchSize, preTokenized.Count);
-                var batch = preTokenized
+                var batchEnd = Math.Min(batchStart + batchSize, epochPool.Count);
+                var batch = epochPool
                     .Skip(batchStart)
                     .Take(batchEnd - batchStart)
-                    .Select(ex => (ex.InputTokens, ex.TargetTokens))
                     .ToList();
 
                 var batchStepStart = System.Diagnostics.Stopwatch.StartNew();
@@ -101,9 +111,13 @@ public sealed class GenesisTrainingOrchestrator
                 totalSteps++;
                 batchCount++;
                 sumToken += loss.TokenLoss;
-                epochSum += loss.TokenLoss * batch.Count;
+                epochSum += loss.TotalLoss * batch.Count;
 
-                logger?.Invoke($"  [BATCH] {batchStart + 1:D3}-{batchEnd:D3} loss={loss.TokenLoss:F4} time={batchStepStart.ElapsedMilliseconds:D5}ms");
+                logger?.Invoke(
+                    $"  [BATCH] {batchStart + 1:D3}-{batchEnd:D3} " +
+                    $"token={loss.TokenLoss:F4} total={loss.TotalLoss:F4} " +
+                    $"cons={loss.ConsistencyLoss:F4} mem={loss.MemoryLoss:F4} " +
+                    $"time={batchStepStart.ElapsedMilliseconds:D5}ms");
             }
 
             epochStart.Stop();
@@ -111,12 +125,22 @@ public sealed class GenesisTrainingOrchestrator
             // Clone parameters ONCE per epoch to break the computation graph chain
             _trainer.CloneParametersToBreakGraph();
 
-            var defaultCycles = 0;
-            var cyclesThisEpoch = introspectionCyclesPerEpoch ?? defaultCycles;
-            cyclesThisEpoch = Math.Clamp(cyclesThisEpoch, 0, 256);
-            introspected += _trainer.RunIntrospectionCycles(cyclesThisEpoch);
+            var spaceResult = _trainer.ManagePlatonicSpace();
+            spaceManagementCycles++;
+            totalNodesPruned += spaceResult.NodesPruned;
+            totalRelationsPruned += spaceResult.RelationsPruned;
+            lastNoiseRatio = spaceResult.NoiseRatio;
+            finalNodeCount = spaceResult.NodesAfter;
+            finalRelationCount = spaceResult.RelationsAfter;
+            if (spaceResult.Compacted)
+            {
+                logger?.Invoke(
+                    $"[SPACE] pruned nodes={spaceResult.NodesPruned} relations={spaceResult.RelationsPruned} " +
+                    $"size={spaceResult.NodesAfter}n/{spaceResult.RelationsAfter}r noise={spaceResult.NoiseRatio:F3} budget={spaceResult.RelationBudget}");
+            }
+
             var epochLoss = epochSum / Math.Max(1, examples.Count);
-            logger?.Invoke($"[EPOCH] {e}/{epochs} loss={epochLoss:F4} time={epochStart.ElapsedMilliseconds:D5}ms batches={batchCount} introspected={introspected}");
+            logger?.Invoke($"[EPOCH] {e}/{epochs} loss={epochLoss:F4} time={epochStart.ElapsedMilliseconds:D5}ms batches={batchCount}");
         }
 
         overallStart.Stop();
@@ -137,32 +161,30 @@ public sealed class GenesisTrainingOrchestrator
                 TotalLoss: avgTokenLoss),
             ContradictionRate: contradictionRate,
             ConservationDrift: 0.0,
-            MemoryOverwriteRate: 0.0,
-            IntrospectionCycles: introspected,
-            PendingQueueDepth: _trainer.QueueSize);
+            MemoryOverwriteRate: totalRelationsPruned / (double)Math.Max(1, examples.Count),
+            IntrospectionCycles: 0,
+            PendingQueueDepth: 0,
+            SpaceManagementCycles: spaceManagementCycles,
+            NodesPruned: totalNodesPruned,
+            RelationsPruned: totalRelationsPruned,
+            FinalNodeCount: finalNodeCount,
+            FinalRelationCount: finalRelationCount,
+            SpaceNoiseRatio: lastNoiseRatio);
     }
 
     private List<PreTokenizedExample> PreTokenizeExamples(IReadOnlyList<GenesisExample> examples)
     {
         var result = new List<PreTokenizedExample>(examples.Count);
-        var exampleDict = new Dictionary<GenesisExample, int>();
-        for (var i = 0; i < examples.Count; i++)
-            exampleDict[examples[i]] = i;
-
-        var lockObj = new object();
-
-        // Parallel tokenization (CPU-bound, no GPU interference)
-        Parallel.ForEach(examples, ex =>
+        // Tokenizer mutates vocabulary during Encode, so this must be exclusive.
+        // Parallel tokenization corrupts tokenizer dictionaries under concurrent writes.
+        foreach (var ex in examples)
         {
             var input = _trainer.EncodeInput(ex.Input);
             var target = _trainer.EncodeTarget(ex.Output);
-            var preToken = new PreTokenizedExample(input, target, ex);
+            result.Add(new PreTokenizedExample(input, target, ex));
+        }
 
-            lock (lockObj)
-                result.Add(preToken);
-        });
-
-        return result.OrderBy(x => exampleDict[x.Original]).ToList();
+        return result;
     }
 
     private static double EstimateContradictionRate(IReadOnlyList<GenesisExample> examples)

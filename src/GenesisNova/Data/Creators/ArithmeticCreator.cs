@@ -41,7 +41,13 @@ public sealed class ArithmeticCreator : IExampleCreator
         while (examples.Count < count)
         {
             var (a, b, answer) = pairs[examples.Count % pairs.Length];
-            int surfaceIdx = rng.Next(Surfaces(_operation).Length);
+            var surfaces = Surfaces(_operation);
+            int surfaceIdx = rng.Next(surfaces.Length);
+
+            // Guarantee compact symbolic forms (e.g., 1+1, 1-1) appear in generated
+            // training data for add/sub creators.
+            if ((_operation is "add" or "sub") && examples.Count % 3 == 0)
+                surfaceIdx = 1; // compact form index in Surfaces(op)
 
             examples.Add((
                 BuildInput(a, b, surfaceIdx),
@@ -106,6 +112,7 @@ public sealed class ArithmeticCreator : IExampleCreator
     {
         "add" => [
             "add {0} {1}",
+            "{0}+{1}",
             "{0} + {1}",
             "what is {0} plus {1}?",
             "{0} plus {1}",
@@ -113,6 +120,7 @@ public sealed class ArithmeticCreator : IExampleCreator
         ],
         "sub" => [
             "sub {0} {1}",
+            "{0}-{1}",
             "{0} - {1}",
             "what is {0} minus {1}?",
             "{0} minus {1}",

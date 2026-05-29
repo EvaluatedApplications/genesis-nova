@@ -1,8 +1,8 @@
-using GenesisNova.Cognition;
 using GenesisNova.Core;
 using GenesisNova.Infer;
 using GenesisNova.Model;
 using GenesisNova.Persistence;
+using GenesisNova.Cognition;
 using GenesisNova.Tokenization;
 using GenesisNova.Train;
 
@@ -17,18 +17,23 @@ public sealed class GenesisRuntimeState
         Tokenizer = new WhitespaceGenesisTokenizer();
         Model = new GenesisNeuralModel(config);
         Memory = new PlatonicSpaceMemory(faceDimension: Math.Max(4, config.HiddenSize / 2), seed: config.Seed);
-        Cognition = new PlatonicIntrospectionEngine(Memory);
         Conversation = new GenesisConversationMemory();
-        Trainer = new GenesisTrainer(Tokenizer, Model, Cognition);
+        Trainer = new GenesisTrainer(Tokenizer, Model, Memory, config);
         Orchestrator = new GenesisTrainingOrchestrator(Trainer);
-        Inference = new GenesisInferenceEngine(Tokenizer, Model, Cognition);
+        Inference = new GenesisInferenceEngine(
+            Tokenizer,
+            Model,
+            Memory,
+            ResolvePlatonicCheckpointPath,
+            Trainer.FoldPathDiscovery,
+            Trainer.TransformLibrary,
+            Trainer.TransformAccumulator);
     }
 
     public GenesisNovaConfig Config { get; private set; }
     public WhitespaceGenesisTokenizer Tokenizer { get; private set; }
     public GenesisNeuralModel Model { get; private set; }
     public PlatonicSpaceMemory Memory { get; private set; }
-    public PlatonicIntrospectionEngine Cognition { get; private set; }
     public GenesisConversationMemory Conversation { get; private set; }
     public GenesisTrainer Trainer { get; private set; }
     public GenesisTrainingOrchestrator Orchestrator { get; private set; }
@@ -38,7 +43,7 @@ public sealed class GenesisRuntimeState
         GenesisNovaConfig config,
         WhitespaceGenesisTokenizer tokenizer,
         GenesisNeuralModel model,
-        PlatonicCognitionSnapshot? cognitionSnapshot,
+        PlatonicMemorySnapshot? platonicSpaceSnapshot = null,
         GenesisConversationSnapshot? conversationSnapshot = null)
     {
         ConfigureCpuThreadPool(config);
@@ -46,15 +51,21 @@ public sealed class GenesisRuntimeState
         Tokenizer = tokenizer;
         Model = model;
         Memory = new PlatonicSpaceMemory(faceDimension: Math.Max(4, config.HiddenSize / 2), seed: config.Seed);
-        Cognition = new PlatonicIntrospectionEngine(Memory);
+        if (platonicSpaceSnapshot is not null)
+            Memory.ImportSnapshot(platonicSpaceSnapshot);
         Conversation = new GenesisConversationMemory();
-        Trainer = new GenesisTrainer(Tokenizer, Model, Cognition);
-        if (cognitionSnapshot is not null)
-            Trainer.ImportCognitionSnapshot(cognitionSnapshot);
+        Trainer = new GenesisTrainer(Tokenizer, Model, Memory, config);
         if (conversationSnapshot is not null)
             Conversation.ImportSnapshot(conversationSnapshot);
         Orchestrator = new GenesisTrainingOrchestrator(Trainer);
-        Inference = new GenesisInferenceEngine(Tokenizer, Model, Cognition);
+        Inference = new GenesisInferenceEngine(
+            Tokenizer,
+            Model,
+            Memory,
+            ResolvePlatonicCheckpointPath,
+            Trainer.FoldPathDiscovery,
+            Trainer.TransformLibrary,
+            Trainer.TransformAccumulator);
     }
 
     private static void ConfigureCpuThreadPool(GenesisNovaConfig config)
@@ -73,6 +84,12 @@ public sealed class GenesisRuntimeState
         ThreadPool.GetMinThreads(out var workerThreads, out var completionThreads);
         if (workerThreads < target)
             ThreadPool.SetMinThreads(target, completionThreads);
+    }
+
+    private string? ResolvePlatonicCheckpointPath()
+    {
+        var path = GenesisLocalStateStore.ResolveCheckpointPath(Config);
+        return File.Exists(path) ? path : null;
     }
 
 }

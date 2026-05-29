@@ -18,7 +18,7 @@ public static class GenesisCheckpointStore
         GenesisNovaConfig config,
         WhitespaceGenesisTokenizer tokenizer,
         GenesisNeuralModel model,
-        PlatonicCognitionSnapshot? cognition = null,
+        PlatonicMemorySnapshot? platonicSpace = null,
         GenesisConversationSnapshot? conversation = null)
     {
         var snapshot = model.Export();
@@ -30,7 +30,7 @@ public static class GenesisCheckpointStore
             RouteBias: [],
             OutputWeights: MatrixSnapshot.From(snapshot.OutputWeights),
             OutputBias: snapshot.OutputBias,
-            Cognition: cognition,
+            PlatonicSpace: platonicSpace,
             Conversation: conversation);
 
         var json = JsonSerializer.Serialize(payload, JsonOptions);
@@ -40,13 +40,13 @@ public static class GenesisCheckpointStore
         File.WriteAllText(path, json);
     }
 
-    public static (GenesisNovaConfig Config, WhitespaceGenesisTokenizer Tokenizer, GenesisNeuralModel Model, PlatonicCognitionSnapshot? Cognition, GenesisConversationSnapshot? Conversation) Load(string path)
+    public static (GenesisNovaConfig Config, WhitespaceGenesisTokenizer Tokenizer, GenesisNeuralModel Model, PlatonicMemorySnapshot? PlatonicSpace, GenesisConversationSnapshot? Conversation) Load(string path)
     {
         var payload = ReadPayload(path);
         return CreateRuntimePayload(payload, payload.Config);
     }
 
-    public static (GenesisNovaConfig Config, WhitespaceGenesisTokenizer Tokenizer, GenesisNeuralModel Model, PlatonicCognitionSnapshot? Cognition, GenesisConversationSnapshot? Conversation) LoadForRuntime(
+    public static (GenesisNovaConfig Config, WhitespaceGenesisTokenizer Tokenizer, GenesisNeuralModel Model, PlatonicMemorySnapshot? PlatonicSpace, GenesisConversationSnapshot? Conversation) LoadForRuntime(
         string path,
         GenesisNovaConfig runtimeConfig)
     {
@@ -61,7 +61,7 @@ public static class GenesisCheckpointStore
             ?? throw new InvalidOperationException("Failed to deserialize checkpoint.");
     }
 
-    private static (GenesisNovaConfig Config, WhitespaceGenesisTokenizer Tokenizer, GenesisNeuralModel Model, PlatonicCognitionSnapshot? Cognition, GenesisConversationSnapshot? Conversation) CreateRuntimePayload(
+    private static (GenesisNovaConfig Config, WhitespaceGenesisTokenizer Tokenizer, GenesisNeuralModel Model, PlatonicMemorySnapshot? PlatonicSpace, GenesisConversationSnapshot? Conversation) CreateRuntimePayload(
         GenesisCheckpoint payload,
         GenesisNovaConfig runtimeConfig)
     {
@@ -94,7 +94,7 @@ public static class GenesisCheckpointStore
 
         model.Import(snapshot);
 
-        return (effectiveConfig, tokenizer, model, payload.Cognition, payload.Conversation);
+        return (effectiveConfig, tokenizer, model, payload.PlatonicSpace, payload.Conversation);
     }
 
     private static ModelSnapshot ExpandSnapshot(ModelSnapshot snapshot, int hiddenSize)
@@ -105,7 +105,7 @@ public static class GenesisCheckpointStore
         var vocab = snapshot.Embeddings.GetLength(0);
         var expandedEmb = ExpandColumns(snapshot.Embeddings, hiddenSize, fill: 0.0);
         var expandedOut = ExpandRows(snapshot.OutputWeights, hiddenSize, fill: 0.0);
-        return new ModelSnapshot(expandedEmb, expandedOut, snapshot.OutputBias.ToArray());
+        return new ModelSnapshot(expandedEmb, expandedOut, snapshot.OutputBias.ToArray(), snapshot.RouteWeights, snapshot.RouteBias);
     }
 
     private static double[,] ExpandColumns(double[,] matrix, int targetCols, double fill)

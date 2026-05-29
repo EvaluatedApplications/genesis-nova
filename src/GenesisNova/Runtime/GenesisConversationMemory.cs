@@ -184,4 +184,23 @@ public sealed class GenesisConversationMemory
         string Content,
         bool IsResetSignal,
         string? Note);
+
+    public async Task DeleteRecentTurnsAsync(int count)
+    {
+       var removeCount = Math.Min(count, _recentTurns.Count);
+       if (removeCount > 0)
+           _recentTurns.RemoveRange(Math.Max(0, _recentTurns.Count - removeCount), removeCount);
+       await Task.CompletedTask;
+    }
+
+    public async Task ClearAsync()
+    {
+       _recentTurns.Clear();
+       _summary = string.Empty;
+       _resetCount = 0;
+       _compactionCount = 0;
+       _branchTrust = 1.0;
+       _lastResetAtUtc = null;
+       await Task.CompletedTask;
+    }
 }

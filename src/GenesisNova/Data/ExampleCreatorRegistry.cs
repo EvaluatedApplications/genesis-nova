@@ -10,11 +10,23 @@ public static class ExampleCreatorRegistry
 {
     public static readonly IReadOnlyList<IExampleCreator> All = new List<IExampleCreator>
     {
+        // ── Word seed / echo family (ported from original Genesis experiments) ──
+        new WordSeedCreator(),               // language:words
+        new SayWordCreator(),                // say:word
+        new SayCreator(),                    // say:exact
+        new SayTwoWordsCreator(),            // say:twowords
+        new SayThreeWordsCreator(),          // say:threewords
+        new Say1ChainCreator(),              // say1:chain
+
         // ── Arithmetic ────────────────────────────────────────────────────
         new ArithmeticCreator("add"),    // arithmetic:add
         new ArithmeticCreator("sub"),    // arithmetic:sub
         new ArithmeticCreator("mul"),    // arithmetic:mul
         new ArithmeticCreator("div"),    // arithmetic:div
+
+        // ── Relational / trivia creators (ported) ─────────────────────────
+        new RelationCreator(),               // relation:category
+        new JeopardyCreator(),               // jeopardy:trivia
 
         // ── Language ──────────────────────────────────────────────────────
         LanguageDefaults.Greet,          // language:greet

@@ -22,4 +22,25 @@ public sealed class ArithmeticCreatorTests
 
         Assert.Contains(examples, e => Regex.IsMatch(e.Input, @"^-?\d+-\-?\d+$"));
     }
+
+    [Fact]
+    public void WhenDifficultyIsHigh_ThenArithmeticIncludesSentenceStylePrompts()
+    {
+        var sut = new ArithmeticCreator("add");
+        var examples = sut.Generate(count: 800, difficulty: 3, forTraining: true);
+
+        Assert.Contains(examples, e => e.Input.Contains("what is", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(examples, e => e.Input.Contains("tell me", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void WhenDifficultyIsHigh_ThenArithmeticPermutesSynonymKeywords()
+    {
+        var sut = new ArithmeticCreator("add");
+        var examples = sut.Generate(count: 800, difficulty: 3, forTraining: true);
+
+        Assert.Contains(examples, e => e.Input.Contains("plus", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(examples, e => e.Input.Contains("added to", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(examples, e => e.Input.Contains("sum", StringComparison.OrdinalIgnoreCase) || e.Input.Contains("total", StringComparison.OrdinalIgnoreCase));
+    }
 }

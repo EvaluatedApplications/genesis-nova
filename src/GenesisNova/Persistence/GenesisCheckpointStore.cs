@@ -8,6 +8,8 @@ namespace GenesisNova.Persistence;
 
 public static class GenesisCheckpointStore
 {
+    private static readonly Mutex CheckpointFileMutex = new(initiallyOwned: false, name: @"Local\GenesisNova.CheckpointFile");
+    private static readonly TimeSpan CheckpointLockTimeout = TimeSpan.FromSeconds(15);
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         WriteIndented = true
@@ -19,7 +21,8 @@ public static class GenesisCheckpointStore
         WhitespaceGenesisTokenizer tokenizer,
         GenesisNeuralModel model,
         PlatonicMemorySnapshot? platonicSpace = null,
-        GenesisConversationSnapshot? conversation = null)
+        GenesisConversationSnapshot? conversation = null,
+        GenesisAutonomousTrainingSnapshot? autonomousTraining = null)
     {
         var snapshot = model.Export();
         var payload = new GenesisCheckpoint(
@@ -31,22 +34,36 @@ public static class GenesisCheckpointStore
             OutputWeights: MatrixSnapshot.From(snapshot.OutputWeights),
             OutputBias: snapshot.OutputBias,
             PlatonicSpace: platonicSpace,
-            Conversation: conversation);
+            Conversation: conversation,
+            AutonomousTraining: autonomousTraining);
 
         var json = JsonSerializer.Serialize(payload, JsonOptions);
         var dir = Path.GetDirectoryName(path);
         if (!string.IsNullOrWhiteSpace(dir))
             Directory.CreateDirectory(dir);
-        File.WriteAllText(path, json);
+        ExecuteWithCheckpointLock(path, () =>
+        {
+            var tempPath = $"{path}.{Environment.ProcessId}.{Guid.NewGuid():N}.tmp";
+            try
+            {
+                File.WriteAllText(tempPath, json);
+                File.Move(tempPath, path, overwrite: true);
+            }
+            finally
+            {
+                if (File.Exists(tempPath))
+                    File.Delete(tempPath);
+            }
+        });
     }
 
-    public static (GenesisNovaConfig Config, WhitespaceGenesisTokenizer Tokenizer, GenesisNeuralModel Model, PlatonicMemorySnapshot? PlatonicSpace, GenesisConversationSnapshot? Conversation) Load(string path)
+    public static (GenesisNovaConfig Config, WhitespaceGenesisTokenizer Tokenizer, GenesisNeuralModel Model, PlatonicMemorySnapshot? PlatonicSpace, GenesisConversationSnapshot? Conversation, GenesisAutonomousTrainingSnapshot? AutonomousTraining) Load(string path)
     {
         var payload = ReadPayload(path);
         return CreateRuntimePayload(payload, payload.Config);
     }
 
-    public static (GenesisNovaConfig Config, WhitespaceGenesisTokenizer Tokenizer, GenesisNeuralModel Model, PlatonicMemorySnapshot? PlatonicSpace, GenesisConversationSnapshot? Conversation) LoadForRuntime(
+    public static (GenesisNovaConfig Config, WhitespaceGenesisTokenizer Tokenizer, GenesisNeuralModel Model, PlatonicMemorySnapshot? PlatonicSpace, GenesisConversationSnapshot? Conversation, GenesisAutonomousTrainingSnapshot? AutonomousTraining) LoadForRuntime(
         string path,
         GenesisNovaConfig runtimeConfig)
     {
@@ -56,12 +73,36 @@ public static class GenesisCheckpointStore
 
     private static GenesisCheckpoint ReadPayload(string path)
     {
-        var json = File.ReadAllText(path);
+        var json = ExecuteWithCheckpointLock(path, () => File.ReadAllText(path));
         return JsonSerializer.Deserialize<GenesisCheckpoint>(json, JsonOptions)
             ?? throw new InvalidOperationException("Failed to deserialize checkpoint.");
     }
 
-    private static (GenesisNovaConfig Config, WhitespaceGenesisTokenizer Tokenizer, GenesisNeuralModel Model, PlatonicMemorySnapshot? PlatonicSpace, GenesisConversationSnapshot? Conversation) CreateRuntimePayload(
+    private static void ExecuteWithCheckpointLock(string path, Action action)
+    {
+        _ = ExecuteWithCheckpointLock(path, () =>
+        {
+            action();
+            return true;
+        });
+    }
+
+    private static T ExecuteWithCheckpointLock<T>(string path, Func<T> action)
+    {
+        if (!CheckpointFileMutex.WaitOne(CheckpointLockTimeout))
+            throw new IOException($"Timed out waiting for checkpoint file lock: {path}");
+
+        try
+        {
+            return action();
+        }
+        finally
+        {
+            CheckpointFileMutex.ReleaseMutex();
+        }
+    }
+
+    private static (GenesisNovaConfig Config, WhitespaceGenesisTokenizer Tokenizer, GenesisNeuralModel Model, PlatonicMemorySnapshot? PlatonicSpace, GenesisConversationSnapshot? Conversation, GenesisAutonomousTrainingSnapshot? AutonomousTraining) CreateRuntimePayload(
         GenesisCheckpoint payload,
         GenesisNovaConfig runtimeConfig)
     {
@@ -94,7 +135,7 @@ public static class GenesisCheckpointStore
 
         model.Import(snapshot);
 
-        return (effectiveConfig, tokenizer, model, payload.PlatonicSpace, payload.Conversation);
+        return (effectiveConfig, tokenizer, model, payload.PlatonicSpace, payload.Conversation, payload.AutonomousTraining);
     }
 
     private static ModelSnapshot ExpandSnapshot(ModelSnapshot snapshot, int hiddenSize)

@@ -468,7 +468,18 @@ public class GenesisNeuralModel
         if (inputTokens.Count == 0 || _vocabSize == 0)
             return zeros(new long[] { HiddenSize }, dtype: ScalarType.Float32, device: _trainingDevice);
 
-        var idx = inputTokens.Select(i => (long)i).ToArray();
+        var maxToken = inputTokens.Max();
+        if (maxToken >= _vocabSize)
+            EnsureVocabularySizeGpu(maxToken + 1);
+
+        var idx = inputTokens
+            .Where(i => i >= 0 && i < _vocabSize)
+            .Select(i => (long)i)
+            .ToArray();
+
+        if (idx.Length == 0)
+            return zeros(new long[] { HiddenSize }, dtype: ScalarType.Float32, device: _trainingDevice);
+
         using var idxTensor = tensor(idx, dtype: ScalarType.Int64, device: _trainingDevice);
         using var embRows = _embT!.index_select(0, idxTensor);
         
@@ -477,7 +488,7 @@ public class GenesisNeuralModel
         Tensor result = zeros(new long[] { HiddenSize }, dtype: ScalarType.Float32, device: _trainingDevice);
         const float alpha = 0.3f;  // Lighter exponential decay
         
-        for (var i = 0; i < inputTokens.Count; i++)
+        for (var i = 0; i < idx.Length; i++)
         {
             using var emb = embRows.index_select(0, tensor(new long[] { i }, dtype: ScalarType.Int64, device: _trainingDevice)).squeeze(0);
             using var prev = result;

@@ -1,5 +1,6 @@
 using GenesisNova.Core;
 using GenesisNova.Cognition;
+using GenesisNova.Train;
 
 namespace GenesisNova.Persistence;
 
@@ -12,7 +13,8 @@ public sealed record GenesisCheckpoint(
     MatrixSnapshot OutputWeights,
     double[] OutputBias,
     PlatonicMemorySnapshot? PlatonicSpace = null,
-    GenesisConversationSnapshot? Conversation = null);
+    GenesisConversationSnapshot? Conversation = null,
+    GenesisAutonomousTrainingSnapshot? AutonomousTraining = null);
 
 public sealed record MatrixSnapshot(int Rows, int Cols, double[] Values)
 {
@@ -53,3 +55,6 @@ public sealed record ConversationTurnSnapshot(
     string Content,
     bool IsResetSignal,
     string? Note = null);
+
+public sealed record GenesisAutonomousTrainingSnapshot(
+    GenesisAutonomousTrainingRound[] History);

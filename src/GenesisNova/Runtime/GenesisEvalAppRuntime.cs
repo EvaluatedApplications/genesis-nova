@@ -24,6 +24,8 @@ public sealed class GenesisEvalAppRuntime
     private double _bestTrainingLoss = double.MaxValue;  // Track best loss for conditional saving
     private AxiomaticPermutationEngine? _permutationEngine;
     private readonly SemaphoreSlim _modelOpsGate = new(1, 1);
+    private readonly List<GenesisAutonomousTrainingRound> _autonomousHistory = [];
+    private const int MaxAutonomousHistory = 512;
 
     public GenesisEvalAppRuntime(GenesisNovaConfig? config = null)
     {
@@ -160,6 +162,7 @@ public sealed class GenesisEvalAppRuntime
                     {
                         var loaded = GenesisCheckpointStore.LoadForRuntime(data.Path, _runtimeConfig);
                         _state.Replace(loaded.Config, loaded.Tokenizer, loaded.Model, loaded.PlatonicSpace, loaded.Conversation);
+                        RestoreAutonomousHistory(loaded.AutonomousTraining);
                         PersistCheckpoint(
                             reason: "load",
                             detail: data.Path);
@@ -237,6 +240,89 @@ public sealed class GenesisEvalAppRuntime
             var data = ExtractData(result);
             return data.Report ?? throw new InvalidOperationException("Training report missing.");
         });
+    }
+
+    public async Task<GenesisAutonomousTrainingRun> TrainAutonomousAsync(
+        GenesisAutonomousTrainingRequest request,
+        CancellationToken cancellationToken = default,
+        Action<string>? uiLogger = null)
+    {
+        return await WithModelGateAsync(() => Task.Run(() =>
+        {
+            var planner = new GenesisAutonomousTrainingPlanner();
+            var planningHistory = _autonomousHistory.ToList();
+            var rounds = new List<GenesisAutonomousTrainingRound>();
+            GenesisTrainingReport? lastReport = null;
+            var unlimitedRounds = request.MaxRounds <= 0;
+            var configuredRounds = Math.Max(1, request.MaxRounds);
+            var roundLimitLabel = unlimitedRounds ? "∞" : configuredRounds.ToString();
+
+            try
+            {
+                for (var round = 0; unlimitedRounds || round < configuredRounds; round++)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    var plan = planner.Suggest(request, planningHistory);
+                    uiLogger?.Invoke(
+                        $"[auto] round {round + 1}/{roundLimitLabel}: creator={plan.CreatorName} " +
+                        $"pool={plan.SampleCount} train={plan.TrainCount} difficulty={plan.Difficulty} epochs={plan.Epochs} :: {plan.Reason}");
+
+                    var creator = ExampleCreatorRegistry.All.FirstOrDefault(c =>
+                        c.Name.Equals(plan.CreatorName, StringComparison.OrdinalIgnoreCase))
+                        ?? throw new InvalidOperationException($"Creator not found: {plan.CreatorName}");
+
+                    var candidatePool = creator.Generate(Math.Max(1, plan.SampleCount), plan.Difficulty, forTraining: true);
+                    if (candidatePool.Length == 0)
+                        throw new InvalidOperationException($"Creator produced no examples: {creator.Name}");
+
+                    var trainCount = Math.Clamp(plan.TrainCount, 1, candidatePool.Length);
+                    var startIndex = round % candidatePool.Length;
+                    var examples = new List<GenesisExample>(trainCount);
+                    for (var i = 0; i < trainCount; i++)
+                    {
+                        var selected = candidatePool[(startIndex + i) % candidatePool.Length];
+                        examples.Add(new GenesisExample(selected.Input, selected.Output));
+                    }
+
+                    // Graceful stop: complete the current round safely, then stop before the next round.
+                    var report = _state.Orchestrator.Train(examples, plan.Epochs, uiLogger, CancellationToken.None);
+                    lastReport = report;
+
+                    var currentLoss = report.AverageLoss.TokenLoss;
+                    if (currentLoss < _bestTrainingLoss)
+                    {
+                        _bestTrainingLoss = currentLoss;
+                        PersistCheckpoint(
+                            reason: "auto-train-improved",
+                            detail: $"creator={creator.Name} difficulty={plan.Difficulty} pool={plan.SampleCount} trained={examples.Count} loss={currentLoss:F4}",
+                            exampleCount: examples.Count,
+                            loss: currentLoss);
+                    }
+
+                    var roundResult = new GenesisAutonomousTrainingRound(
+                        Round: round + 1,
+                        CreatorName: creator.Name,
+                        SampleCount: plan.SampleCount,
+                        Difficulty: plan.Difficulty,
+                        Epochs: plan.Epochs,
+                        Report: report);
+                    rounds.Add(roundResult);
+                    planningHistory.Add(roundResult);
+                    AppendAutonomousHistory(roundResult);
+                }
+            }
+            finally
+            {
+                PersistCheckpoint(
+                    reason: "auto-train-state",
+                    detail: $"rounds={rounds.Count}",
+                    exampleCount: rounds.Count,
+                    loss: lastReport?.AverageLoss.TokenLoss);
+            }
+
+            return new GenesisAutonomousTrainingRun(request, rounds, lastReport);
+        }, cancellationToken), cancellationToken);
     }
 
     public async Task<GenesisStepLoss> TrainOneAsync(GenesisExample example)
@@ -426,6 +512,7 @@ public sealed class GenesisEvalAppRuntime
 
         var loaded = GenesisCheckpointStore.LoadForRuntime(path, _runtimeConfig);
         _state.Replace(loaded.Config, loaded.Tokenizer, loaded.Model, loaded.PlatonicSpace, loaded.Conversation);
+        RestoreAutonomousHistory(loaded.AutonomousTraining);
         GenesisLocalStateStore.AppendJournalEntry(
             _runtimeConfig,
             "bootstrap",
@@ -470,7 +557,8 @@ public sealed class GenesisEvalAppRuntime
                 _state.Tokenizer,
                 _state.Model,
                 platonicSpace: _state.Memory.ExportSnapshot(),
-                conversation: _state.Conversation.ExportSnapshot());
+                conversation: _state.Conversation.ExportSnapshot(),
+                autonomousTraining: ExportAutonomousHistory());
             wrote = true;
         }
 
@@ -485,7 +573,8 @@ public sealed class GenesisEvalAppRuntime
                     _state.Tokenizer,
                     _state.Model,
                     platonicSpace: _state.Memory.ExportSnapshot(),
-                    conversation: _state.Conversation.ExportSnapshot());
+                    conversation: _state.Conversation.ExportSnapshot(),
+                    autonomousTraining: ExportAutonomousHistory());
                 wrote = true;
             }
         }
@@ -509,9 +598,9 @@ public sealed class GenesisEvalAppRuntime
             _ => throw new InvalidOperationException("Unsupported pipeline result.")
         };
 
-    private async Task<T> WithModelGateAsync<T>(Func<Task<T>> action)
+    private async Task<T> WithModelGateAsync<T>(Func<Task<T>> action, CancellationToken cancellationToken = default)
     {
-        await _modelOpsGate.WaitAsync();
+        await _modelOpsGate.WaitAsync(cancellationToken);
         try
         {
             return await action();
@@ -546,6 +635,29 @@ public sealed class GenesisEvalAppRuntime
     public async Task ClearConversationAsync()
     {
         await _state.Conversation.ClearAsync();
+    }
+
+    private GenesisAutonomousTrainingSnapshot ExportAutonomousHistory()
+        => new(_autonomousHistory.TakeLast(MaxAutonomousHistory).ToArray());
+
+    private void RestoreAutonomousHistory(GenesisAutonomousTrainingSnapshot? snapshot)
+    {
+        _autonomousHistory.Clear();
+        if (snapshot?.History is null || snapshot.History.Length == 0)
+            return;
+
+        foreach (var round in snapshot.History.TakeLast(MaxAutonomousHistory))
+            _autonomousHistory.Add(round);
+    }
+
+    private void AppendAutonomousHistory(GenesisAutonomousTrainingRound round)
+    {
+        _autonomousHistory.Add(round);
+        if (_autonomousHistory.Count <= MaxAutonomousHistory)
+            return;
+
+        var removeCount = _autonomousHistory.Count - MaxAutonomousHistory;
+        _autonomousHistory.RemoveRange(0, removeCount);
     }
 
 }

@@ -28,6 +28,7 @@ public sealed class GenesisRuntimeState
             Trainer.FoldPathDiscovery,
             Trainer.TransformLibrary,
             Trainer.TransformAccumulator);
+        Trainer.SetInferencePolicy(Inference);
     }
 
     public GenesisNovaConfig Config { get; private set; }
@@ -66,6 +67,7 @@ public sealed class GenesisRuntimeState
             Trainer.FoldPathDiscovery,
             Trainer.TransformLibrary,
             Trainer.TransformAccumulator);
+        Trainer.SetInferencePolicy(Inference);
     }
 
     private static void ConfigureCpuThreadPool(GenesisNovaConfig config)

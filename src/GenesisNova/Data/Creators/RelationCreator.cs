@@ -4,7 +4,7 @@ namespace GenesisNova.Data.Creators;
 
 public sealed class RelationCreator : IExampleCreator
 {
-    private const int StepSize = 12;
+    private const int StepSize = 16;
 
     private static readonly (string item, string category)[] Relations =
     [
@@ -30,7 +30,9 @@ public sealed class RelationCreator : IExampleCreator
             p => ($"{p.item} is a", p.category),
             p => ($"category of {p.item}", p.category),
             p => ($"what is {p.item}", p.category),
-            p => ($"{p.item} belongs to", p.category)
+            p => ($"{p.item} belongs to", p.category),
+            p => ($"classify {p.item}", p.category),
+            p => ($"{p.item} type?", p.category)
         };
 
         return Enumerable.Range(0, count).Select(i =>
@@ -42,8 +44,9 @@ public sealed class RelationCreator : IExampleCreator
 
     private static (string item, string category)[] SliceForLevel(int level)
     {
-        var start = (Math.Max(0, level) * StepSize) % Relations.Length;
-        var length = Math.Min(StepSize, Relations.Length);
+        var safeLevel = Math.Max(0, level);
+        var length = Math.Min(Relations.Length, StepSize + (safeLevel * 4));
+        var start = (safeLevel * StepSize) % Relations.Length;
         return Enumerable.Range(0, length)
             .Select(i => Relations[(start + i) % Relations.Length])
             .ToArray();

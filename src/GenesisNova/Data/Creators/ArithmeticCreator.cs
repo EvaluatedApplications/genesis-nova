@@ -26,8 +26,8 @@ public sealed class ArithmeticCreator : IExampleCreator
         _ => 20
     };
 
-    private const int StepSize = 10;
-    private const int RangeStep = 5;
+    private const int StepSize = 24;
+    private const int RangeStep = 4;
 
     public ImmutableArray<(string Input, string Output)> Generate(int count, int difficulty, bool forTraining)
     {
@@ -35,30 +35,26 @@ public sealed class ArithmeticCreator : IExampleCreator
         if (pairs.Length == 0)
             return ImmutableArray<(string, string)>.Empty;
 
-        var rng = new Random();
-        var examples = new List<(string, string)>(count);
-
-        while (examples.Count < count)
+        var level = Math.Max(0, difficulty);
+        var surfaces = Surfaces(_operation, level);
+        var examples = ImmutableArray.CreateBuilder<(string Input, string Output)>(count);
+        for (var i = 0; i < count; i++)
         {
-            var (a, b, answer) = pairs[examples.Count % pairs.Length];
-            var surfaces = Surfaces(_operation);
-            int surfaceIdx = rng.Next(surfaces.Length);
+            var (a, b, answer) = pairs[i % pairs.Length];
+            var surfaceIdx = (i + level) % surfaces.Length;
 
             // Guarantee compact symbolic forms (e.g., 1+1, 1-1) appear in generated
             // training data for add/sub creators.
-            if ((_operation is "add" or "sub") && examples.Count % 3 == 0)
+            if ((_operation is "add" or "sub") && i % 3 == 0)
                 surfaceIdx = 1; // compact form index in Surfaces(op)
 
             examples.Add((
-                BuildInput(a, b, surfaceIdx),
+                BuildInput(a, b, surfaceIdx, level),
                 F(answer)
             ));
         }
 
-        return examples
-            .OrderBy(_ => rng.Next())
-            .Take(count)
-            .ToImmutableArray();
+        return examples.ToImmutable();
     }
 
     // ── Deterministic pair generation ────────────────────────────────────
@@ -74,16 +70,32 @@ public sealed class ArithmeticCreator : IExampleCreator
         for (int i = 0; i < StepSize; i++)
         {
             double a, b;
-            if (level == 0)
+            if (_operation == "div")
             {
-                a = logOp ? rng.Next(1, curMax + 1) : rng.Next(-curMax, curMax + 1);
-                b = logOp ? rng.Next(1, curMax + 1) : rng.Next(-curMax, curMax + 1);
+                // Keep division targets learnable: generate mostly exact divisions.
+                var denomMax = Math.Max(2, curMax);
+                b = rng.Next(1, denomMax + 1);
+                var quotient = rng.Next(0, denomMax + 1);
+                if (level > 0 && rng.NextDouble() < 0.35)
+                {
+                    quotient = rng.Next(-denomMax, denomMax + 1);
+                }
+
+                a = quotient * b;
             }
             else
             {
-                int mag = rng.Next(prevMax + 1, curMax + 1);
-                a = logOp ? mag : (rng.Next(2) == 0 ? mag : -mag);
-                b = logOp ? rng.Next(1, curMax + 1) : rng.Next(-curMax, curMax + 1);
+                if (level == 0)
+                {
+                    a = logOp ? rng.Next(1, curMax + 1) : rng.Next(-curMax, curMax + 1);
+                    b = logOp ? rng.Next(1, curMax + 1) : rng.Next(-curMax, curMax + 1);
+                }
+                else
+                {
+                    int mag = rng.Next(prevMax + 1, curMax + 1);
+                    a = logOp ? mag : (rng.Next(2) == 0 ? mag : -mag);
+                    b = logOp ? rng.Next(1, curMax + 1) : rng.Next(-curMax, curMax + 1);
+                }
             }
 
             if (_operation == "div" && b == 0) b = 1;
@@ -102,45 +114,132 @@ public sealed class ArithmeticCreator : IExampleCreator
         _ => throw new ArgumentException($"Unknown operation: {_operation}")
     };
 
-    private string BuildInput(double a, double b, int surfaceIdx)
+    private string BuildInput(double a, double b, int surfaceIdx, int difficulty)
     {
-        var surfaces = Surfaces(_operation);
+        var surfaces = Surfaces(_operation, difficulty);
         return string.Format(surfaces[surfaceIdx % surfaces.Length], F(a), F(b));
     }
 
-    private static string[] Surfaces(string op) => op switch
+    private static string[] Surfaces(string op, int difficulty) => op switch
     {
-        "add" => [
-            "add {0} {1}",
-            "{0}+{1}",
-            "{0} + {1}",
-            "what is {0} plus {1}?",
-            "{0} plus {1}",
-            "the sum of {0} and {1}",
-        ],
-        "sub" => [
-            "sub {0} {1}",
-            "{0}-{1}",
-            "{0} - {1}",
-            "what is {0} minus {1}?",
-            "{0} minus {1}",
-            "the difference of {0} and {1}",
-        ],
-        "mul" => [
-            "multiply {0} by {1}",
-            "{0} * {1}",
-            "what is {0} times {1}?",
-            "{0} times {1}",
-            "the product of {0} and {1}",
-        ],
-        "div" => [
-            "divide {0} by {1}",
-            "{0} / {1}",
-            "what is {0} divided by {1}?",
-            "{0} divided by {1}",
-        ],
+        "add" => difficulty switch
+        {
+            0 => ["add {0} {1}", "{0}+{1}", "{0} + {1}", "{0} plus {1}"],
+            1 => ExpandSynonyms(
+                ["add {0} {1}", "{0}+{1}", "{0} + {1}", "{0} {plusWord} {1}", "{askLead} {0} {plusWord} {1}?", "the {sumWord} of {0} and {1}"],
+                new Dictionary<string, string[]>
+                {
+                    ["{plusWord}"] = ["plus", "added to"],
+                    ["{askLead}"] = ["what is", "what's"],
+                    ["{sumWord}"] = ["sum", "total"]
+                }),
+            _ => ExpandSynonyms(
+                ["add {0} {1}", "{0}+{1}", "{0} + {1}", "{0} {plusWord} {1}", "{askLead} {0} {plusWord} {1}?", "the {sumWord} of {0} and {1}", "{calcVerb} {0} + {1}", "{computeVerb} the {sumWord}: {0} and {1}", "if you {addVerb} {0} and {1}, what do you get?"],
+                new Dictionary<string, string[]>
+                {
+                    ["{plusWord}"] = ["plus", "added to"],
+                    ["{askLead}"] = ["what is", "what's", "tell me"],
+                    ["{sumWord}"] = ["sum", "total"],
+                    ["{calcVerb}"] = ["calculate", "work out"],
+                    ["{computeVerb}"] = ["compute", "find"],
+                    ["{addVerb}"] = ["add", "combine"]
+                })
+        },
+        "sub" => difficulty switch
+        {
+            0 => ["sub {0} {1}", "{0}-{1}", "{0} - {1}", "{0} minus {1}"],
+            1 => ExpandSynonyms(
+                ["sub {0} {1}", "{0}-{1}", "{0} - {1}", "{0} {minusWord} {1}", "{askLead} {0} {minusWord} {1}?", "the {diffWord} of {0} and {1}"],
+                new Dictionary<string, string[]>
+                {
+                    ["{minusWord}"] = ["minus", "take away"],
+                    ["{askLead}"] = ["what is", "what's"],
+                    ["{diffWord}"] = ["difference", "delta"]
+                }),
+            _ => ExpandSynonyms(
+                ["sub {0} {1}", "{0}-{1}", "{0} - {1}", "{0} {minusWord} {1}", "{askLead} {0} {minusWord} {1}?", "the {diffWord} of {0} and {1}", "{calcVerb} {0} - {1}", "{computeVerb} the {diffWord}: {0} and {1}", "if you {subVerb} {1} from {0}, what remains?"],
+                new Dictionary<string, string[]>
+                {
+                    ["{minusWord}"] = ["minus", "take away"],
+                    ["{askLead}"] = ["what is", "what's", "tell me"],
+                    ["{diffWord}"] = ["difference", "delta"],
+                    ["{calcVerb}"] = ["calculate", "work out"],
+                    ["{computeVerb}"] = ["compute", "find"],
+                    ["{subVerb}"] = ["subtract", "take"]
+                })
+        },
+        "mul" => difficulty switch
+        {
+            0 => ["multiply {0} by {1}", "{0}*{1}", "{0} * {1}", "{0} times {1}"],
+            1 => ExpandSynonyms(
+                ["multiply {0} by {1}", "{0}*{1}", "{0} * {1}", "{0} {timesWord} {1}", "{askLead} {0} {timesWord} {1}?", "the {prodWord} of {0} and {1}"],
+                new Dictionary<string, string[]>
+                {
+                    ["{timesWord}"] = ["times", "multiplied by"],
+                    ["{askLead}"] = ["what is", "what's"],
+                    ["{prodWord}"] = ["product", "result"]
+                }),
+            _ => ExpandSynonyms(
+                ["multiply {0} by {1}", "{0}*{1}", "{0} * {1}", "{0} {timesWord} {1}", "{askLead} {0} {timesWord} {1}?", "the {prodWord} of {0} and {1}", "{calcVerb} {0} * {1}", "{computeVerb} the {prodWord}: {0} and {1}", "if {0} groups each contain {1}, what is the {totalWord}?"],
+                new Dictionary<string, string[]>
+                {
+                    ["{timesWord}"] = ["times", "multiplied by"],
+                    ["{askLead}"] = ["what is", "what's", "tell me"],
+                    ["{prodWord}"] = ["product", "result"],
+                    ["{calcVerb}"] = ["calculate", "work out"],
+                    ["{computeVerb}"] = ["compute", "find"],
+                    ["{totalWord}"] = ["total", "sum"]
+                })
+        },
+        "div" => difficulty switch
+        {
+            0 => ["divide {0} by {1}", "{0}/{1}", "{0} / {1}", "{0} divided by {1}"],
+            1 => ExpandSynonyms(
+                ["divide {0} by {1}", "{0}/{1}", "{0} / {1}", "{0} divided by {1}", "{askLead} {0} divided by {1}?", "the {quotWord} of {0} and {1}"],
+                new Dictionary<string, string[]>
+                {
+                    ["{askLead}"] = ["what is", "what's"],
+                    ["{quotWord}"] = ["quotient", "ratio"]
+                }),
+            _ => ExpandSynonyms(
+                ["divide {0} by {1}", "{0}/{1}", "{0} / {1}", "{0} divided by {1}", "{askLead} {0} divided by {1}?", "the {quotWord} of {0} and {1}", "{calcVerb} {0} / {1}", "{computeVerb} the {quotWord}: {0} and {1}", "if you {splitVerb} {0} into {1} equal parts, what is each part?"],
+                new Dictionary<string, string[]>
+                {
+                    ["{askLead}"] = ["what is", "what's", "tell me"],
+                    ["{quotWord}"] = ["quotient", "ratio"],
+                    ["{calcVerb}"] = ["calculate", "work out"],
+                    ["{computeVerb}"] = ["compute", "find"],
+                    ["{splitVerb}"] = ["split", "divide"]
+                })
+        },
         _ => ["{0},{1}"]
     };
+
+    private static string[] ExpandSynonyms(string[] templates, IReadOnlyDictionary<string, string[]> replacements)
+    {
+        var expanded = templates.ToList();
+        foreach (var (token, values) in replacements)
+        {
+            if (values.Length == 0)
+                continue;
+
+            var next = new List<string>(expanded.Count * values.Length);
+            foreach (var template in expanded)
+            {
+                if (!template.Contains(token, StringComparison.Ordinal))
+                {
+                    next.Add(template);
+                    continue;
+                }
+
+                foreach (var value in values)
+                    next.Add(template.Replace(token, value, StringComparison.Ordinal));
+            }
+            expanded = next;
+        }
+
+        return expanded.Distinct(StringComparer.Ordinal).ToArray();
+    }
 
     private static string F(double v) =>
         Math.Abs(v - Math.Round(v)) < 1e-9

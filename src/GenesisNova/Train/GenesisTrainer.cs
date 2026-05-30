@@ -16,7 +16,7 @@ public sealed class GenesisTrainer
     private readonly GenesisNeuralModel _model;
     private readonly PlatonicSpaceMemory _platonicSpace;
     private readonly SpaceManager _spaceManager;
-    private readonly GenesisInferenceEngine _inferencePolicy;
+    private GenesisInferenceEngine _inferencePolicy;
     private readonly GenesisCompositeObjective _objective;
     private readonly FoldPathDiscovery _foldPathDiscovery;
     private readonly TransformAccumulator _transformAccumulator;
@@ -110,6 +110,9 @@ public sealed class GenesisTrainer
     public TransformAccumulator TransformAccumulator => _transformAccumulator;
     public TransformLibrary? TransformLibrary => _transforms;
     public int TickPatternPromotions => _tickPatternPromotions;
+    
+    public void SetInferencePolicy(GenesisInferenceEngine inferencePolicy)
+        => _inferencePolicy = inferencePolicy ?? throw new ArgumentNullException(nameof(inferencePolicy));
 
     public GenesisStepLoss TrainStepPreTokenized(int[] inputTokens, int[] targetTokens)
     {
@@ -240,11 +243,9 @@ public sealed class GenesisTrainer
           routeSum += EstimateUnifiedPathMismatch(example, targetTokens);
           qualitySum += ComputeQualityLoss();
               
-          // Clone parameters between examples to break the computation graph
-          // This prevents "backward through graph a second time" errors
-          // REQUIRED: not optional, TorchSharp design limitation
-          if (i < batch.Count - 1)
-              _model.CloneParametersToBreakGraph();
+          // Clone parameters after each example to break the computation graph.
+          // This prevents "backward through graph a second time" across batch boundaries.
+          _model.CloneParametersToBreakGraph();
        }
 
        var avgTokenLoss = totalTokenLoss / Math.Max(1.0, totalTokenWeight);

@@ -3,3 +3,6 @@ obj/
 .vs/
 *.user
 *.suo
+/models
+/tempbuild/Debug/net8.0-windows
+/tempbuild-tests/Debug/net8.0-windows

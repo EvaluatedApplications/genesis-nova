@@ -8,6 +8,12 @@ namespace GenesisNova.UI;
 
 public class MainWindow : Form
 {
+    private const int MaxTrainingLogChars = 240_000;
+    private const int TargetTrainingLogChars = 180_000;
+    private const int MaxReplLogChars = 200_000;
+    private const int TargetReplLogChars = 150_000;
+    private const int AutoScrollSlackChars = 256;
+
     private sealed record GeneratorTrainingRequest(
         string CreatorName,
         int SampleCount,
@@ -19,6 +25,7 @@ public class MainWindow : Form
 
     private readonly GenesisEvalAppRuntime _runtime;
     private CancellationTokenSource? _trainingCts;
+    private CancellationTokenSource? _autonomousTrainingCts;
     private string _exampleFolder;
     private readonly Dictionary<string, string> _trainingFilePathByLabel = new(StringComparer.OrdinalIgnoreCase);
     private TabControl _tabControl = null!;
@@ -66,6 +73,11 @@ public class MainWindow : Form
     protected override void OnFormClosed(FormClosedEventArgs e)
     {
         _trainingCts?.Cancel();
+        _trainingCts?.Dispose();
+        _trainingCts = null;
+        _autonomousTrainingCts?.Cancel();
+        _autonomousTrainingCts?.Dispose();
+        _autonomousTrainingCts = null;
         base.OnFormClosed(e);
     }
 
@@ -80,7 +92,10 @@ public class MainWindow : Form
         // Tab 1: Training
         _tabControl.TabPages.Add(CreateTrainingTab());
         
-        // Tab 2: REPL
+        // Tab 2: Autonomous Training
+        _tabControl.TabPages.Add(CreateAutonomousTrainingTab());
+
+        // Tab 3: REPL
         _tabControl.TabPages.Add(CreateReplTab());
 
         Controls.Add(_tabControl);
@@ -108,6 +123,27 @@ public class MainWindow : Form
 
         tab.Controls.Add(mainLayout);
         RefreshExampleFiles();
+        return tab;
+    }
+
+    private TabPage CreateAutonomousTrainingTab()
+    {
+        var tab = new TabPage("Autonomous");
+
+        var mainLayout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 2,
+            RowCount = 1,
+            Padding = new Padding(12)
+        };
+        mainLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 34));
+        mainLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 66));
+
+        mainLayout.Controls.Add(CreateAutonomousConfigPanel(), 0, 0);
+        mainLayout.Controls.Add(CreateAutonomousResultsPanel(), 1, 0);
+
+        tab.Controls.Add(mainLayout);
         return tab;
     }
 
@@ -562,7 +598,8 @@ public class MainWindow : Form
     private void AppendToRepl(string text, Color color)
     {
         var box = GetControl<RichTextBox>("ReplOutput");
-        if (box == null) return;
+        if (box == null || box.IsDisposed)
+            return;
 
         if (box.InvokeRequired)
         {
@@ -570,9 +607,16 @@ public class MainWindow : Form
             return;
         }
 
+        var shouldAutoScroll = IsNearBottom(box);
         box.SelectionColor = color;
         box.AppendText(text);
-        box.ScrollToCaret();
+        TrimRichTextHistory(box, MaxReplLogChars, TargetReplLogChars);
+        if (shouldAutoScroll)
+        {
+            box.SelectionStart = box.TextLength;
+            box.SelectionLength = 0;
+            box.ScrollToCaret();
+        }
     }
 
     private Panel CreateConfigPanel()
@@ -627,7 +671,7 @@ public class MainWindow : Form
         var thresholdInput = new NumericUpDown { Minimum = 0, Maximum = 10, DecimalPlaces = 3, Increment = 0.005M, Value = 0.100M, Width = 280, Height = 32, Name = "DifficultyThresholdInput" };
         layout.Controls.Add(thresholdInput);
         layout.Controls.Add(new Label { Text = "Max Curriculum Rounds:", Height = 20, Font = new Font("Segoe UI", 9) });
-        var maxRoundsInput = new NumericUpDown { Minimum = 1, Maximum = 200, Value = 30, Width = 280, Height = 32, Name = "MaxCurriculumRoundsInput" };
+        var maxRoundsInput = new NumericUpDown { Minimum = 1, Maximum = int.MaxValue, Value = 30, Width = 280, Height = 32, Name = "MaxCurriculumRoundsInput" };
         layout.Controls.Add(maxRoundsInput);
 
         layout.Controls.Add(new Label { Height = 10 });
@@ -718,6 +762,284 @@ public class MainWindow : Form
         var stopBtn = new Button { Text = "⏹ Stop Training", Width = 280, Height = 40, BackColor = Color.FromArgb(204, 51, 51), ForeColor = Color.White, Font = new Font("Segoe UI", 11, FontStyle.Bold), Name = "StopBtn", Enabled = false };
         stopBtn.Click += (s, e) => StopTraining();
         layout.Controls.Add(stopBtn);
+
+        panel.Controls.Add(layout);
+        return panel;
+    }
+
+    private Panel CreateAutonomousConfigPanel()
+    {
+        var panel = new Panel
+        {
+            Dock = DockStyle.Fill,
+            BackColor = SystemColors.Control,
+            Padding = new Padding(12)
+        };
+
+        var layout = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.TopDown,
+            AutoScroll = true,
+            WrapContents = false
+        };
+
+        layout.Controls.Add(new Label
+        {
+            Text = "Autonomous Training",
+            Font = new Font("Segoe UI", 14, FontStyle.Bold),
+            Height = 30
+        });
+        layout.Controls.Add(new Label
+        {
+            Text = "The model will pick the next creator, difficulty, sample count, and train micro-batch from feedback.",
+            Width = 300,
+            Height = 40
+        });
+
+        layout.Controls.Add(new Label { Text = "Starting Creator:", Height = 20, Font = new Font("Segoe UI", 9) });
+        var creatorCombo = new ComboBox
+        {
+            Width = 300,
+            Height = 32,
+            DropDownStyle = ComboBoxStyle.DropDownList,
+            Name = "AutoCreatorCombo"
+        };
+        creatorCombo.Items.Add("Auto (cycle creators)");
+        foreach (var creator in ExampleCreatorRegistry.All)
+            creatorCombo.Items.Add(creator.Name);
+        creatorCombo.SelectedIndex = 0;
+        layout.Controls.Add(creatorCombo);
+
+        layout.Controls.Add(new Label { Text = "Max Rounds:", Height = 20, Font = new Font("Segoe UI", 9) });
+        layout.Controls.Add(new NumericUpDown
+        {
+            Minimum = 0,
+            Maximum = int.MaxValue,
+            Value = 12,
+            Width = 300,
+            Height = 32,
+            Name = "AutoMaxRoundsInput"
+        });
+        layout.Controls.Add(new Label
+        {
+            Text = "Set to 0 for no limit.",
+            Width = 300,
+            Height = 20,
+            Font = new Font("Segoe UI", 8),
+            ForeColor = Color.DimGray
+        });
+
+        layout.Controls.Add(new Label { Text = "Initial Sample Count:", Height = 20, Font = new Font("Segoe UI", 9) });
+        layout.Controls.Add(new NumericUpDown
+        {
+            Minimum = 4,
+            Maximum = 10000,
+            Value = 24,
+            Width = 300,
+            Height = 32,
+            Name = "AutoSampleCountInput"
+        });
+
+        layout.Controls.Add(new Label { Text = "Initial Difficulty:", Height = 20, Font = new Font("Segoe UI", 9) });
+        layout.Controls.Add(new NumericUpDown
+        {
+            Minimum = 0,
+            Maximum = 100,
+            Value = 0,
+            Width = 300,
+            Height = 32,
+            Name = "AutoDifficultyInput"
+        });
+
+        layout.Controls.Add(new Label { Text = "Initial Epochs:", Height = 20, Font = new Font("Segoe UI", 9) });
+        layout.Controls.Add(new NumericUpDown
+        {
+            Minimum = 1,
+            Maximum = 64,
+            Value = 1,
+            Width = 300,
+            Height = 32,
+            Name = "AutoEpochsInput"
+        });
+
+        layout.Controls.Add(new Label { Text = "Initial Train Count:", Height = 20, Font = new Font("Segoe UI", 9) });
+        layout.Controls.Add(new NumericUpDown
+        {
+            Minimum = 1,
+            Maximum = 128,
+            Value = 4,
+            Width = 300,
+            Height = 32,
+            Name = "AutoTrainCountInput"
+        });
+
+        layout.Controls.Add(new Label { Text = "Loss Threshold:", Height = 20, Font = new Font("Segoe UI", 9) });
+        layout.Controls.Add(new NumericUpDown
+        {
+            Minimum = 0,
+            Maximum = 10,
+            DecimalPlaces = 3,
+            Increment = 0.005M,
+            Value = 1.200M,
+            Width = 300,
+            Height = 32,
+            Name = "AutoLossThresholdInput"
+        });
+
+        layout.Controls.Add(new Label { Text = "Sample Bounds:", Height = 20, Font = new Font("Segoe UI", 9) });
+        layout.Controls.Add(new FlowLayoutPanel
+        {
+            Width = 300,
+            Height = 40,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false,
+            Controls =
+            {
+                new Label { Text = "Min", Width = 32, TextAlign = ContentAlignment.MiddleLeft },
+                new NumericUpDown
+                {
+                    Minimum = 4,
+                    Maximum = 10000,
+                    Value = 12,
+                    Width = 80,
+                    Height = 28,
+                    Name = "AutoMinSampleInput"
+                },
+                new Label { Text = "Max", Width = 32, TextAlign = ContentAlignment.MiddleLeft },
+                new NumericUpDown
+                {
+                    Minimum = 8,
+                    Maximum = 10000,
+                    Value = 128,
+                    Width = 80,
+                    Height = 28,
+                    Name = "AutoMaxSampleInput"
+                }
+            }
+        });
+
+        layout.Controls.Add(new Label { Text = "Train Bounds:", Height = 20, Font = new Font("Segoe UI", 9) });
+        layout.Controls.Add(new FlowLayoutPanel
+        {
+            Width = 300,
+            Height = 40,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false,
+            Controls =
+            {
+                new Label { Text = "Min", Width = 32, TextAlign = ContentAlignment.MiddleLeft },
+                new NumericUpDown
+                {
+                    Minimum = 1,
+                    Maximum = 256,
+                    Value = 2,
+                    Width = 80,
+                    Height = 28,
+                    Name = "AutoMinTrainInput"
+                },
+                new Label { Text = "Max", Width = 32, TextAlign = ContentAlignment.MiddleLeft },
+                new NumericUpDown
+                {
+                    Minimum = 1,
+                    Maximum = 256,
+                    Value = 8,
+                    Width = 80,
+                    Height = 28,
+                    Name = "AutoMaxTrainInput"
+                }
+            }
+        });
+
+        layout.Controls.Add(new Label { Text = "Max Difficulty:", Height = 20, Font = new Font("Segoe UI", 9) });
+        layout.Controls.Add(new NumericUpDown
+        {
+            Minimum = 0,
+            Maximum = 100,
+            Value = 8,
+            Width = 300,
+            Height = 32,
+            Name = "AutoMaxDifficultyInput"
+        });
+
+        layout.Controls.Add(new Label { Height = 10 });
+
+        var startBtn = new Button
+        {
+            Text = "▶ Start Autonomous",
+            Width = 300,
+            Height = 40,
+            BackColor = Color.FromArgb(51, 153, 102),
+            ForeColor = Color.White,
+            Font = new Font("Segoe UI", 11, FontStyle.Bold),
+            Name = "AutoTrainBtn"
+        };
+        startBtn.Click += async (s, e) => await StartAutonomousTraining();
+        layout.Controls.Add(startBtn);
+
+        var stopBtn = new Button
+        {
+            Text = "⏹ Stop Autonomous",
+            Width = 300,
+            Height = 40,
+            BackColor = Color.FromArgb(204, 51, 51),
+            ForeColor = Color.White,
+            Font = new Font("Segoe UI", 11, FontStyle.Bold),
+            Name = "AutoStopBtn",
+            Enabled = false
+        };
+        stopBtn.Click += (s, e) => StopAutonomousTraining();
+        layout.Controls.Add(stopBtn);
+
+        panel.Controls.Add(layout);
+        return panel;
+    }
+
+    private Panel CreateAutonomousResultsPanel()
+    {
+        var panel = new Panel
+        {
+            Dock = DockStyle.Fill,
+            BackColor = Color.White,
+            Padding = new Padding(12)
+        };
+
+        var layout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 3,
+            Padding = new Padding(0)
+        };
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 72));
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 28));
+
+        layout.Controls.Add(new Label
+        {
+            Text = "Autonomous Training Results",
+            Font = new Font("Segoe UI", 14, FontStyle.Bold),
+            Dock = DockStyle.Fill
+        }, 0, 0);
+
+        layout.Controls.Add(new RichTextBox
+        {
+            Dock = DockStyle.Fill,
+            ReadOnly = true,
+            Font = new Font("Consolas", 9),
+            BackColor = Color.FromArgb(30, 30, 30),
+            ForeColor = Color.FromArgb(200, 220, 200),
+            Name = "AutoOutputBox"
+        }, 0, 1);
+
+        layout.Controls.Add(new Label
+        {
+            Text = "Rounds: 0 | Last loss: n/a | Creator: n/a",
+            Font = new Font("Consolas", 10),
+            Dock = DockStyle.Fill,
+            AutoSize = false,
+            Name = "AutoStatsText"
+        }, 0, 2);
 
         panel.Controls.Add(layout);
         return panel;
@@ -930,6 +1252,101 @@ public class MainWindow : Form
             _trainingCts?.Dispose();
             _trainingCts = null;
         }
+    }
+
+    private GenesisAutonomousTrainingRequest? TryBuildAutonomousTrainingRequest()
+    {
+        var creatorCombo = GetControl<ComboBox>("AutoCreatorCombo");
+        var maxRounds = GetControl<NumericUpDown>("AutoMaxRoundsInput");
+        var sampleCount = GetControl<NumericUpDown>("AutoSampleCountInput");
+        var difficulty = GetControl<NumericUpDown>("AutoDifficultyInput");
+        var epochs = GetControl<NumericUpDown>("AutoEpochsInput");
+        var trainCount = GetControl<NumericUpDown>("AutoTrainCountInput");
+        var lossThreshold = GetControl<NumericUpDown>("AutoLossThresholdInput");
+        var minSample = GetControl<NumericUpDown>("AutoMinSampleInput");
+        var maxSample = GetControl<NumericUpDown>("AutoMaxSampleInput");
+        var minTrain = GetControl<NumericUpDown>("AutoMinTrainInput");
+        var maxTrain = GetControl<NumericUpDown>("AutoMaxTrainInput");
+        var maxDifficulty = GetControl<NumericUpDown>("AutoMaxDifficultyInput");
+
+        if (creatorCombo == null || creatorCombo.SelectedIndex < 0)
+            return null;
+
+        var preferredCreator = creatorCombo.SelectedIndex == 0
+            ? null
+            : creatorCombo.SelectedItem?.ToString();
+
+        return new GenesisAutonomousTrainingRequest(
+            MaxRounds: (int)(maxRounds?.Value ?? 12),
+            InitialSampleCount: (int)(sampleCount?.Value ?? 24),
+            InitialDifficulty: (int)(difficulty?.Value ?? 0),
+            InitialEpochs: (int)(epochs?.Value ?? 1),
+            InitialTrainCount: (int)(trainCount?.Value ?? 4),
+            LossThreshold: (double)(lossThreshold?.Value ?? 1.200M),
+            MinSampleCount: (int)(minSample?.Value ?? 12),
+            MaxSampleCount: (int)(maxSample?.Value ?? 128),
+            MinTrainCount: (int)(minTrain?.Value ?? 2),
+            MaxTrainCount: (int)(maxTrain?.Value ?? 8),
+            MaxDifficulty: (int)(maxDifficulty?.Value ?? 8),
+            PreferredCreator: preferredCreator);
+    }
+
+    private async Task StartAutonomousTraining()
+    {
+        var request = TryBuildAutonomousTrainingRequest();
+        if (request is null)
+        {
+            MessageBox.Show("Please configure the autonomous training settings.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        var startBtn = GetControl<Button>("AutoTrainBtn");
+        var stopBtn = GetControl<Button>("AutoStopBtn");
+        if (startBtn != null) startBtn.Enabled = false;
+        if (stopBtn != null) stopBtn.Enabled = true;
+
+        _autonomousTrainingCts = new CancellationTokenSource();
+
+        try
+        {
+            var roundsLabel = request.MaxRounds <= 0 ? "∞" : request.MaxRounds.ToString();
+            AppendAutonomousOutput($"[auto] starting: rounds={roundsLabel} sample={request.InitialSampleCount} train={request.InitialTrainCount} difficulty={request.InitialDifficulty}");
+            var run = await _runtime.TrainAutonomousAsync(request, _autonomousTrainingCts.Token, AppendAutonomousOutput);
+            var final = run.FinalReport;
+            if (final is not null)
+            {
+                AppendAutonomousOutput($"[auto] complete: rounds={run.Rounds.Count} final_loss={final.AverageLoss.TokenLoss:F4}");
+                UpdateAutonomousStats(run.Rounds.Count, final.AverageLoss.TokenLoss, run.Rounds.LastOrDefault()?.CreatorName ?? "n/a");
+            }
+            else
+            {
+                AppendAutonomousOutput("[auto] complete: no report returned");
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            AppendAutonomousOutput("[auto] stopped by user.");
+        }
+        catch (Exception ex)
+        {
+            AppendExceptionReport("Autonomous training failed", ex, boxName: "AutoOutputBox");
+        }
+        finally
+        {
+            if (startBtn != null) startBtn.Enabled = true;
+            if (stopBtn != null) stopBtn.Enabled = false;
+            _autonomousTrainingCts?.Dispose();
+            _autonomousTrainingCts = null;
+        }
+    }
+
+    private void StopAutonomousTraining()
+    {
+        if (_autonomousTrainingCts is null || _autonomousTrainingCts.IsCancellationRequested)
+            return;
+
+        AppendAutonomousOutput("[auto] stop requested: finishing current round...");
+        _autonomousTrainingCts.Cancel();
     }
 
     private async Task<GenesisTrainingReport> RunSingleGeneratorRound(
@@ -1206,6 +1623,21 @@ public class MainWindow : Form
         }
     }
 
+    private void UpdateAutonomousStats(int roundCount, double loss, string creator)
+    {
+        if (InvokeRequired)
+        {
+            BeginInvoke(new Action(() => UpdateAutonomousStats(roundCount, loss, creator)));
+            return;
+        }
+
+        var statsText = GetControl<Label>("AutoStatsText");
+        if (statsText != null)
+        {
+            statsText.Text = $"Rounds: {roundCount} | Last loss: {loss:F4} | Creator: {creator}";
+        }
+    }
+
     private string BuildStatsText(int? exampleCount, double? loss)
     {
         var vocab = Math.Max(1, _runtime.VocabularySize);
@@ -1224,29 +1656,83 @@ public class MainWindow : Form
 
     private void AppendOutput(string message)
     {
+        AppendToLogBox("OutputBox", message);
+    }
+
+    private void AppendAutonomousOutput(string message)
+    {
+        AppendToLogBox("AutoOutputBox", message);
+    }
+
+    private void AppendToLogBox(string boxName, string message)
+    {
         if (InvokeRequired)
         {
-            Invoke(() => AppendOutput(message));
+            Invoke(() => AppendToLogBox(boxName, message));
             return;
         }
 
-        var outputBox = GetControl<RichTextBox>("OutputBox");
-        if (outputBox != null)
+        var outputBox = GetControl<RichTextBox>(boxName);
+        if (outputBox != null && !outputBox.IsDisposed)
         {
+            var shouldAutoScroll = IsNearBottom(outputBox);
             outputBox.AppendText($"[{DateTime.Now:HH:mm:ss}] {message}\n");
-            outputBox.ScrollToCaret();
+            TrimRichTextHistory(outputBox, MaxTrainingLogChars, TargetTrainingLogChars);
+            if (shouldAutoScroll)
+            {
+                outputBox.SelectionStart = outputBox.TextLength;
+                outputBox.SelectionLength = 0;
+                outputBox.ScrollToCaret();
+            }
         }
     }
 
-    private void AppendExceptionReport(string context, Exception ex)
+    private static void TrimRichTextHistory(RichTextBox box, int maxChars, int targetChars)
     {
-        AppendOutput($"{context}: {ex.GetType().Name}: {ex.Message}");
+        if (box.IsDisposed || !box.IsHandleCreated)
+            return;
+
+        if (box.TextLength <= maxChars)
+            return;
+
+        var removeChars = box.TextLength - targetChars;
+        var text = box.Text;
+        var newline = text.IndexOf('\n', Math.Max(0, removeChars));
+        var trimAt = newline >= 0 ? newline + 1 : removeChars;
+        if (trimAt <= 0)
+            return;
+
+        trimAt = Math.Min(trimAt, box.TextLength);
+        var previousSelectionStart = box.SelectionStart;
+        var previousSelectionLength = box.SelectionLength;
+
+        box.Select(0, trimAt);
+        box.SelectedText = string.Empty;
+
+        var restoredStart = Math.Max(0, previousSelectionStart - trimAt);
+        var maxLength = Math.Max(0, box.TextLength - restoredStart);
+        var restoredLength = Math.Min(previousSelectionLength, maxLength);
+        box.Select(restoredStart, restoredLength);
+    }
+
+    private static bool IsNearBottom(RichTextBox box)
+    {
+        if (box.TextLength == 0)
+            return true;
+
+        var visibleBottomIndex = box.GetCharIndexFromPosition(new Point(4, Math.Max(4, box.ClientSize.Height - 4)));
+        return box.TextLength - visibleBottomIndex <= AutoScrollSlackChars;
+    }
+
+    private void AppendExceptionReport(string context, Exception ex, string boxName = "OutputBox")
+    {
+        AppendToLogBox(boxName, $"{context}: {ex.GetType().Name}: {ex.Message}");
 
         var depth = 1;
         var inner = ex.InnerException;
         while (inner != null && depth <= 8)
         {
-            AppendOutput($"  ↳ Inner {depth}: {inner.GetType().Name}: {inner.Message}");
+            AppendToLogBox(boxName, $"  ↳ Inner {depth}: {inner.GetType().Name}: {inner.Message}");
             inner = inner.InnerException;
             depth++;
         }
@@ -1255,7 +1741,7 @@ public class MainWindow : Form
         if (flattened.Contains("cuda out of memory", StringComparison.Ordinal) ||
             flattened.Contains("outofmemory", StringComparison.Ordinal))
         {
-            AppendOutput("  Hint: GPU memory exhausted. Reduce epochs/hidden size, switch to CPU, or restart app to release VRAM.");
+            AppendToLogBox(boxName, "  Hint: GPU memory exhausted. Reduce epochs/hidden size, switch to CPU, or restart app to release VRAM.");
         }
     }
 

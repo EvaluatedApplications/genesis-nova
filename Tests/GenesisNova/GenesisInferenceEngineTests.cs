@@ -100,6 +100,28 @@ public sealed class GenesisInferenceEngineTests
     }
 
     [Fact]
+    public void WhenArithmeticUsesLargeMaxTokens_ThenChunkingStopsAfterFirstExactAnswer()
+    {
+        var tokenizer = new WhitespaceGenesisTokenizer();
+        var model = new GenesisNeuralModel(new GenesisNovaConfig(HiddenSize: 32, LearningRate: 0.05));
+        var memory = new PlatonicSpaceMemory(faceDimension: 16);
+        var trainer = new GenesisTrainer(tokenizer, model, memory);
+        var inference = new GenesisInferenceEngine(tokenizer, model, memory);
+
+        // Ensure routing is learned toward platonic path for compact arithmetic.
+        for (var i = 0; i < 30; i++)
+            trainer.TrainStep(new GenesisExample("1+1", "2"));
+
+        var result = inference.Generate(new GenerationRequest(
+            Input: "1+1",
+            MaxNewTokens: 48,
+            ChunkTokenBudget: 16));
+
+        Assert.Equal("2", result.Output);
+        Assert.Equal(1, result.ChunksGenerated);
+    }
+
+    [Fact]
     public void WhenChunkBudgetIsSmall_ThenGenerateUsesMultipleInferencePasses()
     {
         var tokenizer = new WhitespaceGenesisTokenizer();

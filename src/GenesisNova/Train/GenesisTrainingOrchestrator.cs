@@ -57,7 +57,8 @@ public sealed class GenesisTrainingOrchestrator
     public GenesisTrainingReport Train(
         IReadOnlyList<GenesisExample> examples,
         int epochs,
-        Action<string>? logger = null)
+        Action<string>? logger = null,
+        CancellationToken cancellationToken = default)
     {
         if (examples.Count == 0)
             throw new ArgumentException("No training examples provided.", nameof(examples));
@@ -84,6 +85,7 @@ public sealed class GenesisTrainingOrchestrator
 
         for (var e = 1; e <= Math.Max(1, epochs); e++)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var epochStart = System.Diagnostics.Stopwatch.StartNew();
             var epochSum = 0.0;
             var batchCount = 0;
@@ -98,6 +100,7 @@ public sealed class GenesisTrainingOrchestrator
             // Process examples in batches
             for (var batchStart = 0; batchStart < epochPool.Count; batchStart += batchSize)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 var batchEnd = Math.Min(batchStart + batchSize, epochPool.Count);
                 var batch = epochPool
                     .Skip(batchStart)

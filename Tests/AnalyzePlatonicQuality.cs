@@ -32,7 +32,7 @@ public class AnalyzePlatonicQuality
         _output.WriteLine($"Checkpoint path: {checkpointPath}");
         _output.WriteLine($"Exists: {System.IO.File.Exists(checkpointPath)}");
         
-        var (config, tokenizer, model, platonic, conversation) = 
+        var (config, tokenizer, model, platonic, conversation, autonomousTraining) = 
             GenesisCheckpointStore.Load(checkpointPath);
         
         Assert.NotNull(platonic);

@@ -240,7 +240,10 @@ public sealed class GenesisInferenceEngine
             return false;
 
         var response = FormatNumber(prediction);
-        var tokens = _tokenizer.Encode(response).Take(Math.Max(1, request.MaxNewTokens)).ToArray();
+        var tokens = _tokenizer
+            .Encode(response, addEos: true)
+            .Take(Math.Max(1, request.MaxNewTokens))
+            .ToArray();
         if (tokens.Length == 0)
             return false;
 
@@ -268,7 +271,7 @@ public sealed class GenesisInferenceEngine
         result = default!;
         if (TryResolveArithmeticQuery(request.Input, out var arithmetic))
         {
-            var queryTokens = _tokenizer.Encode(arithmetic.ResponseText);
+            var queryTokens = _tokenizer.Encode(arithmetic.ResponseText, addEos: true);
             var bounded = queryTokens.Take(Math.Max(1, request.MaxNewTokens)).ToArray();
             result = new GenerationResult(
                 Output: _tokenizer.Decode(bounded),
@@ -297,7 +300,7 @@ public sealed class GenesisInferenceEngine
         if (string.IsNullOrWhiteSpace(conceptResult.Text))
             return false;
 
-        var tokens = _tokenizer.Encode(conceptResult.Text)
+        var tokens = _tokenizer.Encode(conceptResult.Text, addEos: true)
             .Take(Math.Max(1, request.MaxNewTokens))
             .ToArray();
         if (tokens.Length == 0)

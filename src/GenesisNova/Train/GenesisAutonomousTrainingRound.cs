@@ -6,4 +6,5 @@ public sealed record GenesisAutonomousTrainingRound(
     int SampleCount,
     int Difficulty,
     int Epochs,
-    GenesisTrainingReport Report);
+    GenesisTrainingReport Report,
+    GenesisCreatorProgress? CreatorProgress = null);

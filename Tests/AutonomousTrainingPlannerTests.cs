@@ -26,10 +26,10 @@ public sealed class AutonomousTrainingPlannerTests
 
         Assert.Equal("easy", plan.CreatorName);
         Assert.Equal(24, plan.SampleCount);
-        Assert.Equal(4, plan.TrainCount);
+        Assert.Equal(1, plan.TrainCount);
         Assert.Equal(0, plan.Difficulty);
         Assert.Equal(1, plan.Epochs);
-        Assert.Contains("start low", plan.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("start tiny", plan.Reason, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -64,7 +64,7 @@ public sealed class AutonomousTrainingPlannerTests
 
         Assert.Equal("medium", plan.CreatorName);
         Assert.Equal(24, plan.SampleCount);
-        Assert.Equal(4, plan.TrainCount);
+        Assert.Equal(1, plan.TrainCount);
         Assert.Equal(0, plan.Difficulty);
         Assert.Equal(1, plan.Epochs);
     }
@@ -163,6 +163,70 @@ public sealed class AutonomousTrainingPlannerTests
     }
 
     [Fact]
+    public void WhenLossIsBelowThreshold_ThenHorizonGrowsOrganically()
+    {
+        var planner = new GenesisAutonomousTrainingPlanner(new IExampleCreator[]
+        {
+            new StubCreator("public:test", 1)
+        });
+
+        var history = new[]
+        {
+            new GenesisAutonomousTrainingRound(
+                Round: 1,
+                CreatorName: "public:test",
+                SampleCount: 1,
+                Difficulty: 0,
+                Epochs: 1,
+                Report: CreateReport(loss: 0.05, noise: 0.01))
+        };
+
+        var plan = planner.Suggest(
+            new GenesisAutonomousTrainingRequest(
+                MaxRounds: 8,
+                InitialSampleCount: 1,
+                InitialTrainCount: 1,
+                MinSampleCount: 1,
+                MinTrainCount: 1,
+                MaxSampleCount: 16,
+                MaxTrainCount: 16,
+                LossThreshold: 0.10),
+            history);
+
+        Assert.Equal(2, plan.SampleCount);
+        Assert.Equal(2, plan.TrainCount);
+        Assert.Equal(1, plan.Difficulty);
+    }
+
+    [Fact]
+    public void WhenRoundBudgetExceedsSampleCaps_ThenCompositePlanningClampsWithoutStalling()
+    {
+        var planner = new GenesisAutonomousTrainingPlanner(new IExampleCreator[]
+        {
+            new StubCreator("public:a", 1),
+            new StubCreator("public:b", 2),
+            new StubCreator("public:c", 3),
+            new StubCreator("public:d", 4)
+        });
+
+        var plan = planner.SuggestComposite(
+            new GenesisAutonomousTrainingRequest(
+                InitialSampleCount: 1,
+                InitialTrainCount: 1,
+                MinSampleCount: 1,
+                MaxSampleCount: 1,
+                MinTrainCount: 1,
+                MaxTrainCount: 24,
+                RoundTrainBudget: 16),
+            history: [],
+            roundIndex: 0);
+
+        Assert.Equal(4, plan.CreatorPlans.Count);
+        Assert.All(plan.CreatorPlans, creatorPlan => Assert.Equal(1, creatorPlan.TrainCount));
+        Assert.Equal(4, plan.CreatorPlans.Sum(p => p.TrainCount));
+    }
+
+    [Fact]
     public void WhenLossIsLowButNoiseIsHigh_ThenDifficultyStillIncreases()
     {
         var planner = new GenesisAutonomousTrainingPlanner(new IExampleCreator[]
@@ -249,6 +313,7 @@ public sealed class AutonomousTrainingPlannerTests
 
         public string Name { get; }
         public int EstimatedComplexity { get; }
+        public GenesisTrainingExampleKind TrainingKind => GenesisTrainingExampleKind.WindowedText;
 
         public ImmutableArray<(string Input, string Output)> Generate(int count, int difficulty, bool forTraining)
             => ImmutableArray.CreateRange(Enumerable.Range(0, Math.Max(0, count)).Select(i => ($"{Name}:{difficulty}:{i}", $"{Name}:{difficulty}:{i}")));

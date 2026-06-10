@@ -95,7 +95,9 @@ public sealed class GenesisRepl
             var sw = Stopwatch.StartNew();
             var report = await _runtime.TrainAsync(path, epochs);
             sw.Stop();
-            return $"trained examples={report.ExampleCount} epochs={report.Epochs} loss={report.AverageLoss.TotalLoss:F4} time={sw.ElapsedMilliseconds / 1000.0:F2}s";
+            return
+                $"trained examples={report.ExampleCount} epochs={report.Epochs} loss={report.AverageLoss.TotalLoss:F4} " +
+                $"success={report.ExampleSuccessRate:P1} time={sw.ElapsedMilliseconds / 1000.0:F2}s";
         }
 
         if (line.StartsWith("train ", StringComparison.OrdinalIgnoreCase))

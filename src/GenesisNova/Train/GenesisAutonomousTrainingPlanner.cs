@@ -4,12 +4,16 @@ namespace GenesisNova.Train;
 
 public sealed class GenesisAutonomousTrainingPlanner
 {
+    private const int SampleRecommendationMultiplier = 2;
     private readonly IReadOnlyList<IExampleCreator> _creators;
     private sealed record CreatorSignal(
         string CreatorName,
         int Attempts,
         double AvgLoss,
+        double SuccessRate,
+        double RecentSuccessRate,
         int MaxDifficulty,
+        int LastSeenCount,
         int RecentHits,
         int ConsecutiveRecentRounds,
         bool Mastered,
@@ -39,12 +43,13 @@ public sealed class GenesisAutonomousTrainingPlanner
             .Where(h => h.CreatorName.Equals(creator.Name, StringComparison.OrdinalIgnoreCase))
             .ToArray();
         var lastForCreator = creatorHistory.Length > 0 ? creatorHistory[^1] : null;
+        var creatorSignal = signals.FirstOrDefault(s => s.CreatorName.Equals(creator.Name, StringComparison.OrdinalIgnoreCase));
 
-        var difficulty = ChooseDifficulty(request, lastForCreator);
-        var sampleCount = ChooseSampleCount(request, lastForCreator);
-        var trainCount = ChooseTrainCount(request, creatorHistory);
-        var epochs = ChooseEpochs(request, lastForCreator);
-        var reason = BuildReason(request, round, signals, creator.Name, sampleCount, trainCount, difficulty);
+        var difficulty = ChooseDifficulty(request, lastForCreator, creatorSignal);
+        var sampleCount = ChooseSampleCount(request, lastForCreator, creatorSignal);
+        var trainCount = ChooseTrainCount(request, creatorHistory, creatorSignal);
+        var epochs = ChooseEpochs(request, lastForCreator, creatorSignal);
+        var reason = BuildReason(request, round, signals, creator.Name, sampleCount, trainCount, difficulty, epochs);
 
         return new GenesisAutonomousTrainingPlan(
             CreatorName: creator.Name,
@@ -53,6 +58,214 @@ public sealed class GenesisAutonomousTrainingPlanner
             Difficulty: difficulty,
             Epochs: epochs,
             Reason: reason);
+    }
+
+    public GenesisAutonomousCompositePlan SuggestComposite(
+        GenesisAutonomousTrainingRequest request,
+        IReadOnlyList<GenesisAutonomousTrainingRound> history,
+        int roundIndex)
+    {
+        if (_creators.Count == 0)
+            throw new InvalidOperationException("No example creators are registered.");
+
+        var signals = BuildSignals(request, history)
+            .ToDictionary(s => s.CreatorName, StringComparer.OrdinalIgnoreCase);
+        var plans = new List<GenesisAutonomousCreatorPlan>(_creators.Count);
+        foreach (var creator in _creators)
+        {
+            var creatorHistory = history
+                .Where(h => h.CreatorName.Equals(creator.Name, StringComparison.OrdinalIgnoreCase))
+                .ToArray();
+            var lastForCreator = creatorHistory.Length > 0 ? creatorHistory[^1] : null;
+            var signal = signals.TryGetValue(creator.Name, out var current) ? current : null;
+            var sampleCount = ChooseSampleCount(request, lastForCreator, signal);
+            var difficulty = ChooseDifficulty(request, lastForCreator, signal);
+            var suggestedTrain = ChooseTrainCount(request, creatorHistory, signal);
+            var epochs = ChooseEpochs(request, lastForCreator, signal);
+            var priority = signal?.Priority ?? request.NewCreatorBasePriority;
+            var reason = BuildReason(
+                request,
+                roundIndex,
+                signals.Values.ToArray(),
+                creator.Name,
+                sampleCount,
+                suggestedTrain,
+                difficulty,
+                epochs);
+
+            plans.Add(new GenesisAutonomousCreatorPlan(
+                CreatorName: creator.Name,
+                SampleCount: sampleCount,
+                TrainCount: suggestedTrain,
+                Difficulty: difficulty,
+                Epochs: epochs,
+                Priority: priority,
+                Reason: reason));
+        }
+
+        var allocated = AllocateTrainCounts(request, plans);
+        var roundEpochs = Math.Max(1, allocated.Max(p => p.Epochs));
+        var summary = $"round {roundIndex + 1}: datasets={allocated.Count} budget={allocated.Sum(p => p.TrainCount)} epochs={roundEpochs}";
+        return new GenesisAutonomousCompositePlan(
+            Round: roundIndex + 1,
+            Epochs: roundEpochs,
+            CreatorPlans: allocated,
+            Reason: summary);
+    }
+
+    private static IReadOnlyList<GenesisAutonomousCreatorPlan> AllocateTrainCounts(
+        GenesisAutonomousTrainingRequest request,
+        IReadOnlyList<GenesisAutonomousCreatorPlan> plans)
+    {
+        if (plans.Count == 0)
+            return [];
+
+        var targetBudget = Math.Max(
+            plans.Count * Math.Max(1, request.MinTrainCount),
+            Math.Max(request.RoundTrainBudget, plans.Count));
+
+        var adjusted = plans
+            .Select(p =>
+            {
+                var minTrain = Math.Max(1, request.MinTrainCount);
+                var maxTrain = Math.Max(minTrain, request.MaxTrainCount);
+                var bounded = Math.Clamp(p.TrainCount, minTrain, maxTrain);
+                var effectiveTrain = Math.Min(bounded, Math.Max(1, p.SampleCount));
+                return p with { TrainCount = effectiveTrain };
+            })
+            .ToArray();
+
+        var current = adjusted.Sum(p => p.TrainCount);
+        if (current > targetBudget)
+        {
+            var ordered = adjusted
+                .Select((plan, index) => (plan, index))
+                .OrderByDescending(x => x.plan.Priority)
+                .ThenBy(x => x.plan.CreatorName, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            var cursor = ordered.Length - 1;
+            while (current > targetBudget && cursor >= 0)
+            {
+                var slot = ordered[cursor];
+                var minTrain = Math.Max(1, request.MinTrainCount);
+                if (adjusted[slot.index].TrainCount > minTrain)
+                {
+                    adjusted[slot.index] = adjusted[slot.index] with { TrainCount = adjusted[slot.index].TrainCount - 1 };
+                    current--;
+                }
+                else
+                {
+                    cursor--;
+                }
+            }
+
+            return adjusted;
+        }
+
+        if (current == targetBudget)
+            return adjusted;
+
+        var absoluteCap = adjusted.Sum(plan =>
+        {
+            var maxTrain = Math.Max(Math.Max(1, request.MinTrainCount), request.MaxTrainCount);
+            return Math.Min(maxTrain, Math.Max(1, plan.SampleCount));
+        });
+        targetBudget = Math.Min(targetBudget, absoluteCap);
+        if (current >= targetBudget)
+            return adjusted;
+
+        var remaining = targetBudget - current;
+        var weighted = adjusted
+            .Select((plan, index) => (plan, index))
+            .OrderByDescending(x => x.plan.Priority)
+            .ThenBy(x => x.plan.CreatorName, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var weightedCount = weighted.Length;
+        var position = 0;
+        while (remaining > 0 && weightedCount > 0)
+        {
+            var maxTrain = Math.Max(Math.Max(1, request.MinTrainCount), request.MaxTrainCount);
+            if (weighted.All(w =>
+            {
+                var cap = Math.Min(maxTrain, Math.Max(1, adjusted[w.index].SampleCount));
+                return adjusted[w.index].TrainCount >= cap;
+            }))
+            {
+                break;
+            }
+
+            var slot = weighted[position];
+            position = (position + 1) % weightedCount;
+
+            var creatorCap = Math.Min(maxTrain, Math.Max(1, adjusted[slot.index].SampleCount));
+            if (adjusted[slot.index].TrainCount >= creatorCap)
+                continue;
+
+            adjusted[slot.index] = adjusted[slot.index] with { TrainCount = adjusted[slot.index].TrainCount + 1 };
+            remaining--;
+        }
+
+        return adjusted;
+    }
+
+    private int ChooseSampleCount(
+        GenesisAutonomousTrainingRequest request,
+        GenesisAutonomousTrainingRound? last,
+        CreatorSignal? signal)
+    {
+        if (last is null)
+            return ScaleSampleRecommendation(request.InitialSampleCount, request);
+
+        var samples = last.SampleCount;
+        if (signal?.LastSeenCount > 0)
+            samples = signal.LastSeenCount;
+        else if (last.CreatorProgress?.SeenCount > 0)
+            samples = last.CreatorProgress.SeenCount;
+
+        if (signal is null)
+            return ScaleSampleRecommendation(samples, request);
+
+        // Combine loss and success rate signals for more robust feedback
+        var feedbackScore = 0.0;
+
+        // Loss component: higher loss means we need more work
+        if (signal.AvgLoss > request.LossThreshold)
+            feedbackScore += 1.0;
+        else if (signal.AvgLoss <= request.LossThreshold * 0.8)
+            feedbackScore -= 0.5;
+
+        // Success rate component (now primary signal, not secondary)
+        // Low success rates are a strong signal to increase samples/difficulty
+        if (signal.SuccessRate < 0.5)
+            feedbackScore += 1.5; // Strong need for more diverse examples
+        else if (signal.SuccessRate >= 0.7)
+            feedbackScore -= 1.0; // Doing well, can reduce sample pressure
+        else if (signal.SuccessRate >= 0.85)
+            feedbackScore -= 1.5; // Mastered, reduce significantly
+
+        // Regressing or weak recent performance
+        if (signal.Regressing || signal.RecentSuccessRate < 0.5)
+            feedbackScore += 1.0;
+        else if (signal.Mastered || signal.SuccessRate >= 0.85)
+            feedbackScore -= 1.0;
+
+        // Diversity penalty for consecutive same creator
+        if (signal.ConsecutiveRecentRounds >= 2)
+            feedbackScore -= 1.0;
+
+        // Apply feedback to sample count with asymmetric scaling
+        if (feedbackScore > 0)
+            samples += Math.Max(1, request.SampleStepUp) * (int)Math.Ceiling(feedbackScore);
+        else if (feedbackScore < 0)
+            samples -= Math.Max(1, request.SampleStepDown) * (int)Math.Ceiling(Math.Abs(feedbackScore));
+
+        return ScaleSampleRecommendation(samples, request);
+    }
+
+    private static int ScaleSampleRecommendation(int samples, GenesisAutonomousTrainingRequest request)
+    {
+        var scaled = samples * SampleRecommendationMultiplier;
+        return Math.Clamp(scaled, request.MinSampleCount, request.MaxSampleCount);
     }
 
     private IExampleCreator ChooseCreator(
@@ -104,85 +317,117 @@ public sealed class GenesisAutonomousTrainingPlanner
         return _creators[FindCreatorIndex(chosen.CreatorName)];
     }
 
-    private int ChooseDifficulty(GenesisAutonomousTrainingRequest request, GenesisAutonomousTrainingRound? last)
+    private int ChooseDifficulty(
+        GenesisAutonomousTrainingRequest request,
+        GenesisAutonomousTrainingRound? last,
+        CreatorSignal? signal)
     {
         if (last is null)
             return Math.Clamp(request.InitialDifficulty, 0, request.MaxDifficulty);
 
-        var report = last.Report;
         var difficulty = last.Difficulty;
-        if (IsTokenRegressing(report, request))
-            difficulty = Math.Max(0, difficulty - Math.Max(1, request.DifficultyStepDown));
-        else if (report.AverageLoss.TokenLoss <= request.LossThreshold)
-            difficulty = Math.Min(request.MaxDifficulty, difficulty + Math.Max(1, request.DifficultyStepUp));
+
+        // Success rate is now the primary difficulty signal
+        // Only increase difficulty if success rate is high enough
+        // Decrease if success rate drops
+        if (signal is not null)
+        {
+            if (signal.SuccessRate >= 0.75 && signal.RecentSuccessRate >= 0.7)
+            {
+                // Strong success: can increase difficulty
+                difficulty = Math.Min(request.MaxDifficulty, difficulty + Math.Max(1, request.DifficultyStepUp));
+            }
+            else if (signal.SuccessRate < 0.5 || signal.RecentSuccessRate < 0.4)
+            {
+                // Poor success: must decrease difficulty to focus learning
+                difficulty = Math.Max(0, difficulty - Math.Max(1, request.DifficultyStepDown));
+            }
+            else if (signal.Mastered)
+            {
+                // Mastered can also increase
+                difficulty = Math.Min(request.MaxDifficulty, difficulty + Math.Max(1, request.DifficultyStepUp));
+            }
+            else if (signal.Regressing)
+            {
+                // Regressing should step down
+                difficulty = Math.Max(0, difficulty - Math.Max(1, request.DifficultyStepDown));
+            }
+        }
 
         return Math.Clamp(difficulty, 0, request.MaxDifficulty);
     }
 
-    private int ChooseSampleCount(GenesisAutonomousTrainingRequest request, GenesisAutonomousTrainingRound? last)
+    private int ChooseEpochs(
+        GenesisAutonomousTrainingRequest request,
+        GenesisAutonomousTrainingRound? last,
+        CreatorSignal? signal)
     {
         if (last is null)
-            return Math.Clamp(request.InitialSampleCount, request.MinSampleCount, request.MaxSampleCount);
+            return Math.Max(1, request.InitialEpochs);
 
-        var report = last.Report;
-        var samples = last.SampleCount;
-        if (IsTokenRegressing(report, request))
-            samples = Math.Max(request.MinSampleCount, samples - Math.Max(1, request.SampleStepDown));
-        else if (report.AverageLoss.TokenLoss <= request.LossThreshold)
-            samples = Math.Min(request.MaxSampleCount, samples + Math.Max(1, request.SampleStepUp));
+        var epochs = Math.Max(1, last.Epochs);
+        if (signal?.Regressing == true || signal?.RecentSuccessRate < 0.5)
+            epochs = Math.Min(epochs + 1, Math.Max(1, request.InitialEpochs + 2));
+        else if (signal?.Mastered == true || signal?.SuccessRate >= 0.85)
+            epochs = Math.Max(1, epochs - 1);
 
-        return Math.Clamp(samples, request.MinSampleCount, request.MaxSampleCount);
+        return Math.Max(1, epochs);
     }
-
-    private int ChooseEpochs(GenesisAutonomousTrainingRequest request, GenesisAutonomousTrainingRound? last)
-        => last is null ? Math.Max(1, request.InitialEpochs) : Math.Max(1, last.Epochs);
 
     private int ChooseTrainCount(
         GenesisAutonomousTrainingRequest request,
-        IReadOnlyList<GenesisAutonomousTrainingRound> creatorHistory)
+        IReadOnlyList<GenesisAutonomousTrainingRound> creatorHistory,
+        CreatorSignal? signal)
     {
         if (creatorHistory.Count == 0)
             return Math.Clamp(request.InitialTrainCount, request.MinTrainCount, request.MaxTrainCount);
 
-        var signalWindow = Math.Max(1, request.SignalWindow);
-        var recent = creatorHistory
-            .TakeLast(signalWindow)
-            .ToArray();
+        var last = creatorHistory[^1];
+        var train = Math.Clamp(
+            signal?.LastSeenCount > 0 ? signal.LastSeenCount : last.SampleCount,
+            request.MinTrainCount,
+            request.MaxTrainCount);
 
-        var recentAvgLoss = recent.Average(r => r.Report.AverageLoss.TokenLoss);
-        var previous = creatorHistory
-            .Take(Math.Max(0, creatorHistory.Count - signalWindow))
-            .TakeLast(signalWindow)
-            .ToArray();
-        var previousAvgLoss = previous.Length > 0
-            ? previous.Average(r => r.Report.AverageLoss.TokenLoss)
-            : recentAvgLoss;
+        var regressing = signal?.Regressing == true || IsTokenRegressing(last, request);
+        var stable = signal?.Mastered == true || signal?.RecentSuccessRate >= 0.7 || IsStable(last, request);
 
-        var baseline = Math.Clamp(request.InitialTrainCount, request.MinTrainCount, request.MaxTrainCount);
-        var regressing = recentAvgLoss > previousAvgLoss + request.TrainRegressionDelta || IsRegressing(recent[0].Report, request);
         if (regressing)
-            return Math.Min(request.MaxTrainCount, baseline + Math.Max(1, request.TrainStepUp));
+            train = Math.Min(request.MaxTrainCount, train + Math.Max(1, request.TrainStepUp));
+        else if (stable)
+            train = Math.Max(request.MinTrainCount, train - Math.Max(1, request.TrainStepDown));
 
-        if (recentAvgLoss <= request.LossThreshold)
-            return Math.Max(request.MinTrainCount, baseline - Math.Max(1, request.TrainStepDown));
-
-        return baseline;
+        return Math.Clamp(train, request.MinTrainCount, request.MaxTrainCount);
     }
 
-    private static bool IsRegressing(GenesisTrainingReport report, GenesisAutonomousTrainingRequest request)
+    private static bool IsRegressing(GenesisAutonomousTrainingRound round, GenesisAutonomousTrainingRequest request)
     {
-        return IsTokenRegressing(report, request) ||
-            report.SpaceNoiseRatio > request.RegressSpaceNoiseThreshold ||
-            report.ContradictionRate > request.RegressContradictionThreshold;
+        return IsTokenRegressing(round, request) ||
+            round.Report.SpaceNoiseRatio > request.RegressSpaceNoiseThreshold ||
+            round.Report.ContradictionRate > request.RegressContradictionThreshold;
     }
 
-    private static bool IsTokenRegressing(GenesisTrainingReport report, GenesisAutonomousTrainingRequest request)
+    private static bool IsTokenRegressing(GenesisAutonomousTrainingRound round, GenesisAutonomousTrainingRequest request)
     {
+        var creatorLoss = GetEffectiveCreatorLoss(round);
+        var creatorSuccess = GetEffectiveCreatorSuccess(round);
         var tokenRegressThreshold = Math.Max(
             request.RegressTokenLossThreshold,
             request.LossThreshold * Math.Max(0.01, request.RegressLossMultiplier));
 
-        return report.AverageLoss.TokenLoss > tokenRegressThreshold;
+        var minSuccessForRegression = request.LossThreshold >= 1.0 ? 0.0 : 0.45;
+        var lowExampleSuccess = creatorSuccess > 0 && creatorSuccess < minSuccessForRegression;
+        return creatorLoss > tokenRegressThreshold || lowExampleSuccess || round.Report.AverageLoss.TokenLoss > tokenRegressThreshold;
+    }
+
+    private static bool IsStable(GenesisAutonomousTrainingRound round, GenesisAutonomousTrainingRequest request)
+    {
+        var creatorLoss = GetEffectiveCreatorLoss(round);
+        var creatorSuccess = GetEffectiveCreatorSuccess(round);
+        var tokenStable = creatorLoss <= request.LossThreshold;
+        var minSuccessForStable = request.LossThreshold >= 1.0 ? 0.0 : 0.65;
+        var exampleStable = creatorSuccess <= 0 || creatorSuccess >= minSuccessForStable;
+        var overallStable = round.Report.AverageLoss.TokenLoss <= request.LossThreshold;
+        return (tokenStable && exampleStable) || overallStable;
     }
 
     private static string BuildReason(
@@ -192,11 +437,12 @@ public sealed class GenesisAutonomousTrainingPlanner
         string creator,
         int samples,
         int trainCount,
-        int difficulty)
+        int difficulty,
+        int epochs)
     {
         var signal = signals.FirstOrDefault(s => s.CreatorName.Equals(creator, StringComparison.OrdinalIgnoreCase));
         if (signal is null || signal.Attempts == 0)
-            return $"round {round + 1}: start low and learn quickly";
+            return $"round {round + 1}: start tiny, build fresh pools, and grow horizon with mastery";
 
         var trend = signal.Mastered
             ? "review"
@@ -209,7 +455,7 @@ public sealed class GenesisAutonomousTrainingPlanner
         if (signal.ConsecutiveRecentRounds >= 2)
             trend = "diversify";
 
-        return $"{trend}: creator={creator}, samples={samples}, train={trainCount}, difficulty={difficulty}, avgLoss={signal.AvgLoss:F4}";
+        return $"{trend}: dataset={creator}, samples={samples}, train={trainCount}, difficulty={difficulty}, epochs={epochs}, avgLoss={signal.AvgLoss:F4}, success={signal.SuccessRate:P1}";
     }
 
     private IReadOnlyList<CreatorSignal> BuildSignals(
@@ -253,7 +499,10 @@ public sealed class GenesisAutonomousTrainingPlanner
                     CreatorName: creator.Name,
                     Attempts: 0,
                     AvgLoss: request.LossThreshold * request.NewCreatorLossMultiplier,
+                    SuccessRate: 0.0,
+                    RecentSuccessRate: 0.0,
                     MaxDifficulty: 0,
+                    LastSeenCount: request.InitialSampleCount,
                     RecentHits: recentHits,
                     ConsecutiveRecentRounds: consecutiveRecentRounds,
                     Mastered: false,
@@ -264,14 +513,19 @@ public sealed class GenesisAutonomousTrainingPlanner
 
             var attempts = creatorRounds.Length;
             var recent = creatorRounds.TakeLast(signalWindow).ToArray();
-            var avgLoss = recent.Average(r => r.Report.AverageLoss.TokenLoss);
+            var avgLoss = recent.Average(GetEffectiveCreatorLoss);
+            var successRate = creatorRounds.Average(GetEffectiveCreatorSuccess);
+            var recentSuccessRate = recent.Average(GetEffectiveCreatorSuccess);
             var maxDifficulty = creatorRounds.Max(r => r.Difficulty);
-            var stableCount = creatorRounds.Count(r => r.Report.AverageLoss.TokenLoss <= request.LossThreshold);
+            var lastSeenCount = creatorRounds[^1].CreatorProgress?.SeenCount > 0
+                ? creatorRounds[^1].CreatorProgress!.SeenCount
+                : creatorRounds[^1].SampleCount;
+            var stableCount = creatorRounds.Count(r => IsStable(r, request));
             var mastered = attempts >= 3 &&
                            stableCount >= 2 &&
                            avgLoss <= request.LossThreshold * request.MasteryLossMultiplier &&
                            maxDifficulty >= Math.Max(request.InitialDifficulty, 1);
-            var regressing = IsRegressing(recent[0].Report, request);
+            var regressing = IsRegressing(recent[^1], request);
             var weakness = Math.Clamp(avgLoss / Math.Max(0.0001, request.LossThreshold), request.WeaknessMin, request.WeaknessMax);
             var exploration = request.ExplorationBase / (1.0 + attempts);
             var masteryPenalty = mastered ? request.MasteryPenalty : 0.0;
@@ -283,7 +537,10 @@ public sealed class GenesisAutonomousTrainingPlanner
                 CreatorName: creator.Name,
                 Attempts: attempts,
                 AvgLoss: avgLoss,
+                SuccessRate: successRate,
+                RecentSuccessRate: recentSuccessRate,
                 MaxDifficulty: maxDifficulty,
+                LastSeenCount: lastSeenCount,
                 RecentHits: recentHits,
                 ConsecutiveRecentRounds: consecutiveRecentRounds,
                 Mastered: mastered,
@@ -293,6 +550,12 @@ public sealed class GenesisAutonomousTrainingPlanner
 
         return list;
     }
+
+    private static double GetEffectiveCreatorLoss(GenesisAutonomousTrainingRound round)
+        => round.CreatorProgress?.AverageTokenLoss ?? round.Report.AverageLoss.TokenLoss;
+
+    private static double GetEffectiveCreatorSuccess(GenesisAutonomousTrainingRound round)
+        => round.CreatorProgress?.SuccessRate ?? round.Report.ExampleSuccessRate;
 
     private int FindCreatorIndex(string creatorName)
     {

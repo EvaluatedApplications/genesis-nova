@@ -25,7 +25,7 @@ public static class GenesisCli
                 throw new ArgumentException("Missing --output for --genesis-gen-examples.");
 
             var examples = GenesisTrainingOrchestrator.GenerateExamplesFromCreators(count, difficulty);
-            GenesisTrainingDataLoader.SaveToFile(output, examples);
+            await GenesisTrainingDataLoader.SaveToFileAsync(output, examples);
             Console.WriteLine($"generated count={count} difficulty={difficulty} saved={output}");
             return true;
         }
@@ -46,7 +46,7 @@ public static class GenesisCli
         var backend = ParseBackend(ReadArg(args, "--backend"));
         var autoScaleVram = backend == ComputeBackend.Gpu
             && !args.Contains("--no-auto-scale-vram", StringComparer.OrdinalIgnoreCase);
-        var targetVramUtil = ParseDouble(args, "--target-vram-util", fallback: 0.9);
+        var targetVramUtil = ParseDouble(args, "--target-vram-util", fallback: 0.90);
         var reserveVramMb = ParseInt(args, "--reserve-vram-mb", fallback: 512);
         var deterministic = args.Contains("--deterministic", StringComparer.OrdinalIgnoreCase);
         var parallelMath = !args.Contains("--no-parallel-math", StringComparer.OrdinalIgnoreCase) && !deterministic;
@@ -54,19 +54,23 @@ public static class GenesisCli
         var maxExactDrop = ParseDouble(args, "--max-exact-drop", fallback: 0.01);
         var effectiveThreads = deterministic ? 1 : (threads ?? 0);
 
-        var resolvedHidden = hiddenSize ?? 8192;
+        var resolvedHidden = hiddenSize ?? 6144;
         if (autoScaleVram && backend == ComputeBackend.Gpu)
         {
-            var examples = GenesisTrainingDataLoader.LoadFromFile(file);
+            var examples = await GenesisTrainingDataLoader.LoadFromFileAsync(file);
             if (GpuCapacityPlanner.TryGetNvidiaVramMb(out var totalMb, out var freeMb))
             {
                 var usableVramMb = freeMb > 0 ? freeMb : totalMb;
-                resolvedHidden = Math.Max(resolvedHidden, GpuCapacityPlanner.EstimateHiddenSizeFromDataset(
+                var estimatedHidden = GpuCapacityPlanner.EstimateHiddenSizeFromDataset(
                     examples,
                     routeCount: 8,
                     vramMb: usableVramMb,
                     targetUtilization: targetVramUtil,
-                    reserveVramMb: reserveVramMb));
+                    reserveVramMb: reserveVramMb,
+                    maxHiddenSize: GpuCapacityPlanner.ResolveTrainingHiddenCap(usableVramMb));
+                resolvedHidden = hiddenSize.HasValue
+                    ? Math.Max(hiddenSize.Value, estimatedHidden)
+                    : estimatedHidden;
                 Console.WriteLine(
                     $"autoscale vram totalMb={totalMb} freeMb={freeMb} targetUtil={targetVramUtil:F2} reserveMb={reserveVramMb} hidden={resolvedHidden}");
             }
@@ -100,7 +104,8 @@ public static class GenesisCli
 
         Console.WriteLine(
             $"done examples={report.ExampleCount} epochs={report.Epochs} " +
-            $"loss={report.AverageLoss.TotalLoss:F4} contradiction={report.ContradictionRate:F4}");
+            $"loss={report.AverageLoss.TotalLoss:F4} contradiction={report.ContradictionRate:F4} " +
+            $"exampleSuccess={report.ExampleSuccessRate:P1} correct={report.CorrectExampleCount} incorrect={report.IncorrectExampleCount}");
 
         var eval = await runtime.EvaluateFileAsync(file, evalSamples);
         Console.WriteLine(

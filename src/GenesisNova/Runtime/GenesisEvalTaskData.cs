@@ -1,6 +1,7 @@
 using GenesisNova.Data;
 using GenesisNova.Infer;
 using GenesisNova.Train;
+using System.Collections.Immutable;
 
 namespace GenesisNova.Runtime;
 
@@ -55,3 +56,16 @@ public sealed record GenesisEvaluationReport(
     int RouteCorrectCount,
     double ExactMatchAccuracy,
     double RouteAccuracy);
+
+public sealed record GenesisAutonomousTrainTaskData(
+    GenesisAutonomousTrainingRequest Request,
+    IReadOnlyList<GenesisAutonomousTrainingRound> History,
+    int RoundIndex,
+    CancellationToken CancellationToken = default,
+    Action<string>? UiLogger = null,
+    GenesisAutonomousCompositePlan? Plan = null,
+    IReadOnlyDictionary<string, ImmutableArray<GenesisExample>>? CandidatePools = null,
+    IReadOnlyList<GenesisExample>? TrainingExamples = null,
+    IReadOnlyDictionary<string, string>? ExampleCreatorMap = null,
+    IReadOnlyList<GenesisAutonomousTrainingRound>? CreatorRounds = null,
+    GenesisTrainingReport? Report = null);

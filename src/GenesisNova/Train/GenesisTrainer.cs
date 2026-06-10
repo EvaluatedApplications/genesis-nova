@@ -10,12 +10,23 @@ using static TorchSharp.torch;
 
 namespace GenesisNova.Train;
 
+public sealed record GenesisPerExampleLoss(
+    GenesisExample Example,
+    GenesisStepLoss Loss,
+    bool IsCorrect,
+    bool WasSkipped = false);
+
+public sealed record GenesisBatchTrainResult(
+    GenesisStepLoss AverageLoss,
+    IReadOnlyList<GenesisPerExampleLoss> ExampleLosses);
+
 public sealed class GenesisTrainer
 {
     private readonly IGenesisTokenizer _tokenizer;
     private readonly GenesisNeuralModel _model;
     private readonly PlatonicSpaceMemory _platonicSpace;
     private readonly SpaceManager _spaceManager;
+    private readonly int _trainingTickMultiplier;
     private GenesisInferenceEngine _inferencePolicy;
     private readonly GenesisCompositeObjective _objective;
     private readonly FoldPathDiscovery _foldPathDiscovery;
@@ -27,11 +38,16 @@ public sealed class GenesisTrainer
     private readonly Dictionary<string, int> _conceptCoverageCounts = new(StringComparer.OrdinalIgnoreCase);
     
     // Quality metrics caching (Performance optimization)
+    private const int QualityLossRefreshInterval = 24;
+    private const int MaxQualityOperationsPerCompute = 12;
     private double? _cachedQualityLoss;
     private int _lastRelationCountForQuality;
+    private int _lastQualityComputationStep = int.MinValue;
     
     // Phase 1: BridgeConfidence metric (Theory validation)
+    private const int BridgeConfidenceRefreshInterval = 24;
     private BridgeConfidenceMetric? _bridgeConfidence;
+    private int _lastBridgeConfidenceRefreshStep = int.MinValue;
     
     // Phase 2: Concept graph (Symbolic structure)
     private ConceptGraph? _conceptGraph;
@@ -63,6 +79,7 @@ public sealed class GenesisTrainer
             Enabled: runtimeConfig.AutoManagePlatonicSpace,
             MaxNodes: Math.Max(256, runtimeConfig.MaxPlatonicNodes),
             MaxRelations: Math.Max(1_024, runtimeConfig.MaxPlatonicRelations)));
+        _trainingTickMultiplier = Math.Clamp(runtimeConfig.TrainingTickMultiplier, 1, 32);
         _objective = objective ?? new GenesisCompositeObjective(
             TokenWeight: 1.0,
             RouteWeight: 0.3,
@@ -110,6 +127,7 @@ public sealed class GenesisTrainer
     public TransformAccumulator TransformAccumulator => _transformAccumulator;
     public TransformLibrary? TransformLibrary => _transforms;
     public int TickPatternPromotions => _tickPatternPromotions;
+    public int HiddenSize => _model.HiddenSize;
     
     public void SetInferencePolicy(GenesisInferenceEngine inferencePolicy)
         => _inferencePolicy = inferencePolicy ?? throw new ArgumentNullException(nameof(inferencePolicy));
@@ -202,11 +220,25 @@ public sealed class GenesisTrainer
     /// <summary>
     /// Train a batch of examples without cloning between them (cloning happens at epoch boundary).
     /// </summary>
-    public GenesisStepLoss TrainBatchPreTokenized(IReadOnlyList<PreTokenizedExample> batch)
-    {
-       if (batch.Count == 0)
-           return new GenesisStepLoss(0, 0, 0, 0, 0, 0);
+    public GenesisStepLoss TrainBatchPreTokenized(
+        IReadOnlyList<PreTokenizedExample> batch,
+        CancellationToken cancellationToken = default)
+       => TrainBatchPreTokenizedDetailed(batch, cancellationToken).AverageLoss;
 
+    public GenesisBatchTrainResult TrainBatchPreTokenizedDetailed(
+       IReadOnlyList<PreTokenizedExample> batch,
+       CancellationToken cancellationToken = default)
+    {
+       cancellationToken.ThrowIfCancellationRequested();
+        
+       if (batch.Count == 0)
+          return new GenesisBatchTrainResult(
+              new GenesisStepLoss(0, 0, 0, 0, 0, 0),
+              []);
+
+       // Training can run on CUDA when available. UI responsiveness is maintained by the caller's Task.Run wrapper in MainWindow.
+       cancellationToken.ThrowIfCancellationRequested();
+        
        _model.EnsureVocabularySize(_tokenizer.VocabularySize);
 
        var totalTokenLoss = 0.0;
@@ -216,35 +248,74 @@ public sealed class GenesisTrainer
        var conservationSum = 0.0;
        var routeSum = 0.0;
        var qualitySum = 0.0;
+       var skippedCorrectCount = 0;
+       var perExample = new List<GenesisPerExampleLoss>(batch.Count);
+       var gcInterval = Math.Max(8, Math.Min(32, Math.Max(1, batch.Count / 2)));
 
-       // Train each example and clone parameters between them to break computation graph
+       // Train each example and break graph after each training step.
+       // This is the safest boundary against autograd graph reuse during long/high-throughput runs.
        for (int i = 0; i < batch.Count; i++)
        {
+          cancellationToken.ThrowIfCancellationRequested();
+           
           var item = batch[i];
           var inputTokens = item.InputTokens;
           var targetTokens = item.TargetTokens;
           var example = item.Original;
           var weight = ComputeTrainingWeight(example);
-
-          var loss = _model.TrainExample(
-              inputTokens,
-              targetTokens,
-              _tokenizer.BosTokenId,
-              lossScale: weight);
-          totalTokenLoss += loss.TokenLoss * targetTokens.Length * weight;
-          totalTokenWeight += targetTokens.Length * weight;
-                 
+          var concepts = ObserveLearningSignals(example);
+          var shouldSkip = ShouldSkipTrainingExample(example, targetTokens);
+          TrainingLoss loss;
+          if (shouldSkip)
+          {
+             skippedCorrectCount++;
+             loss = new TrainingLoss(0, 0);
+          }
+          else
+          {
+             loss = _model.TrainExample(
+                inputTokens,
+                targetTokens,
+                _tokenizer.BosTokenId,
+                lossScale: weight);
+             totalTokenLoss += loss.TokenLoss * targetTokens.Length * weight;
+             totalTokenWeight += targetTokens.Length * weight;
+          }
+                  
           _trainStepCount++;
 
-          var concepts = ObserveLearningSignals(example);
-          consistencySum += EstimatePlatonicConsistency(concepts, IsNegativeText(example.Output));
-          conservationSum += EstimateConservationDrift(inputTokens);
-          memorySum += EstimateMemoryLoad();
-          routeSum += EstimateUnifiedPathMismatch(example, targetTokens);
-          qualitySum += ComputeQualityLoss();
-              
-          // Clone parameters after each example to break the computation graph.
-          // This prevents "backward through graph a second time" across batch boundaries.
+          var consistencyLoss = EstimatePlatonicConsistency(concepts, IsNegativeText(example.Output));
+          var conservationLoss = EstimateConservationDrift(inputTokens);
+          var memoryLoss = EstimateMemoryLoad();
+          var routeLoss = EstimateUnifiedPathMismatch(example, targetTokens);
+          var qualityLoss = ComputeQualityLoss();
+          consistencySum += consistencyLoss;
+          conservationSum += conservationLoss;
+          memorySum += memoryLoss;
+          routeSum += routeLoss;
+          qualitySum += qualityLoss;
+          var stepTotal = (_objective.ComputeTotal(
+              loss.TokenLoss,
+              routeLoss,
+              consistencyLoss,
+              conservationLoss,
+              memoryLoss) * 0.9) + (qualityLoss * 0.1);
+          var stepLoss = new GenesisStepLoss(
+              loss.TokenLoss,
+              routeLoss,
+              consistencyLoss,
+              conservationLoss,
+              memoryLoss,
+              stepTotal);
+          var isCorrect = shouldSkip || loss.TokenLoss <= 0.25;
+          perExample.Add(new GenesisPerExampleLoss(example, stepLoss, isCorrect, shouldSkip));
+           
+          // Collect gen-0 only periodically to keep memory stable without full collection pauses.
+          if ((i + 1) % gcInterval == 0)
+          {
+              GC.Collect(0, GCCollectionMode.Optimized);
+          }
+
           _model.CloneParametersToBreakGraph();
        }
 
@@ -254,18 +325,39 @@ public sealed class GenesisTrainer
        var avgMemory = memorySum / Math.Max(1, batch.Count);
        var avgRoute = routeSum / Math.Max(1, batch.Count);
        var avgQuality = qualitySum / Math.Max(1, batch.Count);
-       
+        
        // Integrate quality loss into total: 10% weight
        var total = (_objective.ComputeTotal(avgTokenLoss, avgRoute, avgConsistency, avgConservation, avgMemory) * 0.9) +
                    (avgQuality * 0.1);
 
-       return new GenesisStepLoss(
-          avgTokenLoss,
-          avgRoute,
-          avgConsistency,
-          avgConservation,
-          avgMemory,
-          total);
+       // Light gen-0 collection at batch boundary to free recent allocations without pausing.
+       GC.Collect(0, GCCollectionMode.Optimized);
+
+       return new GenesisBatchTrainResult(
+           new GenesisStepLoss(
+               avgTokenLoss,
+               avgRoute,
+               avgConsistency,
+               avgConservation,
+               avgMemory,
+               total),
+           perExample);
+    }
+
+    private bool ShouldSkipTrainingExample(GenesisExample example, IReadOnlyList<int> targetTokens)
+    {
+        var expected = targetTokens
+           .Where(t => t != _tokenizer.BosTokenId && t != _tokenizer.EosTokenId && t != _tokenizer.PadTokenId)
+           .ToArray();
+        if (expected.Length == 0)
+           return false;
+
+        var preview = _inferencePolicy.Generate(new GenerationRequest(example.Input, Math.Max(1, expected.Length)));
+        var predicted = preview.GeneratedTokens
+           .Where(t => t != _tokenizer.BosTokenId && t != _tokenizer.EosTokenId && t != _tokenizer.PadTokenId)
+           .ToArray();
+
+        return predicted.Length == expected.Length && predicted.SequenceEqual(expected);
     }
 
     private double EstimateUnifiedPathMismatch(GenesisExample example, IReadOnlyList<int> targetTokens)
@@ -276,8 +368,21 @@ public sealed class GenesisTrainer
        if (expected.Length == 0)
            return 0.0;
 
-       var preview = _inferencePolicy.Generate(new GenerationRequest(example.Input, Math.Max(1, expected.Length)));
-       return ComputeNormalizedTokenDistance(preview.GeneratedTokens, expected);
+       // Only run inference on every 4th example to reduce memory pressure during long training runs.
+       // Random sampling ensures representativity over time while reducing GC churn from tensor creation.
+       if (_trainStepCount % 4 != 0)
+           return 0.0;  // Skip inference, accept zero loss contribution for this example
+
+       try
+       {
+           var preview = _inferencePolicy.Generate(new GenerationRequest(example.Input, Math.Max(1, expected.Length)));
+           return ComputeNormalizedTokenDistance(preview.GeneratedTokens, expected);
+       }
+       catch (Exception ex)
+       {
+           System.Diagnostics.Debug.WriteLine($"[inference] EstimateUnifiedPathMismatch failed: {ex.Message}");
+           return 0.0;  // Degrade gracefully on memory pressure
+       }
     }
 
     private static double ComputeNormalizedTokenDistance(IReadOnlyList<int> predicted, IReadOnlyList<int> expected)
@@ -383,10 +488,8 @@ public sealed class GenesisTrainer
         // PHASE 1: BridgeConfidence metric (replaces arbitrary weights with ionization energy)
         if (_bridgeConfidence != null && concepts.Count > 0 && _conceptGraph != null)
         {
-            // Update bridge confidence with current graph snapshot
-            var graph = _conceptGraph.GetSnapshot();
-            _bridgeConfidence = new BridgeConfidenceMetric(graph, _ => Array.Empty<(string, double)>());
-            
+            RefreshBridgeConfidenceMetricIfNeeded();
+
             // Compute average bridge confidence for all concepts in the example
             var avgBridgeConfidence = _bridgeConfidence.ComputeAverageForConcepts(concepts);
             var ionizationEnergy = _bridgeConfidence.ComputeIonizationEnergyFromConfidence(avgBridgeConfidence);
@@ -437,6 +540,22 @@ public sealed class GenesisTrainer
         return Math.Clamp(weight, 0.5, 4.0);
     }
 
+    private void RefreshBridgeConfidenceMetricIfNeeded()
+    {
+        if (_bridgeConfidence is null || _conceptGraph is null)
+            return;
+
+        if (_lastBridgeConfidenceRefreshStep != int.MinValue &&
+            (_trainStepCount - _lastBridgeConfidenceRefreshStep) < BridgeConfidenceRefreshInterval)
+        {
+            return;
+        }
+
+        var graph = _conceptGraph.GetSnapshot();
+        _bridgeConfidence = new BridgeConfidenceMetric(graph, _ => Array.Empty<(string, double)>());
+        _lastBridgeConfidenceRefreshStep = _trainStepCount;
+    }
+
     private static bool IsNegativeText(string text)
         => text.TrimStart().StartsWith("not ", StringComparison.OrdinalIgnoreCase);
 
@@ -454,7 +573,14 @@ public sealed class GenesisTrainer
         var concepts = ExtractConcepts(example);
         ObservePlatonicSpace(example, concepts);
         UpdateTransformDiscovery(example);
-        RunTickPatternLoop(example, concepts);
+        var hasArithmetic = TryExtractArithmeticObservation(example, out _);
+        var conceptBoost = Math.Clamp(concepts.Count / 4, 0, 4);
+        var structuralBoost = Math.Clamp(concepts.Count / 2, 0, 8);
+        var arithmeticBoost = hasArithmetic ? _trainingTickMultiplier : 0;
+        var tickIterations = Math.Clamp(_trainingTickMultiplier + conceptBoost + structuralBoost + arithmeticBoost, 1, 96);
+        for (var i = 0; i < tickIterations; i++)
+            RunTickPatternLoop(example, concepts);
+        RunSpaceToolLoop(concepts);
 
         if (trackCoverage)
         {
@@ -481,6 +607,45 @@ public sealed class GenesisTrainer
         }
 
         return concepts;
+    }
+
+    private void RunSpaceToolLoop(IReadOnlyList<string> concepts)
+    {
+        if (concepts.Count == 0)
+            return;
+
+        var assessment = _spaceManager.Manage();
+        var tool = assessment.RecommendedTool;
+        if (tool == SpaceToolKind.Observe && assessment.NoiseRatio < 0.2)
+            return;
+
+        var prompt = $"space nodes={assessment.NodesAfter} relations={assessment.RelationsAfter} noise={assessment.NoiseRatio:F3} pressure={assessment.RelationBudget}";
+        var label = tool.ToString().ToLowerInvariant();
+        TrainSpaceToolPolicy(prompt, label, assessment.NoiseRatio);
+
+        var primaryId = EnsureTickElement(concepts[0], ElementKind.Function);
+        var (updatedState, generated) = TickExecutor.ExecuteTick(
+            new TickAction(
+                Kind: TickKind.SpaceTool,
+                PrimaryElementId: primaryId,
+                Parameter: label),
+            _tickState);
+        _tickState = updatedState;
+        PromoteDetectedPatterns(label, generated);
+    }
+
+    private void TrainSpaceToolPolicy(string input, string output, double pressure)
+    {
+        var inputTokens = _tokenizer.Encode(input);
+        var targetTokens = _tokenizer.Encode(output, addEos: true);
+        _model.EnsureVocabularySize(_tokenizer.VocabularySize);
+        _trainStepCount++;
+        _ = _model.TrainExample(
+            inputTokens,
+            targetTokens,
+            _tokenizer.BosTokenId,
+            lossScale: Math.Clamp(1.0 + pressure, 0.5, 2.0));
+        _model.CloneParametersToBreakGraph();
     }
 
     private void UpdateTransformDiscovery(GenesisExample example)
@@ -827,87 +992,65 @@ public sealed class GenesisTrainer
         return cleaned.Trim();
     }
 
-    private static Dictionary<string, double> BuildRelationMap(IEnumerable<PlatonicRelationSnapshot> relations)
-    {
-        var map = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
-        foreach (var relation in relations)
-            map[$"{relation.Left}|{relation.Right}"] = Clamp01(relation.SynthesisContradiction);
-        return map;
-    }
-
-    private static double EstimateConceptTension(IReadOnlyList<string> concepts, IReadOnlyDictionary<string, double> relations)
-    {
-        if (concepts.Count < 2)
-            return 0.0;
-
-        var total = 0.0;
-        var pairs = 0;
-        for (var i = 0; i < concepts.Count; i++)
-        {
-            for (var j = i + 1; j < concepts.Count; j++)
-            {
-                var left = concepts[i].Trim().ToLowerInvariant();
-                var right = concepts[j].Trim().ToLowerInvariant();
-                var key = string.Compare(left, right, StringComparison.OrdinalIgnoreCase) <= 0
-                    ? $"{left}|{right}"
-                    : $"{right}|{left}";
-                if (relations.TryGetValue(key, out var tension))
-                    total += tension;
-                else
-                    total += 0.5;
-                pairs++;
-            }
-        }
-
-        return pairs == 0 ? 0.0 : total / pairs;
-    }
-
      private double ComputeQualityLoss()
      {
-         // Extract all relations from platonic space
+         // Rate-limit full quality recomputation. This avoids per-example full relation scans,
+         // which otherwise grow more expensive over long autonomous runs.
+         if (_cachedQualityLoss.HasValue &&
+             _lastQualityComputationStep != int.MinValue &&
+             (_trainStepCount - _lastQualityComputationStep) < QualityLossRefreshInterval)
+         {
+             return _cachedQualityLoss.Value;
+         }
+
          var allRelations = _platonicSpace.GetAllRelations();
          if (allRelations.Count == 0)
+         {
+             _cachedQualityLoss = 0.0;
+             _lastRelationCountForQuality = 0;
+             _lastQualityComputationStep = _trainStepCount;
              return 0.0;
-
-         // Cache: if relation count unchanged, reuse cached value
-         if (_lastRelationCountForQuality == allRelations.Count && _cachedQualityLoss.HasValue)
-             return _cachedQualityLoss.Value;
+         }
 
          // Compute average quality penalty across all operations in the space
          var qualitySum = 0.0;
-         var operationSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+         var sampledTargetsByOperation = new Dictionary<string, (string Target, long ObservationCount)>(StringComparer.OrdinalIgnoreCase);
          
          foreach (var (left, right, obsCount) in allRelations)
          {
-             operationSet.Add(left);
+             if (!sampledTargetsByOperation.ContainsKey(left))
+                 sampledTargetsByOperation[left] = (right, obsCount);
          }
 
-         // For each operation, compute quality penalty
-         foreach (var operation in operationSet)
+         var stride = Math.Max(1, sampledTargetsByOperation.Count / MaxQualityOperationsPerCompute);
+         var phase = _trainStepCount % stride;
+         var opIndex = 0;
+         var computedCount = 0;
+
+         foreach (var (operation, targetRel) in sampledTargetsByOperation)
          {
-             // Get all targets for this operation
-             var targetsForOp = allRelations
-                 .Where(r => r.Left.Equals(operation, StringComparison.OrdinalIgnoreCase))
-                 .ToList();
-
-             if (targetsForOp.Count == 0)
+             if (stride > 1 && (opIndex % stride) != phase)
+             {
+                 opIndex++;
                  continue;
+             }
+             opIndex++;
 
-             // Sample a relation to compute quality for
-             var targetRel = targetsForOp.FirstOrDefault();
              var qualityPenalty = TransformQualityMetrics.ComputeQualityLossPenalty(
                  operation: operation,
-                 target: targetRel.Right,
+                 target: targetRel.Target,
                  relationObservationCount: targetRel.ObservationCount,
                  allRelations: allRelations,
                  utilityThreshold: 0.3);
              qualitySum += qualityPenalty;
+             computedCount++;
          }
 
          // Cache result and return
-         var result = operationSet.Count > 0 ? qualitySum / operationSet.Count : 0.0;
+         var result = computedCount > 0 ? qualitySum / computedCount : 0.0;
          _lastRelationCountForQuality = allRelations.Count;
          _cachedQualityLoss = result;
+         _lastQualityComputationStep = _trainStepCount;
          return result;
      }
 
@@ -935,118 +1078,6 @@ public sealed class GenesisTrainer
          Multiply,
          Divide
      }
-    
-    // Platonic Reasoning Query Methods (Phases 1-5)
-    
-    /// <summary>
-    /// Get what the system knows about a concept via bridge confidence.
-    /// Low confidence = needs practice, High confidence = stable.
-    /// </summary>
-    public string GetBridgeConfidenceReport(IEnumerable<string> concepts)
-    {
-        if (_bridgeConfidence == null || _conceptGraph == null)
-            return "Bridge confidence not available";
-        
-        var lines = new List<string>();
-        foreach (var concept in concepts)
-        {
-            var confidence = _bridgeConfidence.ComputeForConcept(concept);
-            var ionization = _bridgeConfidence.ComputeIonizationEnergyFromConfidence(confidence);
-            var status = ionization > 0.7 ? "⚡ Needs practice" : 
-                        ionization > 0.4 ? "◐ Exploring" : 
-                        "✓ Stable";
-            lines.Add($"  {concept}: confidence={confidence:P0}, ionization={ionization:P0} {status}");
-        }
-        
-        return lines.Count == 0 
-            ? "No concepts to report"
-            : "Bridge Confidence:\n" + string.Join("\n", lines);
-    }
-    
-    /// <summary>
-    /// Get symbolic structure: what the system knows structurally (not just empirically).
-    /// </summary>
-    public string GetConceptGraphReport()
-    {
-        if (_conceptGraph == null)
-            return "Concept graph not available";
-        
-        var report = _conceptGraph.GetStructuralReport();
-        return $"Concept Graph ({_conceptGraph.GetRelationCount()} relations):\n{report}";
-    }
-    
-    /// <summary>
-    /// Get what complements exist (conservation law enforcement).
-    /// </summary>
-    public string GetComplementsReport()
-    {
-        if (_complements == null)
-            return "Complements not available";
-        
-        var allComplements = _complements.GetAllComplements();
-        if (allComplements.Count == 0)
-            return "No complements registered yet";
-        
-        var lines = allComplements
-            .Take(20)
-            .Select(kvp => $"  {kvp.Key} ↔ {kvp.Value}")
-            .ToList();
-        
-        if (allComplements.Count > 20)
-            lines.Add($"  ... and {allComplements.Count - 20} more");
-        
-        return $"Complement Pairs ({allComplements.Count} total):\n" + string.Join("\n", lines);
-    }
-    
-    /// <summary>
-    /// Get epistemic self-awareness: what the system is certain about vs exploring.
-    /// </summary>
-    public string GetHypothesisReport()
-    {
-        if (_hypotheses == null)
-            return "Hypothesis tracking not available";
-        
-        var axioms = _hypotheses.QueryWhatICertainlyKnow();
-        var report = _hypotheses.GetStatusReport();
-        
-        return $"Epistemic Status:\n{report}\n\nAxioms (≥10 confirmations):\n{axioms}";
-    }
-    
-    /// <summary>
-    /// Get observable transforms: capabilities the system knows it has.
-    /// </summary>
-    public string GetTransformReport()
-    {
-        if (_transforms == null)
-            return "Transform library not available";
-        
-        return _transforms.QueryKnownCapabilities();
-    }
-    
-    /// <summary>
-    /// Get comprehensive platonic reasoning state.
-    /// </summary>
-    public string GetPlatonicReasoningState(IEnumerable<string> conceptsToAnalyze)
-    {
-        var sb = new System.Text.StringBuilder();
-        sb.AppendLine("═══════════════════════════════════════");
-        sb.AppendLine("PLATONIC REASONING STATE");
-        sb.AppendLine("═══════════════════════════════════════");
-        sb.AppendLine();
-        sb.AppendLine(GetBridgeConfidenceReport(conceptsToAnalyze));
-        sb.AppendLine();
-        sb.AppendLine(GetConceptGraphReport());
-        sb.AppendLine();
-        sb.AppendLine(GetComplementsReport());
-        sb.AppendLine();
-        sb.AppendLine(GetHypothesisReport());
-        sb.AppendLine();
-        sb.AppendLine(GetTransformReport());
-        sb.AppendLine();
-        sb.AppendLine("═══════════════════════════════════════");
-        
-        return sb.ToString();
-    }
 }
 
 public sealed record GenesisStepLoss(

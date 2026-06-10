@@ -20,4 +20,7 @@ public interface IExampleCreator
 
     /// <summary>Generate <paramref name="count"/> examples at the given difficulty level.</summary>
     ImmutableArray<(string Input, string Output)> Generate(int count, int difficulty, bool forTraining);
+
+    /// <summary>Training surface used by this creator.</summary>
+    GenesisTrainingExampleKind TrainingKind { get; }
 }

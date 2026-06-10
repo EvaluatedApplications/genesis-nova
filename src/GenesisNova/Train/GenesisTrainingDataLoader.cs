@@ -1,39 +1,67 @@
 using GenesisNova.Data;
+using System.Text;
 
 namespace GenesisNova.Train;
 
 public static class GenesisTrainingDataLoader
 {
     public static IReadOnlyList<GenesisExample> LoadFromFile(string path)
+        => LoadFromFileAsync(path).GetAwaiter().GetResult();
+
+    public static async Task<IReadOnlyList<GenesisExample>> LoadFromFileAsync(string path)
     {
         if (!File.Exists(path))
             throw new FileNotFoundException($"Training file not found: {path}", path);
 
-        var lines = File.ReadAllLines(path);
-        var output = new List<GenesisExample>(lines.Length);
-        for (var i = 0; i < lines.Length; i++)
+        var output = new List<GenesisExample>();
+        await using var stream = new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite,
+            bufferSize: 64 * 1024,
+            options: FileOptions.Asynchronous | FileOptions.SequentialScan);
+        using var reader = new StreamReader(stream);
+
+        var lineNumber = 0;
+        while (true)
         {
-            var raw = lines[i].Trim();
+            var raw = await reader.ReadLineAsync();
+            if (raw is null)
+                break;
+
+            lineNumber++;
+            raw = raw.Trim();
             if (raw.Length == 0 || raw.StartsWith('#'))
                 continue;
 
-            output.Add(ParseLine(raw, i + 1));
+            output.Add(ParseLine(raw, lineNumber));
         }
 
         return output;
     }
 
     public static void SaveToFile(string path, IReadOnlyList<GenesisExample> examples)
+        => SaveToFileAsync(path, examples).GetAwaiter().GetResult();
+
+    public static async Task SaveToFileAsync(string path, IReadOnlyList<GenesisExample> examples)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(path) ?? ".");
-        var lines = new List<string>();
+        await using var stream = new FileStream(
+            path,
+            FileMode.Create,
+            FileAccess.Write,
+            FileShare.Read,
+            bufferSize: 64 * 1024,
+            options: FileOptions.Asynchronous);
+        await using var writer = new StreamWriter(stream, new UTF8Encoding(false));
         foreach (var ex in examples)
         {
             // Save only input => output (no route labels)
-            string line = $"{ex.Input} => {ex.Output}";
-            lines.Add(line);
+            await writer.WriteLineAsync($"{ex.Input} => {ex.Output}");
         }
-        File.WriteAllLines(path, lines);
+
+        await writer.FlushAsync();
     }
 
     private static GenesisExample ParseLine(string line, int lineNumber)
@@ -55,4 +83,3 @@ public static class GenesisTrainingDataLoader
         return new GenesisExample(input, output);
     }
 }
-

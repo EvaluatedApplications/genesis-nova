@@ -9,6 +9,7 @@ public sealed class SequenceCreator : IExampleCreator
 
     public string Name => "sequence:next";
     public int EstimatedComplexity => 24;
+    public GenesisTrainingExampleKind TrainingKind => GenesisTrainingExampleKind.PromptAnswer;
 
     public ImmutableArray<(string Input, string Output)> Generate(int count, int difficulty, bool forTraining)
     {

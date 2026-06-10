@@ -1,4 +1,6 @@
+using GenesisNova.Core;
 using GenesisNova.Data;
+using GenesisNova.Runtime;
 
 namespace GenesisNova.Train;
 
@@ -7,13 +9,82 @@ public sealed record PreTokenizedExample(
     int[] TargetTokens,
     GenesisExample Original);
 
+internal sealed class ExampleProgressAccumulator
+{
+    public ExampleProgressAccumulator(GenesisExample example)
+    {
+        Example = example;
+        BestTokenLoss = double.MaxValue;
+    }
+
+    public GenesisExample Example { get; }
+    public int SeenCount { get; private set; }
+    public int SuccessCount { get; private set; }
+    public double TokenLossSum { get; private set; }
+    public double LastTokenLoss { get; private set; }
+    public double BestTokenLoss { get; private set; }
+
+    public double SuccessRate => SeenCount == 0 ? 0.0 : SuccessCount / (double)SeenCount;
+    public double AverageTokenLoss => SeenCount == 0 ? 0.0 : TokenLossSum / SeenCount;
+
+    public void Observe(GenesisPerExampleLoss update)
+    {
+        SeenCount++;
+        if (update.IsCorrect)
+            SuccessCount++;
+
+        LastTokenLoss = update.Loss.TokenLoss;
+        TokenLossSum += update.Loss.TokenLoss;
+        BestTokenLoss = Math.Min(BestTokenLoss, update.Loss.TokenLoss);
+    }
+}
+
+internal sealed class CreatorProgressAccumulator
+{
+    public CreatorProgressAccumulator(string creatorName, GenesisTrainingExampleKind trainingKind)
+    {
+        CreatorName = creatorName;
+        TrainingKind = trainingKind;
+        BestTokenLoss = double.MaxValue;
+    }
+
+    public string CreatorName { get; }
+    public GenesisTrainingExampleKind TrainingKind { get; }
+    public int SeenCount { get; private set; }
+    public int SuccessCount { get; private set; }
+    public double TokenLossSum { get; private set; }
+    public double LastTokenLoss { get; private set; }
+    public double BestTokenLoss { get; private set; }
+
+    public double SuccessRate => SeenCount == 0 ? 0.0 : SuccessCount / (double)SeenCount;
+    public double AverageTokenLoss => SeenCount == 0 ? 0.0 : TokenLossSum / SeenCount;
+
+    public void Observe(GenesisPerExampleLoss update)
+    {
+        SeenCount++;
+        if (update.IsCorrect)
+            SuccessCount++;
+
+        LastTokenLoss = update.Loss.TokenLoss;
+        TokenLossSum += update.Loss.TokenLoss;
+        BestTokenLoss = Math.Min(BestTokenLoss, update.Loss.TokenLoss);
+    }
+}
+
 public sealed class GenesisTrainingOrchestrator
 {
     private readonly GenesisTrainer _trainer;
+    private readonly GenesisNovaConfig _config;
+    private static readonly IReadOnlyDictionary<string, GenesisTrainingExampleKind> CreatorKinds =
+        ExampleCreatorRegistry.All
+            .Concat(ExampleCreatorRegistry.Legacy)
+            .GroupBy(x => x.Name, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.First().TrainingKind, StringComparer.OrdinalIgnoreCase);
 
-    public GenesisTrainingOrchestrator(GenesisTrainer trainer)
+    public GenesisTrainingOrchestrator(GenesisTrainer trainer, GenesisNovaConfig? config = null)
     {
         _trainer = trainer;
+        _config = config ?? new GenesisNovaConfig();
     }
 
     /// <summary>Generate training examples from registered creators (no route labels).</summary>
@@ -58,19 +129,14 @@ public sealed class GenesisTrainingOrchestrator
         IReadOnlyList<GenesisExample> examples,
         int epochs,
         Action<string>? logger = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        IReadOnlyDictionary<string, string>? exampleCreatorMap = null)
     {
         if (examples.Count == 0)
             throw new ArgumentException("No training examples provided.", nameof(examples));
 
         var overallStart = System.Diagnostics.Stopwatch.StartNew();
         logger?.Invoke($"[TRAIN] Starting training: {examples.Count} examples × {epochs} epochs");
-
-        // Pre-tokenize all examples in parallel (CPU-only, no GPU contention)
-        var preTokenStart = System.Diagnostics.Stopwatch.StartNew();
-        var preTokenized = PreTokenizeExamples(examples);
-        preTokenStart.Stop();
-        logger?.Invoke($"[PRETOK] Pre-tokenized {preTokenized.Count} examples in {preTokenStart.ElapsedMilliseconds}ms");
 
         var totalSteps = 0;
         var sumToken = 0.0;
@@ -80,8 +146,40 @@ public sealed class GenesisTrainingOrchestrator
         var lastNoiseRatio = 0.0;
         var finalNodeCount = 0;
         var finalRelationCount = 0;
-        var baseBatchSize = Math.Max(1, Math.Min(16, examples.Count / 2));
-        logger?.Invoke($"[CONFIG] batch_size={baseBatchSize} examples={examples.Count}");
+        var perExampleProgress = new Dictionary<string, ExampleProgressAccumulator>(StringComparer.Ordinal);
+        var perCreatorProgress = new Dictionary<string, CreatorProgressAccumulator>(StringComparer.OrdinalIgnoreCase);
+        var skippedCorrectExampleCount = 0;
+        var promptAnswerExampleCount = 0;
+        var windowedTextExampleCount = 0;
+        var hasCuda = GpuCapacityPlanner.TryGetNvidiaVramMb(out var totalVramMb, out var freeVramMb);
+        var usableVramMb = hasCuda ? (freeVramMb > 0 ? freeVramMb : totalVramMb) : 0;
+        var maxTargetTokens = ResolveMaxTargetTokens(hasCuda, usableVramMb);
+
+        // Pre-tokenize examples and trim overlong targets for GPU safety on smaller VRAM devices.
+        var preTokenStart = System.Diagnostics.Stopwatch.StartNew();
+        var preTokenized = PreTokenizeExamples(examples, maxTargetTokens, logger);
+        preTokenStart.Stop();
+        logger?.Invoke(
+            $"[PRETOK] Pre-tokenized {preTokenized.Count} examples in {preTokenStart.ElapsedMilliseconds}ms (target_cap={maxTargetTokens})");
+
+        var avgTargetTokens = Math.Max(1, (int)Math.Round(preTokenized.Average(x => x.TargetTokens.Length)));
+        var targetVramUtilization = Math.Clamp(_config.TargetVramUtilization, 0.5, 0.95);
+        var reserveVramMb = Math.Max(256, _config.ReserveVramMb);
+        var estimatedBatchSize = GpuCapacityPlanner.EstimateTrainingBatchSize(
+            exampleCount: examples.Count,
+            hiddenSize: _trainer.HiddenSize,
+            averageTargetTokens: avgTargetTokens,
+            gpuAvailable: hasCuda,
+            vramMb: usableVramMb,
+            targetUtilization: targetVramUtilization,
+            reserveVramMb: reserveVramMb,
+            cpuThreads: Environment.ProcessorCount,
+            debugOutput: logger);
+        var baseBatchSize = Math.Max(1, estimatedBatchSize);
+        logger?.Invoke(
+            $"[CONFIG] batch_size={baseBatchSize} examples={examples.Count} avgTokens={avgTargetTokens} hidden={_trainer.HiddenSize}");
+        logger?.Invoke(
+            $"[CONFIG] vram_target={targetVramUtilization:F2} reserve_mb={reserveVramMb}");
 
         for (var e = 1; e <= Math.Max(1, epochs); e++)
         {
@@ -89,38 +187,122 @@ public sealed class GenesisTrainingOrchestrator
             var epochStart = System.Diagnostics.Stopwatch.StartNew();
             var epochSum = 0.0;
             var batchCount = 0;
-            var epochPool = preTokenized
-                .OrderBy(_ => Random.Shared.Next())
-                .ToList();
+            var epochPool = BuildEpochPool(preTokenized, perExampleProgress);
 
             var batchSize = baseBatchSize;
+            var gcInterval = Math.Max(8, batchSize / 2);
             logger?.Invoke(
-                $"[EPOCH-CONFIG] {e}/{epochs} pool={epochPool.Count} batch={batchSize}");
+                $"[EPOCH-CONFIG] {e}/{epochs} pool={epochPool.Count} batch={batchSize} gcInterval={gcInterval}");
 
-            // Process examples in batches
-            for (var batchStart = 0; batchStart < epochPool.Count; batchStart += batchSize)
+            // Process examples in adaptive batches.
+            for (var batchStart = 0; batchStart < epochPool.Count;)
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 var batchEnd = Math.Min(batchStart + batchSize, epochPool.Count);
-                var batch = epochPool
-                    .Skip(batchStart)
-                    .Take(batchEnd - batchStart)
-                    .ToList();
+                var batch = epochPool.GetRange(batchStart, batchEnd - batchStart);
 
                 var batchStepStart = System.Diagnostics.Stopwatch.StartNew();
-                var loss = _trainer.TrainBatchPreTokenized(batch);
-                batchStepStart.Stop();
+                
+                try
+                {
+                    var threadId = System.Threading.Thread.CurrentThread.ManagedThreadId;
+                    logger?.Invoke($"  [BATCH-START] batch={batchStart + 1:D3}-{batchEnd:D3} size={batch.Count} thread={threadId}");
+                    
+                    // Validate batch state before passing to trainer
+                    if (batch.Count == 0)
+                        throw new InvalidOperationException("Batch is empty");
+                    
+                    foreach (var (idx, item) in batch.Select((x, i) => (i, x)))
+                    {
+                        if (item.InputTokens == null || item.InputTokens.Length == 0)
+                            throw new InvalidOperationException($"Batch[{idx}] InputTokens is null or empty");
+                        if (item.TargetTokens == null || item.TargetTokens.Length == 0)
+                            throw new InvalidOperationException($"Batch[{idx}] TargetTokens is null or empty");
+                    }
+                    
+                    logger?.Invoke($"  [BATCH-GPU-OP] batch={batchStart + 1:D3}-{batchEnd:D3} GPU_TRAIN_START thread={threadId}");
+                    var batchResult = _trainer.TrainBatchPreTokenizedDetailed(batch, cancellationToken);
+                    var loss = batchResult.AverageLoss;
+                    logger?.Invoke($"  [BATCH-GPU-OP] batch={batchStart + 1:D3}-{batchEnd:D3} GPU_TRAIN_COMPLETE thread={threadId}");
+                    batchStepStart.Stop();
 
-                totalSteps++;
-                batchCount++;
-                sumToken += loss.TokenLoss;
-                epochSum += loss.TotalLoss * batch.Count;
+                    totalSteps++;
+                    batchCount++;
+                    sumToken += loss.TokenLoss;
+                    epochSum += loss.TotalLoss * batch.Count;
+                    foreach (var update in batchResult.ExampleLosses)
+                    {
+                        var key = ComposeExampleKey(update.Example);
+                        if (!perExampleProgress.TryGetValue(key, out var entry))
+                        {
+                            entry = new ExampleProgressAccumulator(update.Example);
+                            perExampleProgress[key] = entry;
+                        }
 
-                logger?.Invoke(
-                    $"  [BATCH] {batchStart + 1:D3}-{batchEnd:D3} " +
-                    $"token={loss.TokenLoss:F4} total={loss.TotalLoss:F4} " +
-                    $"cons={loss.ConsistencyLoss:F4} mem={loss.MemoryLoss:F4} " +
-                    $"time={batchStepStart.ElapsedMilliseconds:D5}ms");
+                        entry.Observe(update);
+                        if (update.WasSkipped)
+                            skippedCorrectExampleCount++;
+                        if (exampleCreatorMap is not null &&
+                            exampleCreatorMap.TryGetValue(key, out var creatorName) &&
+                            !string.IsNullOrWhiteSpace(creatorName))
+                        {
+                            var trainingKind = CreatorKinds.TryGetValue(creatorName, out var creatorKind)
+                                ? creatorKind
+                                : GenesisTrainingExampleKind.WindowedText;
+                            if (trainingKind == GenesisTrainingExampleKind.PromptAnswer)
+                                promptAnswerExampleCount += 1;
+                            else
+                                windowedTextExampleCount += 1;
+
+                            if (!perCreatorProgress.TryGetValue(creatorName, out var creatorEntry))
+                            {
+                                creatorEntry = new CreatorProgressAccumulator(creatorName, trainingKind);
+                                perCreatorProgress[creatorName] = creatorEntry;
+                            }
+
+                            creatorEntry.Observe(update);
+                        }
+                    }
+
+                    logger?.Invoke(
+                        $"  [BATCH] {batchStart + 1:D3}-{batchEnd:D3} " +
+                        $"token={loss.TokenLoss:F4} total={loss.TotalLoss:F4} " +
+                        $"cons={loss.ConsistencyLoss:F4} mem={loss.MemoryLoss:F4} " +
+                        $"time={batchStepStart.ElapsedMilliseconds:D5}ms");
+                    batchStart = batchEnd;
+                }
+                catch (System.AccessViolationException ex)
+                {
+                    batchStepStart.Stop();
+                    var threadId = System.Threading.Thread.CurrentThread.ManagedThreadId;
+                    logger?.Invoke($"  [BATCH-GPU-CRASH] batch={batchStart + 1:D3}-{batchEnd:D3} AccessViolation: {ex.Message} thread={threadId}");
+                    logger?.Invoke($"  [BATCH-GPU-CRASH-DETAIL] Exception Type={ex.GetType().FullName} StackTrace={ex.StackTrace}");
+                    throw new InvalidOperationException($"Native memory error during batch training at batch {batchStart + 1:D3}-{batchEnd:D3}. This may indicate a GPU memory issue or thread safety violation. Thread={threadId}", ex);
+                }
+                catch (Exception ex)
+                {
+                    batchStepStart.Stop();
+                    if (IsGpuOutOfMemory(ex) && batchSize > 1)
+                    {
+                        var newBatchSize = Math.Max(1, batchSize / 2);
+                        logger?.Invoke(
+                            $"  [BATCH-OOM] {batchStart + 1:D3}-{batchEnd:D3} reducing batch {batchSize} -> {newBatchSize} and retrying.");
+                        RunEmergencyMemoryCleanup(logger);
+                        batchSize = newBatchSize;
+                        gcInterval = Math.Max(4, batchSize / 2);
+                        continue;
+                    }
+                    if (IsGpuOutOfMemory(ex) && batchSize == 1)
+                    {
+                        logger?.Invoke(
+                            $"  [BATCH-OOM] {batchStart + 1:D3}-{batchEnd:D3} persisted at batch=1, skipping example and continuing.");
+                        RunEmergencyMemoryCleanup(logger);
+                        batchStart = batchEnd;
+                        continue;
+                    }
+                    logger?.Invoke($"  [BATCH-ERROR] {batchStart + 1:D3}-{batchEnd:D3} {ex.GetType().Name}: {ex.Message}");
+                    throw;
+                }
             }
 
             epochStart.Stop();
@@ -138,19 +320,83 @@ public sealed class GenesisTrainingOrchestrator
             if (spaceResult.Compacted)
             {
                 logger?.Invoke(
-                    $"[SPACE] pruned nodes={spaceResult.NodesPruned} relations={spaceResult.RelationsPruned} " +
-                    $"size={spaceResult.NodesAfter}n/{spaceResult.RelationsAfter}r noise={spaceResult.NoiseRatio:F3} budget={spaceResult.RelationBudget}");
+                    $"[SPACE] observed nodes={spaceResult.NodesAfter} relations={spaceResult.RelationsAfter} " +
+                    $"noise={spaceResult.NoiseRatio:F3}");
             }
 
             var epochLoss = epochSum / Math.Max(1, examples.Count);
+            var epochSuccessRate = perExampleProgress.Count == 0
+                ? 0.0
+                : perExampleProgress.Values.Average(x => x.SuccessRate);
             logger?.Invoke($"[EPOCH] {e}/{epochs} loss={epochLoss:F4} time={epochStart.ElapsedMilliseconds:D5}ms batches={batchCount}");
+            logger?.Invoke($"[EPOCH] {e}/{epochs} example_success={epochSuccessRate:P1}");
         }
 
         overallStart.Stop();
         var avgTokenLoss = sumToken / Math.Max(1, totalSteps);
         var contradictionRate = EstimateContradictionRate(examples);
+        var trackedExamples = perExampleProgress.Values.ToArray();
+        var correctCount = trackedExamples.Count(x => x.SuccessRate >= 0.5);
+        var incorrectCount = Math.Max(0, trackedExamples.Length - correctCount);
+        var successRate = trackedExamples.Length == 0
+            ? 0.0
+            : trackedExamples.Average(x => x.SuccessRate);
+        var weakExamples = trackedExamples
+            .OrderBy(x => x.SuccessRate)
+            .ThenByDescending(x => x.AverageTokenLoss)
+            .ThenByDescending(x => x.SeenCount)
+            .Take(32)
+            .Select(x => new GenesisExampleProgress(
+                ExampleKey: ComposeExampleKey(x.Example),
+                InputPreview: Abbreviate(x.Example.Input, 96),
+                OutputPreview: Abbreviate(x.Example.Output, 64),
+                SeenCount: x.SeenCount,
+                SuccessCount: x.SuccessCount,
+                SuccessRate: x.SuccessRate,
+                LastTokenLoss: x.LastTokenLoss,
+                AverageTokenLoss: x.AverageTokenLoss,
+                BestTokenLoss: x.BestTokenLoss))
+            .ToArray();
+        var creatorProgress = ExampleCreatorRegistry.All
+            .Select(creator =>
+            {
+                if (perCreatorProgress.TryGetValue(creator.Name, out var progress))
+                {
+                    return new GenesisCreatorProgress(
+                        CreatorName: progress.CreatorName,
+                        TrainingKind: progress.TrainingKind,
+                        SeenCount: progress.SeenCount,
+                        SuccessCount: progress.SuccessCount,
+                        SuccessRate: progress.SuccessRate,
+                        LastTokenLoss: progress.LastTokenLoss,
+                        AverageTokenLoss: progress.AverageTokenLoss,
+                        BestTokenLoss: progress.BestTokenLoss);
+                }
+
+                return new GenesisCreatorProgress(
+                    CreatorName: creator.Name,
+                    TrainingKind: creator.TrainingKind,
+                    SeenCount: 0,
+                    SuccessCount: 0,
+                    SuccessRate: 0.0,
+                    LastTokenLoss: 0.0,
+                    AverageTokenLoss: 0.0,
+                    BestTokenLoss: 0.0);
+            })
+            .OrderByDescending(x => x.AverageTokenLoss)
+            .ThenBy(x => x.CreatorName, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
 
         logger?.Invoke($"[DONE] Training complete in {overallStart.ElapsedMilliseconds / 1000.0:F1}s. Avg loss={avgTokenLoss:F4}");
+        logger?.Invoke($"[DONE] per-example success={successRate:P1} tracked={trackedExamples.Length} weak={weakExamples.Length}");
+        if (creatorProgress.Length > 0)
+        {
+            foreach (var creator in creatorProgress)
+            {
+                logger?.Invoke(
+                    $"[DONE] creator={creator.CreatorName} loss={creator.AverageTokenLoss:F4} success={creator.SuccessRate:P1} seen={creator.SeenCount}");
+            }
+        }
 
         return new GenesisTrainingReport(
             Epochs: Math.Max(1, epochs),
@@ -172,20 +418,75 @@ public sealed class GenesisTrainingOrchestrator
             RelationsPruned: totalRelationsPruned,
             FinalNodeCount: finalNodeCount,
             FinalRelationCount: finalRelationCount,
-            SpaceNoiseRatio: lastNoiseRatio);
+            SpaceNoiseRatio: lastNoiseRatio,
+            CorrectExampleCount: correctCount,
+            IncorrectExampleCount: incorrectCount,
+            ExampleSuccessRate: successRate,
+            SkippedCorrectExampleCount: skippedCorrectExampleCount,
+            PromptAnswerExampleCount: promptAnswerExampleCount,
+            WindowedTextExampleCount: windowedTextExampleCount,
+            WeakExamples: weakExamples,
+            CreatorProgress: creatorProgress);
     }
 
-    private List<PreTokenizedExample> PreTokenizeExamples(IReadOnlyList<GenesisExample> examples)
+    private static List<PreTokenizedExample> BuildEpochPool(
+        IReadOnlyList<PreTokenizedExample> preTokenized,
+        IReadOnlyDictionary<string, ExampleProgressAccumulator> progress)
+    {
+        if (progress.Count == 0)
+            return preTokenized.OrderBy(_ => Random.Shared.Next()).ToList();
+
+        return preTokenized
+            .Select(ex =>
+            {
+                var key = ComposeExampleKey(ex.Original);
+                if (!progress.TryGetValue(key, out var entry))
+                    return (example: ex, priority: 0.0, jitter: Random.Shared.NextDouble());
+
+                var weakness = (1.0 - entry.SuccessRate) + Math.Min(2.0, entry.AverageTokenLoss);
+                return (example: ex, priority: weakness, jitter: Random.Shared.NextDouble());
+            })
+            .OrderByDescending(x => x.priority)
+            .ThenBy(x => x.jitter)
+            .Select(x => x.example)
+            .ToList();
+    }
+
+    private static string ComposeExampleKey(GenesisExample example)
+        => $"{example.Input.Trim()} => {example.Output.Trim()}";
+
+    private static string Abbreviate(string value, int maxLength)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return string.Empty;
+
+        var compact = value.Replace('\r', ' ').Replace('\n', ' ').Trim();
+        return compact.Length <= maxLength ? compact : compact[..maxLength];
+    }
+
+    private List<PreTokenizedExample> PreTokenizeExamples(
+        IReadOnlyList<GenesisExample> examples,
+        int maxTargetTokens,
+        Action<string>? logger)
     {
         var result = new List<PreTokenizedExample>(examples.Count);
+        var trimmed = 0;
         // Tokenizer mutates vocabulary during Encode, so this must be exclusive.
         // Parallel tokenization corrupts tokenizer dictionaries under concurrent writes.
         foreach (var ex in examples)
         {
             var input = _trainer.EncodeInput(ex.Input);
             var target = _trainer.EncodeTarget(ex.Output);
+            if (target.Length > maxTargetTokens)
+            {
+                target = target.Take(maxTargetTokens).ToArray();
+                trimmed++;
+            }
             result.Add(new PreTokenizedExample(input, target, ex));
         }
+
+        if (trimmed > 0)
+            logger?.Invoke($"[PRETOK] trimmed {trimmed} targets to max_tokens={maxTargetTokens}");
 
         return result;
     }
@@ -202,5 +503,48 @@ public sealed class GenesisTrainingOrchestrator
 
         var contradictory = groups.Sum(g => g.Count());
         return contradictory / (double)examples.Count;
+    }
+
+    private static bool IsGpuOutOfMemory(Exception ex)
+    {
+        Exception? current = ex;
+        while (current is not null)
+        {
+            var message = current.Message;
+            if (!string.IsNullOrWhiteSpace(message))
+            {
+                if (message.Contains("out of memory", StringComparison.OrdinalIgnoreCase) ||
+                    message.Contains("cuda", StringComparison.OrdinalIgnoreCase) && message.Contains("memory", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+
+            current = current.InnerException;
+        }
+
+        return false;
+    }
+
+    private void RunEmergencyMemoryCleanup(Action<string>? logger)
+    {
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+    }
+
+    private static int ResolveMaxTargetTokens(bool gpuAvailable, int usableVramMb)
+    {
+        if (!gpuAvailable)
+            return 512;
+
+        if (usableVramMb <= 4096)
+            return 96;
+        if (usableVramMb <= 6144)
+            return 128;
+        if (usableVramMb <= 8192)
+            return 192;
+
+        return 256;
     }
 }

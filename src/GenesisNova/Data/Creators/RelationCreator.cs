@@ -18,6 +18,7 @@ public sealed class RelationCreator : IExampleCreator
 
     public string Name => "relation:category";
     public int EstimatedComplexity => 20;
+    public GenesisTrainingExampleKind TrainingKind => GenesisTrainingExampleKind.PromptAnswer;
 
     public ImmutableArray<(string Input, string Output)> Generate(int count, int difficulty, bool forTraining)
     {

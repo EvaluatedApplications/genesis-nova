@@ -5,6 +5,7 @@ public sealed class PlatonicSpaceMemory
     private readonly int _faceDimension;
     private readonly Dictionary<string, ConceptNode> _nodes = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, ConceptRelation> _relations = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, List<ConceptRelation>> _relationsBySource = new(StringComparer.OrdinalIgnoreCase);
 
     public PlatonicSpaceMemory(int faceDimension, int seed = 42)
     {
@@ -71,6 +72,21 @@ public sealed class PlatonicSpaceMemory
                 synthesisContradiction: observedContradiction,
                 observationCount: 0);
             _relations[key] = relation;
+            
+            // Add to source index (both directions since relations are bidirectional in queries)
+            if (!_relationsBySource.TryGetValue(relation.Left, out var sourceList))
+            {
+                sourceList = new List<ConceptRelation>();
+                _relationsBySource[relation.Left] = sourceList;
+            }
+            sourceList.Add(relation);
+            
+            if (!_relationsBySource.TryGetValue(relation.Right, out var targetList))
+            {
+                targetList = new List<ConceptRelation>();
+                _relationsBySource[relation.Right] = targetList;
+            }
+            targetList.Add(relation);
         }
 
         relation.LastObservedContradiction = Clamp01(observedContradiction);
@@ -126,7 +142,10 @@ public sealed class PlatonicSpaceMemory
             var candidateScores = new Dictionary<string, List<double>>(StringComparer.OrdinalIgnoreCase);
             foreach (var source in frontier)
             {
-                foreach (var relation in _relations.Values)
+                if (!_relationsBySource.TryGetValue(source, out var relations))
+                    continue;
+                
+                foreach (var relation in relations)
                 {
                     string? target = null;
                     if (relation.Left.Equals(source, StringComparison.OrdinalIgnoreCase))
@@ -235,6 +254,7 @@ public sealed class PlatonicSpaceMemory
     {
         _nodes.Clear();
         _relations.Clear();
+        _relationsBySource.Clear();
 
         foreach (var node in snapshot.Nodes)
         {
@@ -249,13 +269,29 @@ public sealed class PlatonicSpaceMemory
         foreach (var relation in snapshot.Relations)
         {
             var key = RelationKey(relation.Left, relation.Right);
-            _relations[key] = new ConceptRelation(
+            var conceptRelation = new ConceptRelation(
                 left: Normalize(relation.Left),
                 right: Normalize(relation.Right),
                 thesisContradiction: Clamp01(relation.ThesisContradiction),
                 lastObservedContradiction: Clamp01(relation.LastObservedContradiction),
                 synthesisContradiction: Clamp01(relation.SynthesisContradiction),
                 observationCount: Math.Max(0, relation.ObservationCount));
+            _relations[key] = conceptRelation;
+            
+            // Add to source index (both directions)
+            if (!_relationsBySource.TryGetValue(conceptRelation.Left, out var sourceList))
+            {
+                sourceList = new List<ConceptRelation>();
+                _relationsBySource[conceptRelation.Left] = sourceList;
+            }
+            sourceList.Add(conceptRelation);
+            
+            if (!_relationsBySource.TryGetValue(conceptRelation.Right, out var targetList))
+            {
+                targetList = new List<ConceptRelation>();
+                _relationsBySource[conceptRelation.Right] = targetList;
+            }
+            targetList.Add(conceptRelation);
         }
     }
 

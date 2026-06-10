@@ -7,7 +7,7 @@ namespace GenesisNova.Model;
 public class GenesisNeuralModel
 {
     private GenesisNovaConfig _config;
-    private readonly Device _trainingDevice;  // CPU for stability & large models
+    private readonly Device _trainingDevice;  // CUDA when available, CPU fallback
     private readonly Device _inferenceDevice; // GPU for speed if available
     private int _hiddenSize;
     private int _vocabSize;
@@ -26,12 +26,48 @@ public class GenesisNeuralModel
     {
         _config = config;
         _hiddenSize = config.HiddenSize;
+
+        // Training uses CUDA when the backend allows it; otherwise fall back to CPU.
+        _trainingDevice = SelectTrainingDevice(config);
+
+        // Inference on GPU: prefer A3000 (discrete), fallback to any CUDA device
+        _inferenceDevice = SelectInferenceDevice(config);
+    }
+
+    private static Device SelectTrainingDevice(GenesisNovaConfig config)
+    {
+        if (config.Backend == ComputeBackend.Cpu || !torch.cuda_is_available())
+        {
+            Console.WriteLine("[GPU] CUDA unavailable for training; using CPU fallback");
+            return CPU;
+        }
+
+        var deviceCount = torch.cuda.device_count();
+        if (deviceCount == 0)
+        {
+            Console.WriteLine("[GPU] No CUDA devices detected for training; using CPU fallback");
+            return CPU;
+        }
+
+        Console.WriteLine($"[GPU] CUDA devices available for training: {deviceCount}");
+        Console.WriteLine("[GPU] Using device 0 for training");
+        return new Device(DeviceType.CUDA, 0);
+    }
+
+    private static Device SelectInferenceDevice(GenesisNovaConfig config)
+    {
+        if (config.Backend == ComputeBackend.Cpu || !torch.cuda_is_available())
+            return CPU;
+
+        var deviceCount = torch.cuda.device_count();
+        if (deviceCount == 0)
+            return CPU;
+
+        // Prefer device 0 (likely discrete A3000 if it's the primary GPU)
+        Console.WriteLine($"[GPU] CUDA devices available: {deviceCount}");
+        Console.WriteLine($"[GPU] Using device 0 for inference (A3000 preferred)");
         
-        // Training on CPU: unlimited memory, stable
-        _trainingDevice = CPU;
-        
-        // Inference on GPU if available, else CPU
-        _inferenceDevice = (torch.cuda_is_available() && config.Backend != ComputeBackend.Cpu) ? CUDA : CPU;
+        return new Device(DeviceType.CUDA, 0);
     }
 
     public int HiddenSize => _hiddenSize;
@@ -78,68 +114,6 @@ public class GenesisNeuralModel
         return TrainExampleGpu(inputTokens, targetTokens, bosTokenId, lossScale);
     }
 
-    /// <summary>Forward pass only - accumulates loss, no backward yet.</summary>
-    public (torch.Tensor AccumulatedLoss, List<torch.Tensor> ForwardTensors) ForwardPass(
-        IReadOnlyList<int> inputTokens,
-        IReadOnlyList<int> targetTokens,
-        int bosTokenId)
-    {
-        EnsureModelInitialized();
-
-        var forwardTensors = new List<torch.Tensor>();
-        torch.Tensor? accumulatedLoss = null;
-        var prev = bosTokenId;
-
-        for (var t = 0; t < targetTokens.Count; t++)
-        {
-            var inputVec = MeanEmbeddingTensor(inputTokens);
-            forwardTensors.Add(inputVec);
-            
-            var prevEmb = GetEmbeddingTensor(prev);
-            forwardTensors.Add(prevEmb);
-            
-            var decoderScale = PositionScale(t);
-            
-            var scaled = prevEmb * decoderScale;
-            forwardTensors.Add(scaled);
-            
-            var combined = inputVec + scaled;
-            forwardTensors.Add(combined);
-            
-            var hidden = combined.tanh();
-            forwardTensors.Add(hidden);
-            
-            var logits = hidden.matmul(_wOutT!) + _bOutT!;
-            forwardTensors.Add(logits);
-            
-            var targetToken = tensor(new long[] { targetTokens[t] }, dtype: ScalarType.Int64, device: _trainingDevice);
-            forwardTensors.Add(targetToken);
-            
-            var stepLoss = nn.functional.cross_entropy(logits.unsqueeze(0), targetToken);
-            forwardTensors.Add(stepLoss);
-            
-            if (accumulatedLoss is null)
-                accumulatedLoss = stepLoss;
-            else
-            {
-                var newAccum = accumulatedLoss + stepLoss;
-                accumulatedLoss = newAccum;
-            }
-            
-            prev = targetTokens[t];
-        }
-
-        return (accumulatedLoss!, forwardTensors);
-    }
-
-    /// <summary>Backward pass on accumulated loss.</summary>
-    public void BackwardAndStep(torch.Tensor accumulatedLoss)
-    {
-        _optimizer!.zero_grad();
-        accumulatedLoss.backward();
-        _optimizer.step();
-    }
-
     public ModelSnapshot Export()
     {
         EnsureModelInitialized();
@@ -179,11 +153,15 @@ public class GenesisNeuralModel
     {
         EnsureModelInitialized();
         using var noGrad = no_grad();
-        using var inputVec = MeanEmbeddingTensor(inputTokens);
-        using var prevEmb = GetEmbeddingTensor(previousToken);
+        using var inputVec = MeanEmbeddingTensor(inputTokens, _inferenceDevice);
+        using var prevEmb = GetEmbeddingTensor(previousToken, _inferenceDevice);
         var decoderScale = PositionScale(stepIndex);
         using var hidden = (inputVec + (prevEmb * decoderScale)).tanh();
-        using var logits = hidden.matmul(_wOutT!) + _bOutT!;
+         
+        // Move weight matrices to inference device if needed
+        using var wOut = _wOutT!.to(_inferenceDevice);
+        using var bOut = _bOutT!.to(_inferenceDevice);
+        using var logits = hidden.matmul(wOut) + bOut;
 
         var scores = logits.cpu().data<float>().ToArray();
         if (disallowToken.HasValue && disallowToken.Value >= 0 && disallowToken.Value < scores.Length)
@@ -231,37 +209,40 @@ public class GenesisNeuralModel
 
         try
         {
+            // Cache input embedding (computed once, reused per token)
+            var inputVec = MeanEmbeddingTensor(inputTokens);
+            forwardTensors.Add(inputVec);
+            
             for (var t = 0; t < targetTokens.Count; t++)
             {
-                // Get embeddings
-                var inputVec = MeanEmbeddingTensor(inputTokens);
-                forwardTensors.Add(inputVec);
-                
                 var prevEmb = GetEmbeddingTensor(prev);
                 forwardTensors.Add(prevEmb);
                 
                 var decoderScale = PositionScale(t);
                 
                 // Forward computation: input + pos-scaled embedding
+                // NOTE: Intermediate tensors (scaled, combined, hidden) are NOT stored.
+                // PyTorch's autograd system maintains the computation graph automatically
+                // through requires_grad chain. We only store leaf tensors (inputVec, prevEmb)
+                // and keep loss tensors for accumulation. This reduces memory from 9 tensors/step
+                // to 2-3 tensors/step (~70% reduction).
                 var scaled = prevEmb * decoderScale;
-                forwardTensors.Add(scaled);
                 
                 var combined = inputVec + scaled;
-                forwardTensors.Add(combined);
                 
                 var hidden = combined.tanh();
-                forwardTensors.Add(hidden);
                 
-                // Logits
+                // Logits - only this for loss computation
                 var logits = hidden.matmul(_wOutT!) + _bOutT!;
-                forwardTensors.Add(logits);
                 
                 // Loss for this token
                 var targetToken = tensor(new long[] { targetTokens[t] }, dtype: ScalarType.Int64, device: _trainingDevice);
-                forwardTensors.Add(targetToken);
                 var stepLoss = nn.functional.cross_entropy(logits.unsqueeze(0), targetToken);
-                forwardTensors.Add(stepLoss);
+                // Clean up targetToken immediately - it's only used for cross_entropy call
+                targetToken.Dispose();
+                
                 stepLosses.Add(stepLoss);
+                forwardTensors.Add(stepLoss);
                 
                 totalLoss += stepLoss.ToDouble();
                 
@@ -408,6 +389,12 @@ public class GenesisNeuralModel
     {
         using (no_grad())
         {
+            // CRITICAL: Dispose optimizer FIRST before replacing parameters.
+            // Old optimizer holds references to old parameters, which we're about to dispose.
+            // If we don't dispose the optimizer first, it may try to access disposed tensors during next step.
+            _optimizer?.Dispose();
+            _optimizer = null;
+            
             var embClone = _embT!.clone().detach().to(_trainingDevice);
             var wClone = _wOutT!.clone().detach().to(_trainingDevice);
             var bClone = _bOutT!.clone().detach().to(_trainingDevice);
@@ -429,6 +416,7 @@ public class GenesisNeuralModel
                 try { oldRB.Dispose(); } catch { }
             }
 
+            // NOW create a fresh optimizer with the new parameters
             RecreateOptimizer();
         }
     }
@@ -462,11 +450,12 @@ public class GenesisNeuralModel
         RecreateOptimizer();
     }
 
-    private Tensor MeanEmbeddingTensor(IReadOnlyList<int> inputTokens)
+    private Tensor MeanEmbeddingTensor(IReadOnlyList<int> inputTokens, Device? device = null)
     {
+        device ??= _trainingDevice;
         EnsureModelInitialized();
         if (inputTokens.Count == 0 || _vocabSize == 0)
-            return zeros(new long[] { HiddenSize }, dtype: ScalarType.Float32, device: _trainingDevice);
+            return zeros(new long[] { HiddenSize }, dtype: ScalarType.Float32, device: device);
 
         var maxToken = inputTokens.Max();
         if (maxToken >= _vocabSize)
@@ -478,16 +467,16 @@ public class GenesisNeuralModel
             .ToArray();
 
         if (idx.Length == 0)
-            return zeros(new long[] { HiddenSize }, dtype: ScalarType.Float32, device: _trainingDevice);
+            return zeros(new long[] { HiddenSize }, dtype: ScalarType.Float32, device: device);
 
         using var idxTensor = tensor(idx, dtype: ScalarType.Int64, device: _trainingDevice);
         using var embRows = _embT!.index_select(0, idxTensor);
-        
+         
         // Sequential processing with lighter decay: exponential smoothing (alpha=0.3)
         // This preserves more information from all tokens, not just early ones
         Tensor result = zeros(new long[] { HiddenSize }, dtype: ScalarType.Float32, device: _trainingDevice);
         const float alpha = 0.3f;  // Lighter exponential decay
-        
+         
         for (var i = 0; i < idx.Length; i++)
         {
             using var emb = embRows.index_select(0, tensor(new long[] { i }, dtype: ScalarType.Int64, device: _trainingDevice)).squeeze(0);
@@ -496,17 +485,26 @@ public class GenesisNeuralModel
             using var combined = decayed + (emb * alpha);
             result = combined.tanh();
         }
-        
+         
+        if (device != _trainingDevice)
+            result = result.to(device);
+         
         return result;
     }
 
-    private Tensor GetEmbeddingTensor(int token)
+    private Tensor GetEmbeddingTensor(int token, Device? device = null)
     {
+        device ??= _trainingDevice;
         EnsureModelInitialized();
         if (token < 0 || token >= _vocabSize)
-            return zeros(new long[] { HiddenSize }, dtype: ScalarType.Float32, device: _trainingDevice);
+            return zeros(new long[] { HiddenSize }, dtype: ScalarType.Float32, device: device);
         using var idx = tensor(new long[] { token }, dtype: ScalarType.Int64, device: _trainingDevice);
-        return _embT!.index_select(0, idx).squeeze(0);
+        var emb = _embT!.index_select(0, idx).squeeze(0);
+         
+        if (device != _trainingDevice)
+            emb = emb.to(device);
+         
+        return emb;
     }
 
     private void EnsureModelInitialized()

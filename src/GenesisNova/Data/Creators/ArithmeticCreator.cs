@@ -17,6 +17,8 @@ public sealed class ArithmeticCreator : IExampleCreator
 
     public string Name => $"arithmetic:{_operation}";
 
+    public GenesisTrainingExampleKind TrainingKind => GenesisTrainingExampleKind.PromptAnswer;
+
     public int EstimatedComplexity => _operation switch
     {
         "add" => 20,

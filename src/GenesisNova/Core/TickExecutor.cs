@@ -30,7 +30,10 @@ public enum TickKind
     BranchDetect = 7,
     
     /// <summary>R8: Discover composition pattern (fold chain)</summary>
-    FoldChain = 8
+    FoldChain = 8,
+
+    /// <summary>R9: Invoke a space-management tool</summary>
+    SpaceTool = 9
 }
 
 /// <summary>
@@ -87,6 +90,7 @@ public static class TickExecutor
             TickKind.LocalLearn => ExecuteR6_LocalLearn(primaryElement, elements, state, tick.Parameter, tick.AuxiliaryEmbedding, newElements),
             TickKind.BranchDetect => ExecuteR7_BranchDetect(primaryElement, elements, state, newElements),
             TickKind.FoldChain => ExecuteR8_FoldChain(primaryElement, elements, state, tick.SecondaryIds, newElements),
+            TickKind.SpaceTool => ExecuteR9_SpaceTool(primaryElement, elements, state, tick.Parameter, newElements),
             _ => new TickResult(null, false, "Unknown tick kind")
         };
 
@@ -432,6 +436,35 @@ public static class TickExecutor
         
         newElements.Add(foldElement);
         return new TickResult(foldElement, true, "R8 fold chain discovered");
+    }
+
+    /// <summary>R9: Invoke a first-class space-management tool as a learned tick action.</summary>
+    private static TickResult ExecuteR9_SpaceTool(
+        PlatonicElement element,
+        ImmutableArray<PlatonicElement> elements,
+        PlatonicState state,
+        string? parameter,
+        ImmutableArray<PlatonicElement>.Builder newElements)
+    {
+        var toolName = string.IsNullOrWhiteSpace(parameter)
+            ? "observe"
+            : parameter.Trim().ToLowerInvariant();
+
+        var toolElement = new PlatonicElement(
+            Id: state.NextId,
+            Kind: ElementKind.Function,
+            Embedding: element.Embedding.ToArray(),
+            Symbol: $"SM({toolName})",
+            GeneratedAtTick: state.CurrentTick,
+            ComplementId: null,
+            NoveltyScore: 0.55,
+            BridgeConfidence: 0.45,
+            RelatedTo: ImmutableArray.Create(element.Id),
+            GenerationPath: $"R9:space-tool:{toolName}",
+            IsHypothesis: true);
+
+        newElements.Add(toolElement);
+        return new TickResult(toolElement, true, $"R9 space tool {toolName}");
     }
     
     // Helper methods

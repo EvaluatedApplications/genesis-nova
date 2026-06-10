@@ -19,6 +19,7 @@ public sealed class LanguageCreator : IExampleCreator
 
     public string Name => _name;
     public int EstimatedComplexity => 25;
+    public GenesisTrainingExampleKind TrainingKind => GenesisTrainingExampleKind.PromptAnswer;
 
     public ImmutableArray<(string Input, string Output)> Generate(int count, int difficulty, bool forTraining)
     {

@@ -10,6 +10,7 @@ public sealed class ComparisonCreator : IExampleCreator
 
     public string Name => "numeric:compare";
     public int EstimatedComplexity => 22;
+    public GenesisTrainingExampleKind TrainingKind => GenesisTrainingExampleKind.PromptAnswer;
 
     public ImmutableArray<(string Input, string Output)> Generate(int count, int difficulty, bool forTraining)
     {

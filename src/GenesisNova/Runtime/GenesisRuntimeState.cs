@@ -19,7 +19,7 @@ public sealed class GenesisRuntimeState
         Memory = new PlatonicSpaceMemory(faceDimension: Math.Max(4, config.HiddenSize / 2), seed: config.Seed);
         Conversation = new GenesisConversationMemory();
         Trainer = new GenesisTrainer(Tokenizer, Model, Memory, config);
-        Orchestrator = new GenesisTrainingOrchestrator(Trainer);
+        Orchestrator = new GenesisTrainingOrchestrator(Trainer, config);
         Inference = new GenesisInferenceEngine(
             Tokenizer,
             Model,
@@ -58,7 +58,7 @@ public sealed class GenesisRuntimeState
         Trainer = new GenesisTrainer(Tokenizer, Model, Memory, config);
         if (conversationSnapshot is not null)
             Conversation.ImportSnapshot(conversationSnapshot);
-        Orchestrator = new GenesisTrainingOrchestrator(Trainer);
+        Orchestrator = new GenesisTrainingOrchestrator(Trainer, config);
         Inference = new GenesisInferenceEngine(
             Tokenizer,
             Model,

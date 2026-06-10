@@ -3,6 +3,7 @@ using GenesisNova.Data;
 using GenesisNova.Runtime;
 using GenesisNova.Train;
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 
 namespace GenesisNova.UI;
 
@@ -14,20 +15,9 @@ public class MainWindow : Form
     private const int TargetReplLogChars = 150_000;
     private const int AutoScrollSlackChars = 256;
 
-    private sealed record GeneratorTrainingRequest(
-        string CreatorName,
-        int SampleCount,
-        int Difficulty,
-        int Epochs,
-        bool ProgressiveCycle,
-        double LossThreshold,
-        int MaxCurriculumRounds);
-
     private readonly GenesisEvalAppRuntime _runtime;
-    private CancellationTokenSource? _trainingCts;
     private CancellationTokenSource? _autonomousTrainingCts;
     private string _exampleFolder;
-    private readonly Dictionary<string, string> _trainingFilePathByLabel = new(StringComparer.OrdinalIgnoreCase);
     private TabControl _tabControl = null!;
     private string? _lastReplUserInput;
     private string? _lastReplModelOutput;
@@ -36,18 +26,26 @@ public class MainWindow : Form
     private string _latestVisualizerRoute = "decision=n/a";
     private int _activeTrainingOperations;
     private SplitContainer? _replVisualizerSplit;
+    private DateTime _lastTrimTime = DateTime.MinValue;
+    private const int TrimDebounceMs = 500;  // Only trim if >500ms since last trim
 
     public MainWindow()
     {
+        var reliableStateDir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "GenesisNova",
+            "models");
         _runtime = new GenesisEvalAppRuntime(new GenesisNovaConfig
         {
             Backend = ComputeBackend.Gpu,
-            HiddenSize = 8192,
+            HiddenSize = 256,  // Conservative initial size; will be updated based on GPU VRAM after loading data
             AutoPersist = true,
             AutoResume = true,
+            LocalStateDirectory = reliableStateDir,
             AutoScaleVram = true,
-            TargetVramUtilization = 0.9,
-            ReserveVramMb = 512
+            TargetVramUtilization = 0.82,
+            ReserveVramMb = 1536,
+            TrainingTickMultiplier = 16
         });
         _exampleFolder = ResolveDefaultExampleFolder();
         
@@ -72,9 +70,6 @@ public class MainWindow : Form
 
     protected override void OnFormClosed(FormClosedEventArgs e)
     {
-        _trainingCts?.Cancel();
-        _trainingCts?.Dispose();
-        _trainingCts = null;
         _autonomousTrainingCts?.Cancel();
         _autonomousTrainingCts?.Dispose();
         _autonomousTrainingCts = null;
@@ -89,41 +84,13 @@ public class MainWindow : Form
             Padding = new Point(8, 8)
         };
 
-        // Tab 1: Training
-        _tabControl.TabPages.Add(CreateTrainingTab());
-        
-        // Tab 2: Autonomous Training
+        // Tab 1: Autonomous Training
         _tabControl.TabPages.Add(CreateAutonomousTrainingTab());
 
-        // Tab 3: REPL
+        // Tab 2: REPL
         _tabControl.TabPages.Add(CreateReplTab());
 
         Controls.Add(_tabControl);
-    }
-
-    private TabPage CreateTrainingTab()
-    {
-        var tab = new TabPage("Training");
-        
-        var mainLayout = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            ColumnCount = 2,
-            RowCount = 1,
-            Padding = new Padding(12)
-        };
-        mainLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 30));
-        mainLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 70));
-
-        var leftPanel = CreateConfigPanel();
-        mainLayout.Controls.Add(leftPanel, 0, 0);
-
-        var rightPanel = CreateResultsPanel();
-        mainLayout.Controls.Add(rightPanel, 1, 0);
-
-        tab.Controls.Add(mainLayout);
-        RefreshExampleFiles();
-        return tab;
     }
 
     private TabPage CreateAutonomousTrainingTab()
@@ -171,14 +138,14 @@ public class MainWindow : Form
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
 
         // Output display
-        var outputBox = new RichTextBox
+        var outputBox = new ListBox
         {
             Dock = DockStyle.Fill,
-            ReadOnly = true,
             Font = new Font("Consolas", 10),
             BackColor = Color.Black,
             ForeColor = Color.Lime,
-            Name = "ReplOutput"
+            Name = "ReplOutput",
+            SelectionMode = SelectionMode.MultiExtended
         };
         layout.Controls.Add(outputBox, 0, 0);
 
@@ -267,7 +234,12 @@ public class MainWindow : Form
             BackColor = Color.FromArgb(20, 20, 20),
             ForeColor = Color.FromArgb(220, 220, 220),
             Name = "VizSummary",
-            Text = "Run a REPL query to see activated nodes and routes."
+            Text =
+                "Reasoning diagnostics (how answer was reached):\n" +
+                "- Route: whether output came from platonic query, neural fallback, or mixed path.\n" +
+                "- Anchors: concepts found directly in your input.\n" +
+                "- Nodes/edges: strongest concepts and links steering the output.\n" +
+                "Run a REPL query to populate live evidence."
         };
         layout.Controls.Add(summary, 0, 0);
 
@@ -288,9 +260,9 @@ public class MainWindow : Form
             GridLines = true,
             Name = "VizNodes"
         };
-        nodes.Columns.Add("Node", 160);
-        nodes.Columns.Add("Score", 70);
-        nodes.Columns.Add("Obs", 70);
+        nodes.Columns.Add("Node", 150);
+        nodes.Columns.Add("Influence", 75);
+        nodes.Columns.Add("Seen", 65);
         nodes.Columns.Add("Anchor", 60);
         tables.Controls.Add(nodes, 0, 0);
 
@@ -302,10 +274,11 @@ public class MainWindow : Form
             GridLines = true,
             Name = "VizEdges"
         };
-        edges.Columns.Add("Left", 120);
-        edges.Columns.Add("Right", 120);
-        edges.Columns.Add("Score", 70);
-        edges.Columns.Add("Obs", 70);
+        edges.Columns.Add("Left", 110);
+        edges.Columns.Add("Right", 110);
+        edges.Columns.Add("Trust", 60);
+        edges.Columns.Add("Contrad", 65);
+        edges.Columns.Add("Seen", 55);
         tables.Controls.Add(edges, 1, 0);
         layout.Controls.Add(tables, 0, 1);
 
@@ -407,7 +380,9 @@ public class MainWindow : Form
                 var (path, epochs) = ParsePathAndEpochs(payload);
                 var resolvedPath = ResolveTrainingPath(path);
                 var report = await _runtime.TrainAsync(resolvedPath, epochs);
-                return $"trained examples={report.ExampleCount} epochs={report.Epochs} loss={report.AverageLoss.TotalLoss:F4}";
+                return
+                    $"trained examples={report.ExampleCount} epochs={report.Epochs} loss={report.AverageLoss.TotalLoss:F4} " +
+                    $"success={report.ExampleSuccessRate:P1}";
             }
 
             return $"Unknown command: {trimmed}";
@@ -488,11 +463,28 @@ public class MainWindow : Form
             var anchors = _latestActivation.Anchors.Length == 0
                 ? "(none)"
                 : string.Join(", ", _latestActivation.Anchors);
+            var topNodes = _latestActivation.Nodes
+                .Take(3)
+                .Select(n => $"{n.Name}({n.Score:F2})")
+                .DefaultIfEmpty("(none)")
+                .ToArray();
+            var topEdges = _latestActivation.Edges
+                .Take(3)
+                .Select(e => $"{e.Left}→{e.Right} trust={e.Score:F2} contrad={e.Contradiction:F2}")
+                .DefaultIfEmpty("(none)")
+                .ToArray();
+            var routeFlavor = DescribeDecisionPath(result);
+            var confidenceFlavor = DescribeConfidence(result.PlatonicConfidence);
             summary.Text =
                 $"input: {input}\n" +
+                $"answer route: {_latestVisualizerRoute}\n" +
+                $"route flavor: {routeFlavor}\n" +
+                $"confidence flavor: {confidenceFlavor}\n" +
+                $"bias+hops: bias={result.AppliedBiasCount} avgBias={result.AverageBiasMagnitude:F4} hops={result.PlatonicHopCount} chunks={result.ChunksGenerated}\n" +
+                $"anchors (direct input matches): {anchors}\n" +
+                $"top node evidence: {string.Join(", ", topNodes)}\n" +
+                $"top edge evidence: {string.Join(", ", topEdges)}\n" +
                 $"tokens: {string.Join(", ", _latestActivation.InputTokens)}\n" +
-                $"anchors: {anchors}\n" +
-                $"{_latestVisualizerRoute}\n" +
                 $"nodes shown: {_latestActivation.Nodes.Length}, edges shown: {_latestActivation.Edges.Length}";
         }
 
@@ -524,6 +516,7 @@ public class MainWindow : Form
                 var item = new ListViewItem(edge.Left);
                 item.SubItems.Add(edge.Right);
                 item.SubItems.Add(edge.Score.ToString("F3"));
+                item.SubItems.Add(edge.Contradiction.ToString("F3"));
                 item.SubItems.Add(edge.ObservationCount.ToString());
                 edgeList.Items.Add(item);
             }
@@ -595,9 +588,31 @@ public class MainWindow : Form
         }
     }
 
+    private static string DescribeDecisionPath(GenesisNova.Infer.GenerationResult result)
+    {
+        if (result.UsedPlatonicQuery && !result.UsedNeuralFallback)
+            return "Direct platonic retrieval dominated this answer.";
+        if (result.UsedPlatonicQuery && result.UsedNeuralFallback)
+            return "Hybrid path: platonic retrieval plus neural fallback.";
+        if (result.AppliedBiasCount > 0)
+            return "Neural decode with platonic bias shaping token choices.";
+        return "Pure neural decode path.";
+    }
+
+    private static string DescribeConfidence(double confidence)
+    {
+        if (confidence >= 0.85)
+            return "High confidence: strong structural match.";
+        if (confidence >= 0.60)
+            return "Moderate confidence: useful structure, some ambiguity.";
+        if (confidence > 0.0)
+            return "Low confidence: weak structural support.";
+        return "No platonic confidence signal (neural-only path).";
+    }
+
     private void AppendToRepl(string text, Color color)
     {
-        var box = GetControl<RichTextBox>("ReplOutput");
+        var box = GetControl<ListBox>("ReplOutput");
         if (box == null || box.IsDisposed)
             return;
 
@@ -607,168 +622,39 @@ public class MainWindow : Form
             return;
         }
 
-        var shouldAutoScroll = IsNearBottom(box);
-        box.SelectionColor = color;
-        box.AppendText(text);
-        TrimRichTextHistory(box, MaxReplLogChars, TargetReplLogChars);
-        if (shouldAutoScroll)
+        // ListBox doesn't support per-item colors, but we can add the text as items
+        var lines = text.Split(new[] { "\n", "\r\n" }, StringSplitOptions.None);
+        foreach (var line in lines)
         {
-            box.SelectionStart = box.TextLength;
-            box.SelectionLength = 0;
-            box.ScrollToCaret();
-        }
-    }
-
-    private Panel CreateConfigPanel()
-    {
-        var panel = new Panel
-        {
-            Dock = DockStyle.Fill,
-            BackColor = SystemColors.Control,
-            Padding = new Padding(12)
-        };
-
-        var layout = new FlowLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            FlowDirection = FlowDirection.TopDown,
-            AutoScroll = true,
-            WrapContents = false
-        };
-
-        var titleLabel = new Label { Text = "Configuration", Font = new Font("Segoe UI", 14, FontStyle.Bold), Height = 30 };
-        layout.Controls.Add(titleLabel);
-
-        layout.Controls.Add(new Label { Text = "Data Generator:", Height = 20, Font = new Font("Segoe UI", 10, FontStyle.Bold) });
-        
-        layout.Controls.Add(new Label { Text = "Creator:", Height = 20, Font = new Font("Segoe UI", 9) });
-        var creatorCombo = new ComboBox
-        {
-            Width = 280,
-            Height = 32,
-            DropDownStyle = ComboBoxStyle.DropDownList,
-            Name = "CreatorCombo"
-        };
-        
-        // Populate with all available creators
-        foreach (var creator in ExampleCreatorRegistry.All)
-        {
-            creatorCombo.Items.Add(creator.Name);
-        }
-        if (creatorCombo.Items.Count > 0) creatorCombo.SelectedIndex = 0;
-        layout.Controls.Add(creatorCombo);
-
-        layout.Controls.Add(new Label { Text = "Sample Count:", Height = 20, Font = new Font("Segoe UI", 9) });
-        var countInput = new NumericUpDown { Minimum = 10, Maximum = 10000, Value = 100, Width = 280, Height = 32, Name = "SampleCountInput" };
-        layout.Controls.Add(countInput);
-
-        layout.Controls.Add(new Label { Text = "Difficulty:", Height = 20, Font = new Font("Segoe UI", 9) });
-        var difficultyInput = new NumericUpDown { Minimum = 0, Maximum = 100, Value = 1, Width = 280, Height = 32, Name = "DifficultyInput" };
-        layout.Controls.Add(difficultyInput);
-        var progressiveCheck = new CheckBox { Text = "Progressive Difficulty Cycle", Width = 280, Height = 24, Checked = true, Name = "ProgressiveCycleCheck" };
-        layout.Controls.Add(progressiveCheck);
-        layout.Controls.Add(new Label { Text = "Difficulty Threshold (loss):", Height = 20, Font = new Font("Segoe UI", 9) });
-        var thresholdInput = new NumericUpDown { Minimum = 0, Maximum = 10, DecimalPlaces = 3, Increment = 0.005M, Value = 0.100M, Width = 280, Height = 32, Name = "DifficultyThresholdInput" };
-        layout.Controls.Add(thresholdInput);
-        layout.Controls.Add(new Label { Text = "Max Curriculum Rounds:", Height = 20, Font = new Font("Segoe UI", 9) });
-        var maxRoundsInput = new NumericUpDown { Minimum = 1, Maximum = int.MaxValue, Value = 30, Width = 280, Height = 32, Name = "MaxCurriculumRoundsInput" };
-        layout.Controls.Add(maxRoundsInput);
-
-        layout.Controls.Add(new Label { Height = 10 });
-        layout.Controls.Add(new Label { Text = "Training Parameters:", Height = 20, Font = new Font("Segoe UI", 10, FontStyle.Bold) });
-        layout.Controls.Add(new Label
-        {
-            Text = "Policy: training stays on CPU; inference uses the GPU-backed model when available.",
-            Width = 280,
-            Height = 40
-        });
-        var epochsInput = new NumericUpDown { Value = 3, Minimum = 1, Maximum = 100, Width = 280, Height = 32, Name = "EpochsInput" };
-        layout.Controls.Add(epochsInput);
-
-        layout.Controls.Add(new Label { Height = 10 });
-        layout.Controls.Add(new Label { Text = "Model Compression:", Height = 20, Font = new Font("Segoe UI", 10, FontStyle.Bold) });
-        layout.Controls.Add(new Label
-        {
-            Text = "L2 Regularization: Penalize large weights to force learning into platonic space (symbolic layer). Under pressure, the model learns to compress knowledge symbolically.",
-            Width = 280,
-            Height = 50,
-            AutoSize = false
-        });
-        
-        var l2ComboLabel = new Label { Text = "L2 Weight Decay Preset:", Height = 20, Font = new Font("Segoe UI", 9) };
-        layout.Controls.Add(l2ComboLabel);
-        var l2Combo = new ComboBox
-        {
-            Width = 280,
-            Height = 32,
-            DropDownStyle = ComboBoxStyle.DropDownList,
-            Name = "L2PresetCombo"
-        };
-        l2Combo.Items.Add("Off (0.0) - No compression");
-        l2Combo.Items.Add("Mild (1e-5) - Neural layer comfortable");
-        l2Combo.Items.Add("Balanced (1e-4)");
-        l2Combo.Items.Add("Aggressive (1e-3) - Force symbolic learning ⚡");
-        l2Combo.Items.Add("Extreme (1e-2) - Nearly all symbolic");
-        l2Combo.SelectedIndex = 0;  // Default to off
-        l2Combo.SelectedIndexChanged += (s, e) => ApplyL2Preset(l2Combo.SelectedIndex);
-        layout.Controls.Add(l2Combo);
-
-        layout.Controls.Add(new Label { Height = 10 });
-
-        var trainBtn = new Button { Text = "▶ Start Training", Width = 280, Height = 40, BackColor = Color.FromArgb(51, 153, 102), ForeColor = Color.White, Font = new Font("Segoe UI", 11, FontStyle.Bold), Name = "TrainBtn" };
-        trainBtn.Click += (s, e) =>
-        {
-            trainBtn.Enabled = false;
-            var stopBtn = GetControl<Button>("StopBtn");
-            if (stopBtn != null) stopBtn.Enabled = true;
-
-            var request = TryBuildGeneratorTrainingRequest();
-            if (request is null)
+            if (!string.IsNullOrEmpty(line))
             {
-                trainBtn.Enabled = true;
-                if (stopBtn != null) stopBtn.Enabled = false;
-                return;
+                box.Items.Add(line);
             }
+        }
 
-            _ = Task.Run(async () =>
+        // Auto-scroll to last item
+        if (box.Items.Count > 0)
+        {
+            box.TopIndex = box.Items.Count - 1;
+        }
+
+        // Trim if needed
+        if (box.Items.Count > MaxReplLogChars / 50)
+        {
+            var itemsToRemove = Math.Max(1, box.Items.Count - (TargetReplLogChars / 50));
+            for (var i = 0; i < itemsToRemove; i++)
             {
-                try
-                {
-                    await StartTrainingWithGenerator(request);
-                }
-                catch (OperationCanceledException)
-                {
-                    AppendOutput("Training stopped by user.");
-                }
-                catch (Exception ex)
-                {
-                    AppendExceptionReport("Training failed", ex);
-                }
-                finally
-                {
-                    if (IsHandleCreated)
-                    {
-                        BeginInvoke(new Action(() =>
-                        {
-                            trainBtn.Enabled = true;
-                            if (stopBtn != null) stopBtn.Enabled = false;
-                        }));
-                    }
-                }
-            });
-        };
-        layout.Controls.Add(trainBtn);
-
-        var stopBtn = new Button { Text = "⏹ Stop Training", Width = 280, Height = 40, BackColor = Color.FromArgb(204, 51, 51), ForeColor = Color.White, Font = new Font("Segoe UI", 11, FontStyle.Bold), Name = "StopBtn", Enabled = false };
-        stopBtn.Click += (s, e) => StopTraining();
-        layout.Controls.Add(stopBtn);
-
-        panel.Controls.Add(layout);
-        return panel;
+                box.Items.RemoveAt(0);
+            }
+        }
     }
 
     private Panel CreateAutonomousConfigPanel()
     {
+        var defaults = GetAutonomousResourceDefaults();
+        var cpuThreads = defaults.CpuThreads;
+        var creatorCount = defaults.CreatorCount;
+
         var panel = new Panel
         {
             Dock = DockStyle.Fill,
@@ -792,53 +678,37 @@ public class MainWindow : Form
         });
         layout.Controls.Add(new Label
         {
-            Text = "The model will pick the next creator, difficulty, sample count, and train micro-batch from feedback.",
+            Text = "Mixed-dataset rounds run continuously. Start tiny, reuse local cache, and widen data horizon only as loss improves.",
             Width = 300,
-            Height = 40
-        });
-
-        layout.Controls.Add(new Label { Text = "Starting Creator:", Height = 20, Font = new Font("Segoe UI", 9) });
-        var creatorCombo = new ComboBox
-        {
-            Width = 300,
-            Height = 32,
-            DropDownStyle = ComboBoxStyle.DropDownList,
-            Name = "AutoCreatorCombo"
-        };
-        creatorCombo.Items.Add("Auto (cycle creators)");
-        foreach (var creator in ExampleCreatorRegistry.All)
-            creatorCombo.Items.Add(creator.Name);
-        creatorCombo.SelectedIndex = 0;
-        layout.Controls.Add(creatorCombo);
-
-        layout.Controls.Add(new Label { Text = "Max Rounds:", Height = 20, Font = new Font("Segoe UI", 9) });
-        layout.Controls.Add(new NumericUpDown
-        {
-            Minimum = 0,
-            Maximum = int.MaxValue,
-            Value = 12,
-            Width = 300,
-            Height = 32,
-            Name = "AutoMaxRoundsInput"
+            Height = 52
         });
         layout.Controls.Add(new Label
         {
-            Text = "Set to 0 for no limit.",
+            Text = $"Lean default profile: {creatorCount} datasets, round budget {defaults.RoundBudget}, generation workers {defaults.GenerationConcurrency}/{cpuThreads} threads.",
             Width = 300,
-            Height = 20,
+            Height = 34,
             Font = new Font("Segoe UI", 8),
             ForeColor = Color.DimGray
         });
 
+        layout.Controls.Add(new Label { Text = "Seed values (mostly first-round only)", Height = 24, Font = new Font("Segoe UI", 10, FontStyle.Bold) });
         layout.Controls.Add(new Label { Text = "Initial Sample Count:", Height = 20, Font = new Font("Segoe UI", 9) });
         layout.Controls.Add(new NumericUpDown
         {
-            Minimum = 4,
+            Minimum = 1,
             Maximum = 10000,
-            Value = 24,
+            Value = defaults.InitialSampleCount,
             Width = 300,
             Height = 32,
             Name = "AutoSampleCountInput"
+        });
+        layout.Controls.Add(new Label
+        {
+            Text = "Initial horizon width per dataset source. Keep this tiny for organic growth.",
+            Width = 300,
+            Height = 28,
+            Font = new Font("Segoe UI", 8),
+            ForeColor = Color.DimGray
         });
 
         layout.Controls.Add(new Label { Text = "Initial Difficulty:", Height = 20, Font = new Font("Segoe UI", 9) });
@@ -846,10 +716,18 @@ public class MainWindow : Form
         {
             Minimum = 0,
             Maximum = 100,
-            Value = 0,
+            Value = defaults.InitialDifficulty,
             Width = 300,
             Height = 32,
             Name = "AutoDifficultyInput"
+        });
+        layout.Controls.Add(new Label
+        {
+            Text = "Base context depth for next-token windows before adaptive feedback takes over.",
+            Width = 300,
+            Height = 28,
+            Font = new Font("Segoe UI", 8),
+            ForeColor = Color.DimGray
         });
 
         layout.Controls.Add(new Label { Text = "Initial Epochs:", Height = 20, Font = new Font("Segoe UI", 9) });
@@ -857,10 +735,18 @@ public class MainWindow : Form
         {
             Minimum = 1,
             Maximum = 64,
-            Value = 1,
+            Value = defaults.InitialEpochs,
             Width = 300,
             Height = 32,
             Name = "AutoEpochsInput"
+        });
+        layout.Controls.Add(new Label
+        {
+            Text = "How many training passes each round uses; kept stable unless you restart.",
+            Width = 300,
+            Height = 28,
+            Font = new Font("Segoe UI", 8),
+            ForeColor = Color.DimGray
         });
 
         layout.Controls.Add(new Label { Text = "Initial Train Count:", Height = 20, Font = new Font("Segoe UI", 9) });
@@ -868,10 +754,39 @@ public class MainWindow : Form
         {
             Minimum = 1,
             Maximum = 128,
-            Value = 4,
+            Value = defaults.InitialTrainCount,
             Width = 300,
             Height = 32,
             Name = "AutoTrainCountInput"
+        });
+        layout.Controls.Add(new Label
+        {
+            Text = "Initial trained slice per dataset. Usually match sample count for deterministic coverage.",
+            Width = 300,
+            Height = 28,
+            Font = new Font("Segoe UI", 8),
+            ForeColor = Color.DimGray
+        });
+
+        layout.Controls.Add(new Label { Height = 8 });
+        layout.Controls.Add(new Label { Text = "Live controls (applied next round)", Height = 24, Font = new Font("Segoe UI", 10, FontStyle.Bold) });
+        layout.Controls.Add(new Label { Text = "Max Rounds:", Height = 20, Font = new Font("Segoe UI", 9) });
+        layout.Controls.Add(new NumericUpDown
+        {
+            Minimum = 0,
+            Maximum = int.MaxValue,
+            Value = defaults.MaxRounds,
+            Width = 300,
+            Height = 32,
+            Name = "AutoMaxRoundsInput"
+        });
+        layout.Controls.Add(new Label
+        {
+            Text = "0 means unlimited rounds. Raise or lower this while running to extend or end sooner.",
+            Width = 300,
+            Height = 28,
+            Font = new Font("Segoe UI", 8),
+            ForeColor = Color.DimGray
         });
 
         layout.Controls.Add(new Label { Text = "Loss Threshold:", Height = 20, Font = new Font("Segoe UI", 9) });
@@ -881,10 +796,18 @@ public class MainWindow : Form
             Maximum = 10,
             DecimalPlaces = 3,
             Increment = 0.005M,
-            Value = 1.200M,
+            Value = 0.100M,
             Width = 300,
             Height = 32,
             Name = "AutoLossThresholdInput"
+        });
+        layout.Controls.Add(new Label
+        {
+            Text = "Target token loss used to decide when to push harder or back off.",
+            Width = 300,
+            Height = 28,
+            Font = new Font("Segoe UI", 8),
+            ForeColor = Color.DimGray
         });
 
         layout.Controls.Add(new Label { Text = "Sample Bounds:", Height = 20, Font = new Font("Segoe UI", 9) });
@@ -899,9 +822,9 @@ public class MainWindow : Form
                 new Label { Text = "Min", Width = 32, TextAlign = ContentAlignment.MiddleLeft },
                 new NumericUpDown
                 {
-                    Minimum = 4,
+                    Minimum = 1,
                     Maximum = 10000,
-                    Value = 12,
+                    Value = defaults.MinSampleCount,
                     Width = 80,
                     Height = 28,
                     Name = "AutoMinSampleInput"
@@ -909,14 +832,22 @@ public class MainWindow : Form
                 new Label { Text = "Max", Width = 32, TextAlign = ContentAlignment.MiddleLeft },
                 new NumericUpDown
                 {
-                    Minimum = 8,
+                    Minimum = 1,
                     Maximum = 10000,
-                    Value = 128,
+                    Value = defaults.MaxSampleCount,
                     Width = 80,
                     Height = 28,
                     Name = "AutoMaxSampleInput"
                 }
             }
+        });
+        layout.Controls.Add(new Label
+        {
+            Text = "Hard floor/ceiling for horizon growth. Low minimum keeps API demand small.",
+            Width = 300,
+            Height = 28,
+            Font = new Font("Segoe UI", 8),
+            ForeColor = Color.DimGray
         });
 
         layout.Controls.Add(new Label { Text = "Train Bounds:", Height = 20, Font = new Font("Segoe UI", 9) });
@@ -933,7 +864,7 @@ public class MainWindow : Form
                 {
                     Minimum = 1,
                     Maximum = 256,
-                    Value = 2,
+                    Value = defaults.MinTrainCount,
                     Width = 80,
                     Height = 28,
                     Name = "AutoMinTrainInput"
@@ -943,12 +874,20 @@ public class MainWindow : Form
                 {
                     Minimum = 1,
                     Maximum = 256,
-                    Value = 8,
+                    Value = defaults.MaxTrainCount,
                     Width = 80,
                     Height = 28,
                     Name = "AutoMaxTrainInput"
                 }
             }
+        });
+        layout.Controls.Add(new Label
+        {
+            Text = "Per-dataset trained slice bounds; grows as mastery improves.",
+            Width = 300,
+            Height = 28,
+            Font = new Font("Segoe UI", 8),
+            ForeColor = Color.DimGray
         });
 
         layout.Controls.Add(new Label { Text = "Max Difficulty:", Height = 20, Font = new Font("Segoe UI", 9) });
@@ -956,10 +895,56 @@ public class MainWindow : Form
         {
             Minimum = 0,
             Maximum = 100,
-            Value = 8,
+            Value = defaults.MaxDifficulty,
             Width = 300,
             Height = 32,
             Name = "AutoMaxDifficultyInput"
+        });
+        layout.Controls.Add(new Label
+        {
+            Text = "Upper cap for planner-selected difficulty, even when loss is low.",
+            Width = 300,
+            Height = 28,
+            Font = new Font("Segoe UI", 8),
+            ForeColor = Color.DimGray
+        });
+
+        layout.Controls.Add(new Label { Text = "Round Train Budget:", Height = 20, Font = new Font("Segoe UI", 9) });
+        layout.Controls.Add(new NumericUpDown
+        {
+            Minimum = 1,
+            Maximum = 4096,
+            Value = defaults.RoundBudget,
+            Width = 300,
+            Height = 32,
+            Name = "AutoRoundTrainBudgetInput"
+        });
+        layout.Controls.Add(new Label
+        {
+            Text = "Total train slots split across datasets each round (higher = more throughput).",
+            Width = 300,
+            Height = 28,
+            Font = new Font("Segoe UI", 8),
+            ForeColor = Color.DimGray
+        });
+
+        layout.Controls.Add(new Label { Text = "Generation Concurrency:", Height = 20, Font = new Font("Segoe UI", 9) });
+        layout.Controls.Add(new NumericUpDown
+        {
+            Minimum = 1,
+            Maximum = Math.Max(32, defaults.CpuThreads * 2),
+            Value = defaults.GenerationConcurrency,
+            Width = 300,
+            Height = 32,
+            Name = "AutoGenerationConcurrencyInput"
+        });
+        layout.Controls.Add(new Label
+        {
+            Text = "Controls parallel dataset generation workers per round.",
+            Width = 300,
+            Height = 28,
+            Font = new Font("Segoe UI", 8),
+            ForeColor = Color.DimGray
         });
 
         layout.Controls.Add(new Label { Height = 10 });
@@ -995,6 +980,71 @@ public class MainWindow : Form
         return panel;
     }
 
+    private AutonomousResourceDefaults GetAutonomousResourceDefaults()
+    {
+        var cpuThreads = Math.Max(1, Environment.ProcessorCount);
+        var creatorCount = Math.Max(1, ExampleCreatorRegistry.All.Count);
+        var generationConcurrency = Math.Clamp(Math.Min(cpuThreads, creatorCount), 1, 16);
+        var maxRounds = Math.Clamp(Math.Max(12, cpuThreads * 2), 12, 64);
+        var initialEpochs = 2;
+        var initialSampleCount = Math.Clamp(Math.Max(4, cpuThreads / 2), 4, 32);
+        var initialTrainCount = Math.Clamp(Math.Max(4, cpuThreads / 2), 4, 32);
+        var initialDifficulty = 1;
+        var maxSampleCount = 128;
+        var maxTrainCount = Math.Clamp(Math.Max(16, cpuThreads * 2), 16, 256);
+        var maxDifficulty = Math.Clamp(Math.Max(12, cpuThreads / 2), 12, 64);
+        var roundBudget = Math.Clamp(cpuThreads * 6, creatorCount, 256);
+
+        if (GpuCapacityPlanner.TryGetNvidiaVramMb(out var totalMb, out var freeMb))
+        {
+            var usableMb = freeMb > 0 ? freeMb : totalMb;
+            if (usableMb > 0)
+            {
+                var gpuScale = Math.Clamp(usableMb / 1024, 1, 12);
+                initialSampleCount = Math.Clamp(Math.Max(initialSampleCount, gpuScale * 2), 4, 48);
+                initialTrainCount = Math.Clamp(Math.Max(initialTrainCount, gpuScale * 2), 4, 48);
+                initialDifficulty = Math.Clamp(Math.Max(initialDifficulty, gpuScale / 2), 1, 8);
+                maxSampleCount = Math.Clamp(usableMb / 64, 32, 512);
+                maxTrainCount = Math.Clamp(Math.Max(maxTrainCount, usableMb / 192), 16, 256);
+                maxDifficulty = Math.Clamp(Math.Max(maxDifficulty, usableMb / 768), 12, 100);
+                roundBudget = Math.Clamp(Math.Max(roundBudget, cpuThreads * gpuScale), creatorCount, 512);
+                initialEpochs = Math.Clamp(Math.Max(2, gpuScale / 2), 2, 8);
+            }
+        }
+
+        return new AutonomousResourceDefaults(
+            CpuThreads: cpuThreads,
+            CreatorCount: creatorCount,
+            MaxRounds: maxRounds,
+            InitialSampleCount: initialSampleCount,
+            InitialDifficulty: initialDifficulty,
+            InitialTrainCount: initialTrainCount,
+            InitialEpochs: initialEpochs,
+            MinSampleCount: 1,
+            MaxSampleCount: maxSampleCount,
+            MinTrainCount: 1,
+            MaxTrainCount: maxTrainCount,
+            MaxDifficulty: maxDifficulty,
+            RoundBudget: roundBudget,
+            GenerationConcurrency: generationConcurrency);
+    }
+
+    private sealed record AutonomousResourceDefaults(
+        int CpuThreads,
+        int CreatorCount,
+        int MaxRounds,
+        int InitialSampleCount,
+        int InitialDifficulty,
+        int InitialTrainCount,
+        int InitialEpochs,
+        int MinSampleCount,
+        int MaxSampleCount,
+        int MinTrainCount,
+        int MaxTrainCount,
+        int MaxDifficulty,
+        int RoundBudget,
+        int GenerationConcurrency);
+
     private Panel CreateAutonomousResultsPanel()
     {
         var panel = new Panel
@@ -1022,22 +1072,25 @@ public class MainWindow : Form
             Dock = DockStyle.Fill
         }, 0, 0);
 
-        layout.Controls.Add(new RichTextBox
+        layout.Controls.Add(new ListBox
         {
             Dock = DockStyle.Fill,
-            ReadOnly = true,
             Font = new Font("Consolas", 9),
             BackColor = Color.FromArgb(30, 30, 30),
             ForeColor = Color.FromArgb(200, 220, 200),
-            Name = "AutoOutputBox"
+            Name = "AutoOutputBox",
+            SelectionMode = SelectionMode.MultiExtended
         }, 0, 1);
 
-        layout.Controls.Add(new Label
+        layout.Controls.Add(new TextBox
         {
-            Text = "Rounds: 0 | Last loss: n/a | Creator: n/a",
+            Text = "Rounds: 0 | Last loss: n/a | Success: n/a | Data mix: n/a | Skipped: 0",
             Font = new Font("Consolas", 10),
             Dock = DockStyle.Fill,
-            AutoSize = false,
+            Multiline = true,
+            ReadOnly = true,
+            ScrollBars = ScrollBars.Vertical,
+            WordWrap = false,
             Name = "AutoStatsText"
         }, 0, 2);
 
@@ -1045,218 +1098,9 @@ public class MainWindow : Form
         return panel;
     }
 
-    private Panel CreateResultsPanel()
-    {
-        var panel = new Panel { Dock = DockStyle.Fill, BackColor = Color.White, Padding = new Padding(12) };
-        var layout = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            ColumnCount = 1,
-            RowCount = 3,
-            Padding = new Padding(0)
-        };
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
-        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 70));
-        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 30));
-
-        var titleLabel = new Label { Text = "Training Results", Font = new Font("Segoe UI", 14, FontStyle.Bold), Dock = DockStyle.Fill };
-        layout.Controls.Add(titleLabel, 0, 0);
-
-        var outputBox = new RichTextBox
-        {
-            Dock = DockStyle.Fill,
-            ReadOnly = true,
-            Font = new Font("Consolas", 9),
-            BackColor = Color.FromArgb(30, 30, 30),
-            ForeColor = Color.FromArgb(200, 200, 200),
-            Name = "OutputBox"
-        };
-        layout.Controls.Add(outputBox, 0, 1);
-
-        var statsLayout = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, BackColor = Color.FromArgb(245, 245, 245), Padding = new Padding(8) };
-        
-        var statsLabel = new Label { Text = "Model Statistics", Font = new Font("Segoe UI", 11, FontStyle.Bold), Height = 25, AutoSize = false };
-        statsLayout.Controls.Add(statsLabel);
-
-        var statsText = new Label
-        {
-            Text = BuildStatsText(exampleCount: null, loss: null),
-            Font = new Font("Consolas", 10),
-            Height = 72,
-            AutoSize = false,
-            Name = "StatsText"
-        };
-        statsLayout.Controls.Add(statsText);
-
-        var predictLayout = new FlowLayoutPanel { FlowDirection = FlowDirection.LeftToRight, Height = 40, AutoSize = false };
-        var predictLabel = new Label { Text = "Predict:", Width = 70, TextAlign = ContentAlignment.MiddleLeft };
-        var predictInput = new TextBox { Width = 150, Height = 25, Name = "PredictInput" };
-        var predictBtn = new Button { Text = "Run", Width = 60, Height = 25, Name = "PredictBtn" };
-        predictBtn.Click += async (s, e) => await RunPrediction(predictInput);
-        var predictOutput = new Label { Text = "", Width = 150, AutoSize = false, Name = "PredictOutput" };
-        
-        predictLayout.Controls.AddRange(new Control[] { predictLabel, predictInput, predictBtn, predictOutput });
-        statsLayout.Controls.Add(predictLayout);
-
-        layout.Controls.Add(statsLayout, 0, 2);
-
-        panel.Controls.Add(layout);
-        return panel;
-    }
-
-    private void RefreshExampleFiles()
-    {
-        var filesListBox = GetControl<ListBox>("FilesList");
-        if (filesListBox == null) return;
-        var folderBox = GetControl<TextBox>("TrainingFolderBox");
-        if (folderBox != null)
-            _exampleFolder = folderBox.Text;
-
-        filesListBox.Items.Clear();
-        _trainingFilePathByLabel.Clear();
-        try
-        {
-            if (!Directory.Exists(_exampleFolder))
-                Directory.CreateDirectory(_exampleFolder);
-
-            var files = Directory
-                .EnumerateFiles(_exampleFolder, "*.*", SearchOption.TopDirectoryOnly)
-                .Where(path =>
-                {
-                    var ext = Path.GetExtension(path);
-                    return ext.Equals(".txt", StringComparison.OrdinalIgnoreCase) ||
-                           ext.Equals(".jsonl", StringComparison.OrdinalIgnoreCase) ||
-                           ext.Equals(".data", StringComparison.OrdinalIgnoreCase);
-                })
-                .OrderByDescending(path => new FileInfo(path).Length)
-                .ThenBy(path => path, StringComparer.OrdinalIgnoreCase);
-
-            foreach (var file in files)
-            {
-                var info = new FileInfo(file);
-                var label = $"{info.Name} ({Math.Max(1, info.Length / 1024)}KB)";
-                _trainingFilePathByLabel[label] = file;
-                filesListBox.Items.Add(label);
-            }
-        }
-        catch (Exception ex)
-        {
-            MessageBox.Show($"Error loading files: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-        }
-    }
-
-    private GeneratorTrainingRequest? TryBuildGeneratorTrainingRequest()
-    {
-        var creatorCombo = GetControl<ComboBox>("CreatorCombo");
-        var countInput = GetControl<NumericUpDown>("SampleCountInput");
-        var difficultyInput = GetControl<NumericUpDown>("DifficultyInput");
-
-        if (creatorCombo == null || creatorCombo.SelectedIndex < 0)
-        {
-            MessageBox.Show("Please select a creator", "Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            return null;
-        }
-
-        var creatorName = creatorCombo.SelectedItem?.ToString();
-        if (string.IsNullOrWhiteSpace(creatorName))
-        {
-            MessageBox.Show("Please select a creator", "Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            return null;
-        }
-
-        var sampleCount = (int)(countInput?.Value ?? 100);
-        var difficulty = (int)(difficultyInput?.Value ?? 1);
-        var epochs = (int)(GetControl<NumericUpDown>("EpochsInput")?.Value ?? 3);
-        var progressiveCycle = GetControl<CheckBox>("ProgressiveCycleCheck")?.Checked ?? true;
-        var lossThreshold = (double)(GetControl<NumericUpDown>("DifficultyThresholdInput")?.Value ?? 0.100M);
-        var maxCurriculumRounds = (int)(GetControl<NumericUpDown>("MaxCurriculumRoundsInput")?.Value ?? 30);
-
-        return new GeneratorTrainingRequest(
-            CreatorName: creatorName,
-            SampleCount: sampleCount,
-            Difficulty: difficulty,
-            Epochs: epochs,
-            ProgressiveCycle: progressiveCycle,
-            LossThreshold: lossThreshold,
-            MaxCurriculumRounds: maxCurriculumRounds);
-    }
-
-    private async Task StartTrainingWithGenerator(GeneratorTrainingRequest request)
-    {
-        var creatorName = request.CreatorName;
-        var sampleCount = request.SampleCount;
-        var difficulty = request.Difficulty;
-
-        // Find the creator by name
-        var creator = ExampleCreatorRegistry.All.FirstOrDefault(c => c.Name == creatorName);
-        if (creator == null)
-        {
-            AppendOutput($"Creator not found: {creatorName}");
-            return;
-        }
-
-        _trainingCts = new CancellationTokenSource();
-
-        try
-        {
-            if (!request.ProgressiveCycle)
-            {
-                await RunSingleGeneratorRound(
-                    creator,
-                    creatorName,
-                    sampleCount,
-                    difficulty,
-                    request.Epochs,
-                    suffix: "single");
-                return;
-            }
-
-            AppendOutput($"[curriculum] Starting progressive cycle 0→{difficulty}, threshold={request.LossThreshold:F4}, maxRounds={request.MaxCurriculumRounds}");
-            var currentDifficulty = 0;
-            var round = 0;
-
-            while (currentDifficulty <= difficulty && round < request.MaxCurriculumRounds)
-            {
-                round++;
-                if (_trainingCts?.IsCancellationRequested == true)
-                    throw new OperationCanceledException();
-
-                AppendOutput($"[curriculum] Round {round}: training difficulty={currentDifficulty}");
-                var report = await RunSingleGeneratorRound(
-                    creator,
-                    creatorName,
-                    sampleCount,
-                    currentDifficulty,
-                    request.Epochs,
-                    suffix: $"d{currentDifficulty}_r{round}");
-
-                var loss = report.AverageLoss.TokenLoss;
-                if (loss <= request.LossThreshold)
-                {
-                    AppendOutput($"[curriculum] Threshold met at difficulty={currentDifficulty} (loss={loss:F4}) → advancing");
-                    currentDifficulty++;
-                }
-                else
-                {
-                    AppendOutput($"[curriculum] Threshold not met at difficulty={currentDifficulty} (loss={loss:F4}) → repeating");
-                }
-            }
-
-            if (currentDifficulty > difficulty)
-                AppendOutput($"[curriculum] Completed through difficulty {difficulty}.");
-            else
-                AppendOutput($"[curriculum] Stopped at difficulty {currentDifficulty} after {round} rounds (max rounds reached).");
-        }
-        finally
-        {
-            _trainingCts?.Dispose();
-            _trainingCts = null;
-        }
-    }
-
     private GenesisAutonomousTrainingRequest? TryBuildAutonomousTrainingRequest()
     {
-        var creatorCombo = GetControl<ComboBox>("AutoCreatorCombo");
+        var defaults = GetAutonomousResourceDefaults();
         var maxRounds = GetControl<NumericUpDown>("AutoMaxRoundsInput");
         var sampleCount = GetControl<NumericUpDown>("AutoSampleCountInput");
         var difficulty = GetControl<NumericUpDown>("AutoDifficultyInput");
@@ -1268,27 +1112,23 @@ public class MainWindow : Form
         var minTrain = GetControl<NumericUpDown>("AutoMinTrainInput");
         var maxTrain = GetControl<NumericUpDown>("AutoMaxTrainInput");
         var maxDifficulty = GetControl<NumericUpDown>("AutoMaxDifficultyInput");
-
-        if (creatorCombo == null || creatorCombo.SelectedIndex < 0)
-            return null;
-
-        var preferredCreator = creatorCombo.SelectedIndex == 0
-            ? null
-            : creatorCombo.SelectedItem?.ToString();
+        var roundBudget = GetControl<NumericUpDown>("AutoRoundTrainBudgetInput");
+        var generationConcurrency = GetControl<NumericUpDown>("AutoGenerationConcurrencyInput");
 
         return new GenesisAutonomousTrainingRequest(
-            MaxRounds: (int)(maxRounds?.Value ?? 12),
-            InitialSampleCount: (int)(sampleCount?.Value ?? 24),
-            InitialDifficulty: (int)(difficulty?.Value ?? 0),
-            InitialEpochs: (int)(epochs?.Value ?? 1),
-            InitialTrainCount: (int)(trainCount?.Value ?? 4),
-            LossThreshold: (double)(lossThreshold?.Value ?? 1.200M),
-            MinSampleCount: (int)(minSample?.Value ?? 12),
-            MaxSampleCount: (int)(maxSample?.Value ?? 128),
-            MinTrainCount: (int)(minTrain?.Value ?? 2),
-            MaxTrainCount: (int)(maxTrain?.Value ?? 8),
-            MaxDifficulty: (int)(maxDifficulty?.Value ?? 8),
-            PreferredCreator: preferredCreator);
+            MaxRounds: (int)(maxRounds?.Value ?? 0),
+            InitialSampleCount: (int)(sampleCount?.Value ?? defaults.InitialSampleCount),
+            InitialDifficulty: (int)(difficulty?.Value ?? defaults.InitialDifficulty),
+            InitialEpochs: (int)(epochs?.Value ?? defaults.InitialEpochs),
+            InitialTrainCount: (int)(trainCount?.Value ?? defaults.InitialTrainCount),
+            LossThreshold: (double)(lossThreshold?.Value ?? 0.100M),
+            MinSampleCount: (int)(minSample?.Value ?? defaults.MinSampleCount),
+            MaxSampleCount: (int)(maxSample?.Value ?? defaults.MaxSampleCount),
+            MinTrainCount: (int)(minTrain?.Value ?? defaults.MinTrainCount),
+            MaxTrainCount: (int)(maxTrain?.Value ?? defaults.MaxTrainCount),
+            MaxDifficulty: (int)(maxDifficulty?.Value ?? defaults.MaxDifficulty),
+            RoundTrainBudget: (int)(roundBudget?.Value ?? defaults.RoundBudget),
+            MaxGenerationConcurrency: (int)(generationConcurrency?.Value ?? defaults.GenerationConcurrency));
     }
 
     private async Task StartAutonomousTraining()
@@ -1311,12 +1151,71 @@ public class MainWindow : Form
         {
             var roundsLabel = request.MaxRounds <= 0 ? "∞" : request.MaxRounds.ToString();
             AppendAutonomousOutput($"[auto] starting: rounds={roundsLabel} sample={request.InitialSampleCount} train={request.InitialTrainCount} difficulty={request.InitialDifficulty}");
-            var run = await _runtime.TrainAutonomousAsync(request, _autonomousTrainingCts.Token, AppendAutonomousOutput);
+            AppendAutonomousOutput("[auto] device policy: CUDA training when available with CPU fallback, GPU inference (device 0, A3000 preferred)");
+            
+            // Estimate and display GPU sizing for this training session using live VRAM.
+            var debugLines = new List<string>();
+            var hasCuda = GpuCapacityPlanner.TryGetNvidiaVramMb(out var totalVramMb, out var freeVramMb);
+            var sizingVramMb = hasCuda ? (freeVramMb > 0 ? freeVramMb : totalVramMb) : 4096;
+            var sizingTargetUtil = 0.72;
+            var sizingReserveMb = 1536;
+            var sizingHiddenCap = GpuCapacityPlanner.ResolveTrainingHiddenCap(sizingVramMb);
+            AppendAutonomousOutput($"[auto] training headroom cap: {sizingHiddenCap}");
+            var estimatedHidden = GpuCapacityPlanner.EstimateHiddenSizeForInferenceOnly(
+                new[] { new GenesisExample("sample", "output") },
+                routeCount: 8,
+                vramMb: sizingVramMb,
+                targetUtilization: sizingTargetUtil,
+                reserveVramMb: sizingReserveMb,
+                debugOutput: line => debugLines.Add(line),
+                maxHiddenSize: sizingHiddenCap);
+            foreach (var line in debugLines)
+                AppendAutonomousOutput(line);
+
+            // Extra guard for autonomous rounds on constrained VRAM.
+            if (hasCuda)
+            {
+                if (estimatedHidden > sizingHiddenCap)
+                {
+                    AppendAutonomousOutput(
+                        $"[auto] hidden cap applied for training headroom: {estimatedHidden} → {sizingHiddenCap} (usable_vram_mb={sizingVramMb})");
+                    estimatedHidden = sizingHiddenCap;
+                }
+            }
+            AppendAutonomousOutput(
+                $"[auto] sizing profile: target_util={sizingTargetUtil:F2} reserve_mb={sizingReserveMb} hidden_cap={sizingHiddenCap} usable_vram_mb={sizingVramMb}");
+             
+            // CRITICAL: Apply the estimated hidden size BEFORE starting training
+            AppendAutonomousOutput($"[auto] applying hidden size: {_runtime.HiddenSize} → {estimatedHidden}");
+            _runtime.EnsureHiddenSize(estimatedHidden);
+            AppendAutonomousOutput($"[auto] model ready: hidden={_runtime.HiddenSize}");
+            
+            AppendAutonomousOutput("[auto] live controls update next round: max rounds, loss threshold, bounds, max difficulty, round budget, and generation concurrency.");
+            // Run entire training pipeline on ThreadPool with reduced priority to prevent UI thread starvation
+            var run = await RunLowPriorityTrainingAsync(
+                async () => await _runtime.TrainAutonomousAsync(
+                    request,
+                    _autonomousTrainingCts.Token,
+                    AppendAutonomousOutput,
+                    baseRequest => CaptureLiveAutonomousRequest(baseRequest),
+                    onRoundProgress: payload => HandleAutonomousTrainingProgress((GenesisAutonomousTrainingEventPayload)payload)),
+                _autonomousTrainingCts.Token);
             var final = run.FinalReport;
             if (final is not null)
             {
                 AppendAutonomousOutput($"[auto] complete: rounds={run.Rounds.Count} final_loss={final.AverageLoss.TokenLoss:F4}");
-                UpdateAutonomousStats(run.Rounds.Count, final.AverageLoss.TokenLoss, run.Rounds.LastOrDefault()?.CreatorName ?? "n/a");
+                HandleAutonomousTrainingProgress(new GenesisAutonomousTrainingEventPayload(
+                    Round: run.Rounds.Count,
+                    StepName: "Complete",
+                    Dataset: run.Rounds.LastOrDefault()?.CreatorName ?? "mixed",
+                    Loss: final.AverageLoss.TokenLoss,
+                    ExampleSuccessRate: final.ExampleSuccessRate,
+                    SamplesTrained: final.ExampleCount,
+                    ElapsedMs: 0,
+                    SkippedCorrectExampleCount: final.SkippedCorrectExampleCount,
+                    PromptAnswerExampleCount: final.PromptAnswerExampleCount,
+                    WindowedTextExampleCount: final.WindowedTextExampleCount,
+                    CreatorSummary: BuildAutonomousCreatorSummary(final)));
             }
             else
             {
@@ -1340,6 +1239,28 @@ public class MainWindow : Form
         }
     }
 
+    /// <summary>
+    /// Run async operation on a low-priority thread to prevent UI thread starvation during long training runs.
+    /// Uses BelowNormal priority to allow UI messages to be processed even during CPU-intensive work.
+    /// </summary>
+    private async Task<T> RunLowPriorityTrainingAsync<T>(Func<Task<T>> workAsync, CancellationToken ct)
+    {
+        return await Task.Run(async () =>
+        {
+            // Lower this thread's priority so UI thread gets CPU time
+            var originalPriority = Thread.CurrentThread.Priority;
+            try
+            {
+                Thread.CurrentThread.Priority = ThreadPriority.BelowNormal;
+                return await workAsync();
+            }
+            finally
+            {
+                Thread.CurrentThread.Priority = originalPriority;
+            }
+        }, ct);
+    }
+
     private void StopAutonomousTraining()
     {
         if (_autonomousTrainingCts is null || _autonomousTrainingCts.IsCancellationRequested)
@@ -1349,89 +1270,62 @@ public class MainWindow : Form
         _autonomousTrainingCts.Cancel();
     }
 
-    private async Task<GenesisTrainingReport> RunSingleGeneratorRound(
-        IExampleCreator creator,
-        string creatorName,
-        int sampleCount,
-        int difficulty,
-        int epochs,
-        string suffix)
+    private void HandleAutonomousTrainingProgress(GenesisAutonomousTrainingEventPayload payload)
     {
-        AppendOutput($"Generating {sampleCount} examples from '{creatorName}' at difficulty {difficulty}...");
-        var examples = creator.Generate(sampleCount, difficulty, forTraining: true);
-        AppendOutput($"Generated {examples.Length} examples");
+        if (InvokeRequired)
+        {
+            Invoke(() => HandleAutonomousTrainingProgress(payload));
+            return;
+        }
 
-        var safeCreator = creatorName.Replace(':', '_');
-        var tmpPath = Path.Combine(
-            AppContext.BaseDirectory,
-            $"generated_{safeCreator}_{difficulty}_{suffix}_{Guid.NewGuid():N}.txt");
         try
         {
-            var lines = examples.Select(static ex => $"{ex.Input} => {ex.Output}");
-            await File.WriteAllLinesAsync(tmpPath, lines);
-
-            return await ExecuteTraining(tmpPath, epochs);
+            // Update stats label with round progress
+            var statsLabel = GetControl<TextBox>("AutoStatsText");
+            if (statsLabel != null)
+            {
+                var summary = string.IsNullOrWhiteSpace(payload.CreatorSummary)
+                    ? "Creator stats: n/a"
+                    : $"Creator stats:{Environment.NewLine}{payload.CreatorSummary}";
+                var success = double.IsNaN(payload.ExampleSuccessRate) ? "n/a" : payload.ExampleSuccessRate.ToString("P1");
+                statsLabel.Text =
+                    $"Phase: {payload.StepName} | Round: {payload.Round} | Loss: {payload.Loss:F4} | Success: {success} | Samples: {payload.SamplesTrained} | Elapsed: {payload.ElapsedMs}ms | Dataset: {payload.Dataset}" +
+                    Environment.NewLine +
+                    $"Mix: prompt-answer {payload.PromptAnswerExampleCount} | windowed text {payload.WindowedTextExampleCount} | skipped correct {payload.SkippedCorrectExampleCount}" +
+                    Environment.NewLine +
+                    summary;
+            }
         }
         catch (Exception ex)
         {
-            AppendOutput($"Error saving generated data: {ex.Message}");
-            throw;
-        }
-        finally
-        {
-            try { File.Delete(tmpPath); } catch { }
+            AppendAutonomousOutput($"[ui] Error updating progress: {ex.Message}");
         }
     }
 
-    private async Task StartTraining(ListBox filesListBox)
+    private GenesisAutonomousTrainingRequest CaptureLiveAutonomousRequest(GenesisAutonomousTrainingRequest baseline)
     {
-        if (filesListBox.SelectedIndex < 0)
+        if (InvokeRequired)
         {
-            MessageBox.Show("Please select a training file", "Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            return;
+            var captured = Invoke(new Func<GenesisAutonomousTrainingRequest>(() => CaptureLiveAutonomousRequest(baseline)));
+            return captured is GenesisAutonomousTrainingRequest request ? request : baseline;
         }
 
-        var selectedFile = filesListBox.SelectedItem?.ToString();
-        if (selectedFile == null) return;
+        var live = TryBuildAutonomousTrainingRequest();
+        if (live is null)
+            return baseline;
 
-        var filePath = _trainingFilePathByLabel.TryGetValue(selectedFile, out var mappedPath)
-            ? mappedPath
-            : Path.Combine(_exampleFolder, selectedFile.Split(' ')[0]);
-        
-        if (!File.Exists(filePath))
+        return baseline with
         {
-            MessageBox.Show($"File not found: {filePath}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            return;
-        }
-
-        var epochs = (int)(GetControl<NumericUpDown>("EpochsInput")?.Value ?? 3);
-
-        var trainBtn = GetControl<Button>("TrainBtn");
-        var stopBtn = GetControl<Button>("StopBtn");
-        if (trainBtn != null) trainBtn.Enabled = false;
-        if (stopBtn != null) stopBtn.Enabled = true;
-
-        _trainingCts = new CancellationTokenSource();
-        
-        try
-        {
-            _ = await ExecuteTraining(filePath, epochs);
-        }
-        catch (OperationCanceledException)
-        {
-            AppendOutput("Training stopped by user.");
-        }
-        catch (Exception ex)
-        {
-            AppendExceptionReport("Training failed", ex);
-        }
-        finally
-        {
-            if (trainBtn != null) trainBtn.Enabled = true;
-            if (stopBtn != null) stopBtn.Enabled = false;
-            _trainingCts?.Dispose();
-            _trainingCts = null;
-        }
+            MaxRounds = live.MaxRounds,
+            LossThreshold = live.LossThreshold,
+            MinSampleCount = live.MinSampleCount,
+            MaxSampleCount = live.MaxSampleCount,
+            MinTrainCount = live.MinTrainCount,
+            MaxTrainCount = live.MaxTrainCount,
+            MaxDifficulty = live.MaxDifficulty,
+            RoundTrainBudget = live.RoundTrainBudget,
+            MaxGenerationConcurrency = live.MaxGenerationConcurrency
+        };
     }
 
     private async Task<GenesisTrainingReport> ExecuteTraining(string filePath, int epochs)
@@ -1440,9 +1334,19 @@ public class MainWindow : Form
         Interlocked.Increment(ref _activeTrainingOperations);
         AppendOutput($"Loading training data from: {Path.GetFileName(filePath)}");
         
-        var examples = GenesisTrainingDataLoader.LoadFromFile(filePath);
+        var examples = await GenesisTrainingDataLoader.LoadFromFileAsync(filePath);
         AppendOutput($"Loaded {examples.Count} examples");
-        AppendOutput($"Training: {examples.Count} examples, {epochs} epochs, policy=CPU-train/VRAM-infer");
+        
+        // Calculate optimal hidden size based on GPU VRAM for inference
+        var targetHidden = EstimateHiddenSizeFromDataset(examples);
+        if (targetHidden > _runtime.HiddenSize)
+        {
+            AppendOutput($"Expanding model: hidden {_runtime.HiddenSize} → {targetHidden} for {examples.Count} examples on GPU");
+            _runtime.EnsureHiddenSize(targetHidden);
+        }
+        
+        AppendOutput($"Training: {examples.Count} examples, {epochs} epochs, policy=CUDA-train/GPU-infer with CPU fallback");
+        AppendOutput($"GPU inference device: 0 (A3000 preferred), CUDA training when available");
         AggressiveMemoryCleanup("pre-training");
 
         try
@@ -1457,9 +1361,8 @@ public class MainWindow : Form
             AppendOutput($"Training complete in {sw.Elapsed.TotalSeconds:F1}s");
             AppendOutput($"Final loss: {report.AverageLoss.TokenLoss:F4}");
             AppendOutput(
-                $"Space manager: cycles={report.SpaceManagementCycles} pruned={report.NodesPruned}n/{report.RelationsPruned}r " +
-                $"final={report.FinalNodeCount}n/{report.FinalRelationCount}r noise={report.SpaceNoiseRatio:F3}");
-            UpdateStats(examples.Count, report.AverageLoss.TokenLoss);
+                $"Platonic space: cycles={report.SpaceManagementCycles} nodes={report.FinalNodeCount}n/{report.FinalRelationCount}r " +
+                $"noise={report.SpaceNoiseRatio:F3}");
             AppendOutput("(Model trained, ready for prediction)");
             return report;
 
@@ -1484,60 +1387,28 @@ public class MainWindow : Form
         }
     }
 
-    private void StopTraining()
+    private int EstimateHiddenSizeFromDataset(IReadOnlyList<GenesisExample> examples)
     {
-        _trainingCts?.Cancel();
-    }
-
-    private void ChooseTrainingFolder()
-    {
-        using var dialog = new FolderBrowserDialog
+        // Query GPU VRAM and size model to fit exactly in dedicated VRAM (fast memory)
+        // Overflow will use shared memory as needed
+        if (!GpuCapacityPlanner.TryGetNvidiaVramMb(out var totalMb, out var freeMb))
         {
-            Description = "Select folder containing training files",
-            InitialDirectory = Directory.Exists(_exampleFolder) ? _exampleFolder : AppContext.BaseDirectory,
-            ShowNewFolderButton = false
-        };
+            AppendOutput($"[GPU] Could not query NVIDIA GPU; using current hidden size {_runtime.HiddenSize}");
+            return _runtime.HiddenSize;
+        }
 
-        if (dialog.ShowDialog(this) != DialogResult.OK)
-            return;
+        // Target exactly 6GB dedicated VRAM (fast), allow shared memory overspill for edge cases
+        const int targetFastVramMb = 6144;  // 6GB
+        var estimatedHidden = GpuCapacityPlanner.EstimateHiddenSizeForInferenceOnly(
+            examples,
+            routeCount: 2,  // NumRoutes in GenesisNeuralModel
+            vramMb: targetFastVramMb,
+            targetUtilization: 0.98,  // Pack tight into dedicated VRAM
+            reserveVramMb: 50,        // Minimal reserve for kernel overhead
+            debugOutput: msg => AppendOutput(msg));
 
-        _exampleFolder = dialog.SelectedPath;
-        var folderBox = GetControl<TextBox>("TrainingFolderBox");
-        if (folderBox != null)
-            folderBox.Text = _exampleFolder;
-        RefreshExampleFiles();
-    }
-
-    private void ChooseTrainingFile()
-    {
-        using var dialog = new OpenFileDialog
-        {
-            Title = "Choose training file",
-            InitialDirectory = Directory.Exists(_exampleFolder) ? _exampleFolder : AppContext.BaseDirectory,
-            Filter = "Training files (*.txt;*.jsonl;*.data)|*.txt;*.jsonl;*.data|All files (*.*)|*.*",
-            Multiselect = false
-        };
-
-        if (dialog.ShowDialog(this) != DialogResult.OK)
-            return;
-
-        var path = dialog.FileName;
-        _exampleFolder = Path.GetDirectoryName(path) ?? _exampleFolder;
-
-        var folderBox = GetControl<TextBox>("TrainingFolderBox");
-        if (folderBox != null)
-            folderBox.Text = _exampleFolder;
-
-        RefreshExampleFiles();
-        var filesListBox = GetControl<ListBox>("FilesList");
-        if (filesListBox == null)
-            return;
-
-        var selectedLabel = _trainingFilePathByLabel
-            .FirstOrDefault(kv => kv.Value.Equals(path, StringComparison.OrdinalIgnoreCase))
-            .Key;
-        if (!string.IsNullOrWhiteSpace(selectedLabel))
-            filesListBox.SelectedItem = selectedLabel;
+        AppendOutput($"[GPU] Target: 6GB fast VRAM (dedicated) | Estimated hidden: {estimatedHidden} | Overspill to shared: allowed");
+        return estimatedHidden;
     }
 
     private string ResolveTrainingPath(string rawPath)
@@ -1577,86 +1448,23 @@ public class MainWindow : Form
         return AppContext.BaseDirectory;
     }
 
-    private async Task RunPrediction(TextBox input)
+    private static string BuildAutonomousCreatorSummary(GenesisTrainingReport report)
     {
-        if (string.IsNullOrWhiteSpace(input.Text))
-            return;
+        if (report.CreatorProgress is not { Count: > 0 })
+            return string.Empty;
 
-        var predictBtn = GetControl<Button>("PredictBtn");
-        if (predictBtn != null) predictBtn.Enabled = false;
-        
-        try
-        {
-            var result = await _runtime.PredictAsync(input.Text);
-            var output = result.Result?.Output ?? "No output";
-            var route = result.Result?.DecisionPath ?? "unknown";
-            var confidence = result.Result?.PlatonicConfidence ?? 0.0;
-            var hops = result.Result?.PlatonicHopCount ?? 0;
-            var fallback = result.Result?.UsedNeuralFallback ?? false;
-            var chunks = result.Result?.ChunksGenerated ?? 0;
-            var predictOutput = GetControl<Label>("PredictOutput");
-            if (predictOutput != null) predictOutput.Text = $"→ {output} [{route} c={confidence:F2} hops={hops} fallback={fallback} chunks={chunks}]";
-        }
-        catch (Exception ex)
-        {
-            var predictOutput = GetControl<Label>("PredictOutput");
-            if (predictOutput != null) predictOutput.Text = $"Error: {ex.Message}";
-        }
-        finally
-        {
-            if (predictBtn != null) predictBtn.Enabled = true;
-        }
-    }
-
-    private void UpdateStats(int exampleCount, double loss)
-    {
-        if (InvokeRequired)
-        {
-            BeginInvoke(new Action(() => UpdateStats(exampleCount, loss)));
-            return;
-        }
-
-        var statsText = GetControl<Label>("StatsText");
-        if (statsText != null)
-        {
-            statsText.Text = BuildStatsText(exampleCount, loss);
-        }
-    }
-
-    private void UpdateAutonomousStats(int roundCount, double loss, string creator)
-    {
-        if (InvokeRequired)
-        {
-            BeginInvoke(new Action(() => UpdateAutonomousStats(roundCount, loss, creator)));
-            return;
-        }
-
-        var statsText = GetControl<Label>("AutoStatsText");
-        if (statsText != null)
-        {
-            statsText.Text = $"Rounds: {roundCount} | Last loss: {loss:F4} | Creator: {creator}";
-        }
-    }
-
-    private string BuildStatsText(int? exampleCount, double? loss)
-    {
-        var vocab = Math.Max(1, _runtime.VocabularySize);
-        var hidden = Math.Max(1, _runtime.HiddenSize);
-        var parameterCount = (2L * vocab * hidden) + vocab; // embeddings + output + bias
-        var modelSizeMiB = (parameterCount * sizeof(float)) / (1024.0 * 1024.0);
-
-        var examplesPart = exampleCount.HasValue ? exampleCount.Value.ToString() : "n/a";
-        var lossPart = loss.HasValue ? loss.Value.ToString("F4") : "n/a";
-
-        return
-            $"Examples: {examplesPart} | Loss: {lossPart}\n" +
-            $"Vocab: {vocab:N0} | Hidden: {hidden:N0} | Params≈{parameterCount:N0} | FP32≈{modelSizeMiB:F2} MiB\n" +
-            $"Policy: CPU train | GPU/VRAM infer";
+        var header = $"mix: prompt-answer {report.PromptAnswerExampleCount}, windowed text {report.WindowedTextExampleCount}, skipped correct {report.SkippedCorrectExampleCount}";
+        var body = string.Join(
+            Environment.NewLine,
+            report.CreatorProgress
+                .OrderBy(x => x.CreatorName, StringComparer.OrdinalIgnoreCase)
+                .Select(x => $"{x.CreatorName} [{x.TrainingKind}]: loss {x.AverageTokenLoss:F3}, succ {x.SuccessRate:P0}, seen {x.SeenCount}"));
+        return string.Join(Environment.NewLine, header, body);
     }
 
     private void AppendOutput(string message)
     {
-        AppendToLogBox("OutputBox", message);
+        AppendToLogBox("AutoOutputBox", message);
     }
 
     private void AppendAutonomousOutput(string message)
@@ -1664,67 +1472,68 @@ public class MainWindow : Form
         AppendToLogBox("AutoOutputBox", message);
     }
 
-    private void AppendToLogBox(string boxName, string message)
-    {
-        if (InvokeRequired)
-        {
-            Invoke(() => AppendToLogBox(boxName, message));
-            return;
-        }
+     private void AppendToLogBox(string boxName, string message)
+     {
+         if (InvokeRequired)
+         {
+             BeginInvoke(new Action(() => AppendToLogBox(boxName, message)));
+             return;
+         }
 
-        var outputBox = GetControl<RichTextBox>(boxName);
-        if (outputBox != null && !outputBox.IsDisposed)
-        {
-            var shouldAutoScroll = IsNearBottom(outputBox);
-            outputBox.AppendText($"[{DateTime.Now:HH:mm:ss}] {message}\n");
-            TrimRichTextHistory(outputBox, MaxTrainingLogChars, TargetTrainingLogChars);
-            if (shouldAutoScroll)
-            {
-                outputBox.SelectionStart = outputBox.TextLength;
-                outputBox.SelectionLength = 0;
-                outputBox.ScrollToCaret();
-            }
-        }
-    }
+         var outputBox = GetControl<ListBox>(boxName);
+         if (outputBox == null || outputBox.IsDisposed)
+         {
+             System.Diagnostics.Debug.WriteLine($"[log] ListBox '{boxName}' not found or disposed");
+             return;
+         }
+
+         try
+         {
+             // ListBox: just add item (much safer than RichTextBox)
+             var logEntry = $"[{DateTime.Now:HH:mm:ss}] {message}";
+             outputBox.Items.Add(logEntry);
+             System.Diagnostics.Debug.WriteLine($"[log] Added to {boxName}: {message}");
+
+             // Trim if needed - ListBox trimming is safer
+             if (outputBox.Items.Count > MaxTrainingLogChars / 50)  // Rough estimate: ~50 chars per line
+             {
+                 var now = DateTime.UtcNow;
+                 if ((now - _lastTrimTime).TotalMilliseconds >= TrimDebounceMs)
+                 {
+                     _lastTrimTime = now;
+                     // Remove oldest items
+                     var itemsToRemove = Math.Max(1, outputBox.Items.Count - (MaxTrainingLogChars / 60));
+                     for (var i = 0; i < itemsToRemove; i++)
+                     {
+                         outputBox.Items.RemoveAt(0);
+                     }
+                 }
+             }
+
+             // Auto-scroll to last item
+             if (outputBox.Items.Count > 0)
+             {
+                 outputBox.TopIndex = outputBox.Items.Count - 1;
+             }
+         }
+         catch (Exception ex)
+         {
+             System.Diagnostics.Debug.WriteLine($"[log] Error in AppendToLogBox ({boxName}): {ex.GetType().Name}: {ex.Message}");
+         }
+     }
 
     private static void TrimRichTextHistory(RichTextBox box, int maxChars, int targetChars)
     {
-        if (box.IsDisposed || !box.IsHandleCreated)
-            return;
-
-        if (box.TextLength <= maxChars)
-            return;
-
-        var removeChars = box.TextLength - targetChars;
-        var text = box.Text;
-        var newline = text.IndexOf('\n', Math.Max(0, removeChars));
-        var trimAt = newline >= 0 ? newline + 1 : removeChars;
-        if (trimAt <= 0)
-            return;
-
-        trimAt = Math.Min(trimAt, box.TextLength);
-        var previousSelectionStart = box.SelectionStart;
-        var previousSelectionLength = box.SelectionLength;
-
-        box.Select(0, trimAt);
-        box.SelectedText = string.Empty;
-
-        var restoredStart = Math.Max(0, previousSelectionStart - trimAt);
-        var maxLength = Math.Max(0, box.TextLength - restoredStart);
-        var restoredLength = Math.Min(previousSelectionLength, maxLength);
-        box.Select(restoredStart, restoredLength);
+        // Deprecated: ListBox handles trimming internally in AppendToLogBox
     }
 
     private static bool IsNearBottom(RichTextBox box)
     {
-        if (box.TextLength == 0)
-            return true;
-
-        var visibleBottomIndex = box.GetCharIndexFromPosition(new Point(4, Math.Max(4, box.ClientSize.Height - 4)));
-        return box.TextLength - visibleBottomIndex <= AutoScrollSlackChars;
+        // Deprecated: ListBox auto-scrolls in AppendToLogBox
+        return true;
     }
 
-    private void AppendExceptionReport(string context, Exception ex, string boxName = "OutputBox")
+    private void AppendExceptionReport(string context, Exception ex, string boxName = "AutoOutputBox")
     {
         AppendToLogBox(boxName, $"{context}: {ex.GetType().Name}: {ex.Message}");
 
@@ -1801,30 +1610,4 @@ public class MainWindow : Form
         }
     }
 
-    private void ApplyL2Preset(int presetIndex)
-    {
-        double coefficient = presetIndex switch
-        {
-            0 => 0.0,    // Off
-            1 => 1e-5,   // Mild
-            2 => 1e-4,   // Balanced
-            3 => 1e-3,   // Aggressive
-            4 => 1e-2,   // Extreme
-            _ => 0.0
-        };
-        
-        _runtime.UpdateConfig(c => c with { L2RegularizationCoefficient = coefficient });
-        
-        var description = presetIndex switch
-        {
-            0 => "Off: No L2 compression. Best for: maximum learning speed/capacity.",
-            1 => "Mild: Neural layer comfortable, can grow if needed. Best for: early training, testing model capacity.",
-            2 => "Balanced: Medium weight penalty.",
-            3 => "Aggressive ⚡: Heavy penalty forces symbolic learning. Best for: maximizing platonic space, lean models.",
-            4 => "Extreme: Nearly all learning symbolic. Warning: may hurt convergence; best for: debugging, understanding discovery.",
-            _ => "Unknown preset"
-        };
-        
-        AppendOutput($"✓ L2 Regularization: {description}");
-    }
 }

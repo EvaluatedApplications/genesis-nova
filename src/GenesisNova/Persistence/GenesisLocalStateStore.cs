@@ -15,25 +15,11 @@ public static class GenesisLocalStateStore
         if (!string.IsNullOrWhiteSpace(config.LocalStateDirectory))
             return config.LocalStateDirectory;
 
-        // Use models folder in repo root (committed to GitHub)
-        var repoRoot = FindRepoRoot();
-        return Path.Combine(repoRoot, "models");
-    }
-
-    private static string FindRepoRoot()
-    {
-        var current = Directory.GetCurrentDirectory();
-        while (!string.IsNullOrEmpty(current))
-        {
-            if (Directory.Exists(Path.Combine(current, "src")) &&
-                Directory.Exists(Path.Combine(current, ".git")))
-            {
-                return current;
-            }
-            current = Path.GetDirectoryName(current);
-        }
-        // Fallback to current directory
-        return Directory.GetCurrentDirectory();
+        // Use a stable user-local folder on the system drive by default.
+        return Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "GenesisNova",
+            "models");
     }
 
     public static string ResolveCheckpointPath(GenesisNovaConfig config)

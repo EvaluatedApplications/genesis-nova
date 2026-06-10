@@ -1,11 +1,45 @@
 namespace GenesisNova.Cognition;
 
+public enum PlatonicNeighborhoodType
+{
+    Any = 0,
+    Semantic = 1,
+    Relational = 2,
+    Numeric = 3
+}
+
+public readonly record struct PlatonicNeighbor(
+    string Concept,
+    double Confidence,
+    PlatonicNeighborhoodType Type,
+    int ObservationCount);
+
 public sealed class PlatonicSpaceMemory
 {
+    public sealed record SpaceMaintenanceRequest(
+        int MaxRelationPrunes = 64,
+        int MaxNodePrunes = 16,
+        int MaxNodeMerges = 8,
+        int MaxRebalancePrunes = 64,
+        int MaxRelationsPerNode = 0,
+        int TargetRelationCount = 0,
+        int MinRelationsToKeep = 512,
+        int MinNodesToKeep = 128,
+        int MinRelationObservationToKeep = 2,
+        int MinNodeObservationToKeep = 1,
+        double MaxSynthesisContradictionToKeep = 0.75,
+        double MergeDistanceThreshold = 0.018,
+        IReadOnlyCollection<string>? ProtectedConcepts = null);
+
+    public sealed record SpaceMaintenanceResult(
+        int RelationsPruned,
+        int NodesPruned,
+        int NodesMerged);
+
     private readonly int _faceDimension;
     private readonly Dictionary<string, ConceptNode> _nodes = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, ConceptRelation> _relations = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<string, List<ConceptRelation>> _relationsBySource = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, LatticeNeighborhood> _latticeByConcept = new(StringComparer.OrdinalIgnoreCase);
 
     public PlatonicSpaceMemory(int faceDimension, int seed = 42)
     {
@@ -46,6 +80,53 @@ public sealed class PlatonicSpaceMemory
         return false;
     }
 
+    /// <summary>
+    /// Returns nearest known concepts to <paramref name="concept"/> in face space.
+    /// Optionally restricts to a candidate set to keep per-turn work bounded.
+    /// </summary>
+    public IReadOnlyList<(string Symbol, double Distance)> GetNearestConcepts(
+        string concept,
+        IReadOnlyCollection<string>? candidates = null,
+        int maxNeighbors = 8,
+        int maxCandidates = 96)
+    {
+        var limit = Math.Clamp(maxNeighbors, 1, 32);
+        var budget = Math.Clamp(maxCandidates, 8, 512);
+        if (!TryGetConceptFace(concept, out var conceptFace) || conceptFace.Length == 0)
+            return Array.Empty<(string Symbol, double Distance)>();
+
+        IEnumerable<string> source = candidates is { Count: > 0 }
+            ? candidates
+            : _nodes.Keys;
+
+        var scored = new List<(string Symbol, double Distance)>(Math.Min(budget, limit * 4));
+        var seen = 0;
+        foreach (var candidate in source)
+        {
+            if (seen >= budget)
+                break;
+
+            var normalized = Normalize(candidate);
+            if (normalized.Equals(Normalize(concept), StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            if (!_nodes.TryGetValue(normalized, out var node))
+                continue;
+
+            var distance = EuclideanDistance(conceptFace, node.PositiveFace);
+            scored.Add((normalized, distance));
+            seen++;
+        }
+
+        if (scored.Count == 0)
+            return Array.Empty<(string Symbol, double Distance)>();
+
+        return scored
+            .OrderBy(x => x.Distance)
+            .Take(limit)
+            .ToArray();
+    }
+
     public int NumericDimensions => Math.Min(_faceDimension / 2, 21);
     public int LogFaceStart => NumericDimensions;
 
@@ -72,21 +153,7 @@ public sealed class PlatonicSpaceMemory
                 synthesisContradiction: observedContradiction,
                 observationCount: 0);
             _relations[key] = relation;
-            
-            // Add to source index (both directions since relations are bidirectional in queries)
-            if (!_relationsBySource.TryGetValue(relation.Left, out var sourceList))
-            {
-                sourceList = new List<ConceptRelation>();
-                _relationsBySource[relation.Left] = sourceList;
-            }
-            sourceList.Add(relation);
-            
-            if (!_relationsBySource.TryGetValue(relation.Right, out var targetList))
-            {
-                targetList = new List<ConceptRelation>();
-                _relationsBySource[relation.Right] = targetList;
-            }
-            targetList.Add(relation);
+            IndexRelation(relation);
         }
 
         relation.LastObservedContradiction = Clamp01(observedContradiction);
@@ -142,23 +209,18 @@ public sealed class PlatonicSpaceMemory
             var candidateScores = new Dictionary<string, List<double>>(StringComparer.OrdinalIgnoreCase);
             foreach (var source in frontier)
             {
-                if (!_relationsBySource.TryGetValue(source, out var relations))
-                    continue;
-                
-                foreach (var relation in relations)
+                var neighbors = GetNeighbors(
+                    source,
+                    type: PlatonicNeighborhoodType.Any,
+                    maxNeighbors: Math.Max(8, beam * 8),
+                    minConfidence: 0.35);
+
+                foreach (var neighbor in neighbors)
                 {
-                    string? target = null;
-                    if (relation.Left.Equals(source, StringComparison.OrdinalIgnoreCase))
-                        target = relation.Right;
-                    else if (relation.Right.Equals(source, StringComparison.OrdinalIgnoreCase))
-                        target = relation.Left;
-
-                    if (target is null || seen.Contains(target))
+                    var target = neighbor.Concept;
+                    if (seen.Contains(target))
                         continue;
-
-                    var confidence = 1.0 - relation.SynthesisContradiction;
-                    if (confidence < 0.35)
-                        continue;
+                    var confidence = neighbor.Confidence;
 
                     if (!candidateScores.TryGetValue(target, out var list))
                     {
@@ -212,6 +274,59 @@ public sealed class PlatonicSpaceMemory
             ConceptCount: decoded.Count);
     }
 
+    public IReadOnlyList<PlatonicNeighbor> GetNeighbors(
+        string concept,
+        PlatonicNeighborhoodType type = PlatonicNeighborhoodType.Any,
+        int maxNeighbors = 16,
+        double minConfidence = 0.0)
+    {
+        if (string.IsNullOrWhiteSpace(concept))
+            return Array.Empty<PlatonicNeighbor>();
+
+        var key = Normalize(concept);
+        if (!_latticeByConcept.TryGetValue(key, out var neighborhood))
+            return Array.Empty<PlatonicNeighbor>();
+
+        var selectedNeighbors = neighborhood.GetNeighbors(type);
+        if (selectedNeighbors.Count == 0)
+            return Array.Empty<PlatonicNeighbor>();
+
+        var capped = Math.Clamp(maxNeighbors, 1, 256);
+        var threshold = Clamp01(minConfidence);
+        var top = new List<PlatonicNeighbor>(capped);
+
+        foreach (var neighbor in selectedNeighbors)
+        {
+            if (!neighborhood.RelationsByNeighbor.TryGetValue(neighbor, out var relation))
+                continue;
+
+            var confidence = 1.0 - relation.SynthesisContradiction;
+            if (confidence < threshold)
+                continue;
+
+            var neighborType = ClassifyConceptType(neighbor);
+            var candidate = new PlatonicNeighbor(
+                Concept: neighbor,
+                Confidence: confidence,
+                Type: neighborType,
+                ObservationCount: relation.ObservationCount);
+            InsertTopNeighbor(top, candidate, capped);
+        }
+
+        return top;
+    }
+
+    public IReadOnlyList<string> GetAdjacentConcepts(
+        string concept,
+        PlatonicNeighborhoodType type = PlatonicNeighborhoodType.Any,
+        int maxNeighbors = 16,
+        double minConfidence = 0.0)
+    {
+        return GetNeighbors(concept, type, maxNeighbors, minConfidence)
+            .Select(n => n.Concept)
+            .ToArray();
+    }
+
     public void FineEditFromExample(
         IReadOnlyList<string> inputConcepts,
         IReadOnlyList<string> outputConcepts,
@@ -254,7 +369,7 @@ public sealed class PlatonicSpaceMemory
     {
         _nodes.Clear();
         _relations.Clear();
-        _relationsBySource.Clear();
+        _latticeByConcept.Clear();
 
         foreach (var node in snapshot.Nodes)
         {
@@ -277,22 +392,264 @@ public sealed class PlatonicSpaceMemory
                 synthesisContradiction: Clamp01(relation.SynthesisContradiction),
                 observationCount: Math.Max(0, relation.ObservationCount));
             _relations[key] = conceptRelation;
-            
-            // Add to source index (both directions)
-            if (!_relationsBySource.TryGetValue(conceptRelation.Left, out var sourceList))
-            {
-                sourceList = new List<ConceptRelation>();
-                _relationsBySource[conceptRelation.Left] = sourceList;
-            }
-            sourceList.Add(conceptRelation);
-            
-            if (!_relationsBySource.TryGetValue(conceptRelation.Right, out var targetList))
-            {
-                targetList = new List<ConceptRelation>();
-                _relationsBySource[conceptRelation.Right] = targetList;
-            }
-            targetList.Add(conceptRelation);
+            IndexRelation(conceptRelation);
         }
+    }
+
+    public SpaceMaintenanceResult ApplyMaintenance(SpaceMaintenanceRequest request)
+    {
+        var protectedConcepts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (request.ProtectedConcepts != null)
+        {
+            foreach (var concept in request.ProtectedConcepts)
+            {
+                if (!string.IsNullOrWhiteSpace(concept))
+                    protectedConcepts.Add(Normalize(concept));
+            }
+        }
+
+        var nodes = _nodes.Values
+            .Select(n => new MutableNode(
+                n.Name,
+                n.PositiveFace.ToArray(),
+                n.NegativeFace.ToArray(),
+                n.ObservationCount))
+            .ToDictionary(n => n.Name, StringComparer.OrdinalIgnoreCase);
+        var relations = _relations.Values
+            .Select(r => new MutableRelation(
+                r.Left,
+                r.Right,
+                r.ThesisContradiction,
+                r.LastObservedContradiction,
+                r.SynthesisContradiction,
+                r.ObservationCount))
+            .ToDictionary(r => RelationKey(r.Left, r.Right), StringComparer.OrdinalIgnoreCase);
+
+        var minRelationsToKeep = Math.Max(0, request.MinRelationsToKeep);
+        var minNodesToKeep = Math.Max(0, request.MinNodesToKeep);
+        var relationPruneBudget = Math.Max(0, request.MaxRelationPrunes);
+        var rebalanceBudget = Math.Max(0, request.MaxRebalancePrunes);
+        var nodePruneBudget = Math.Max(0, request.MaxNodePrunes);
+        var nodeMergeBudget = Math.Max(0, request.MaxNodeMerges);
+        var minRelObs = Math.Max(0, request.MinRelationObservationToKeep);
+        var minNodeObs = Math.Max(0, request.MinNodeObservationToKeep);
+        var maxSynthesis = Clamp01(request.MaxSynthesisContradictionToKeep);
+
+        var relationsPruned = 0;
+        var nodesPruned = 0;
+        var nodesMerged = 0;
+
+        var staleRelations = relations.Values
+            .Where(r =>
+            {
+                if (protectedConcepts.Contains(r.Left) || protectedConcepts.Contains(r.Right))
+                    return false;
+                if (r.ObservationCount > minRelObs)
+                    return false;
+                if (r.SynthesisContradiction < maxSynthesis)
+                    return false;
+                var leftObs = nodes.TryGetValue(r.Left, out var leftNode) ? leftNode.ObservationCount : 0;
+                var rightObs = nodes.TryGetValue(r.Right, out var rightNode) ? rightNode.ObservationCount : 0;
+                return leftObs <= (minNodeObs + 1) && rightObs <= (minNodeObs + 1);
+            })
+            .OrderBy(r => r.ObservationCount)
+            .ThenByDescending(r => r.SynthesisContradiction)
+            .ThenBy(r => RelationKey(r.Left, r.Right), StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        foreach (var relation in staleRelations)
+        {
+            if (relationPruneBudget <= 0 || relations.Count <= minRelationsToKeep)
+                break;
+            if (relations.Remove(RelationKey(relation.Left, relation.Right)))
+            {
+                relationPruneBudget--;
+                relationsPruned++;
+            }
+        }
+
+        if (nodeMergeBudget > 0 && nodes.Count > minNodesToKeep)
+        {
+            var mergeCandidates = nodes.Values
+                .Where(n => !protectedConcepts.Contains(n.Name))
+                .OrderBy(n => n.Name, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+            for (var i = 0; i < mergeCandidates.Length && nodeMergeBudget > 0; i++)
+            {
+                var sourceName = mergeCandidates[i].Name;
+                if (!nodes.ContainsKey(sourceName))
+                    continue;
+
+                for (var j = i + 1; j < mergeCandidates.Length && nodeMergeBudget > 0; j++)
+                {
+                    if (!nodes.TryGetValue(sourceName, out var source))
+                        break;
+                    if (!nodes.TryGetValue(mergeCandidates[j].Name, out var target))
+                        continue;
+                    if (source.Name.Equals(target.Name, StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    if (protectedConcepts.Contains(source.Name) || protectedConcepts.Contains(target.Name))
+                        continue;
+
+                    var sourceDegree = CountRelationsForNode(relations.Values, source.Name);
+                    var targetDegree = CountRelationsForNode(relations.Values, target.Name);
+                    if (sourceDegree > 1 || targetDegree > 1)
+                        continue;
+
+                    var distance = FaceDistance(source.PositiveFace, target.PositiveFace);
+                    if (distance > request.MergeDistanceThreshold)
+                        continue;
+
+                    var canonical = source.ObservationCount >= target.ObservationCount ? source : target;
+                    var duplicate = ReferenceEquals(canonical, source) ? target : source;
+                    MergeNodeInto(canonical, duplicate, nodes, relations);
+                    nodesMerged++;
+                    nodeMergeBudget--;
+                }
+            }
+        }
+
+        var maxRelationsPerNode = Math.Max(0, request.MaxRelationsPerNode);
+        var targetRelationCount = Math.Max(0, request.TargetRelationCount);
+        if (maxRelationsPerNode > 0 && rebalanceBudget > 0 && relations.Count > targetRelationCount)
+        {
+            var nodeOrder = nodes.Keys
+                .OrderBy(k => k, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+            foreach (var nodeName in nodeOrder)
+            {
+                if (rebalanceBudget <= 0 || relations.Count <= Math.Max(minRelationsToKeep, targetRelationCount))
+                    break;
+                if (protectedConcepts.Contains(nodeName))
+                    continue;
+
+                var incident = relations.Values
+                    .Where(r => r.Left.Equals(nodeName, StringComparison.OrdinalIgnoreCase) ||
+                                r.Right.Equals(nodeName, StringComparison.OrdinalIgnoreCase))
+                    .OrderBy(r => r.ObservationCount)
+                    .ThenByDescending(r => r.SynthesisContradiction)
+                    .ThenBy(r => RelationKey(r.Left, r.Right), StringComparer.OrdinalIgnoreCase)
+                    .ToArray();
+                var over = incident.Length - maxRelationsPerNode;
+                if (over <= 0)
+                    continue;
+
+                foreach (var relation in incident)
+                {
+                    if (over <= 0 || rebalanceBudget <= 0 || relations.Count <= Math.Max(minRelationsToKeep, targetRelationCount))
+                        break;
+                    if (protectedConcepts.Contains(relation.Left) || protectedConcepts.Contains(relation.Right))
+                        continue;
+                    if (relation.ObservationCount > (minRelObs + 1) && relation.SynthesisContradiction < (maxSynthesis + 0.1))
+                        continue;
+
+                    if (relations.Remove(RelationKey(relation.Left, relation.Right)))
+                    {
+                        over--;
+                        rebalanceBudget--;
+                        relationsPruned++;
+                    }
+                }
+            }
+        }
+
+        if (nodePruneBudget > 0 && nodes.Count > minNodesToKeep)
+        {
+            var relationEndpoints = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var relation in relations.Values)
+            {
+                relationEndpoints.Add(relation.Left);
+                relationEndpoints.Add(relation.Right);
+            }
+
+            var staleNodes = nodes.Values
+                .Where(n =>
+                    !protectedConcepts.Contains(n.Name) &&
+                    n.ObservationCount <= minNodeObs &&
+                    !relationEndpoints.Contains(n.Name))
+                .OrderBy(n => n.ObservationCount)
+                .ThenBy(n => n.Name, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+            foreach (var node in staleNodes)
+            {
+                if (nodePruneBudget <= 0 || nodes.Count <= minNodesToKeep)
+                    break;
+                if (nodes.Remove(node.Name))
+                {
+                    nodePruneBudget--;
+                    nodesPruned++;
+                }
+            }
+        }
+
+        if (relationsPruned == 0 && nodesPruned == 0 && nodesMerged == 0)
+            return new SpaceMaintenanceResult(0, 0, 0);
+
+        ImportSnapshot(new PlatonicMemorySnapshot(
+            FaceDimension: _faceDimension,
+            Nodes: nodes.Values
+                .OrderBy(n => n.Name, StringComparer.OrdinalIgnoreCase)
+                .Select(n => new PlatonicNodeSnapshot(n.Name, n.PositiveFace, n.NegativeFace, Math.Max(0, n.ObservationCount)))
+                .ToArray(),
+            Relations: relations.Values
+                .OrderBy(r => RelationKey(r.Left, r.Right), StringComparer.OrdinalIgnoreCase)
+                .Select(r => new PlatonicRelationSnapshot(
+                    r.Left,
+                    r.Right,
+                    Clamp01(r.ThesisContradiction),
+                    Clamp01(r.LastObservedContradiction),
+                    Clamp01(r.SynthesisContradiction),
+                    Math.Max(0, r.ObservationCount)))
+                .ToArray()));
+
+        return new SpaceMaintenanceResult(
+            RelationsPruned: relationsPruned,
+            NodesPruned: nodesPruned,
+            NodesMerged: nodesMerged);
+    }
+
+    private void IndexRelation(ConceptRelation relation)
+    {
+        var left = GetOrCreateNeighborhood(relation.Left);
+        left.UpsertNeighbor(relation.Right, relation);
+
+        var right = GetOrCreateNeighborhood(relation.Right);
+        right.UpsertNeighbor(relation.Left, relation);
+    }
+
+    private LatticeNeighborhood GetOrCreateNeighborhood(string concept)
+    {
+        if (_latticeByConcept.TryGetValue(concept, out var neighborhood))
+            return neighborhood;
+
+        neighborhood = new LatticeNeighborhood();
+        _latticeByConcept[concept] = neighborhood;
+        return neighborhood;
+    }
+
+    private static void InsertTopNeighbor(List<PlatonicNeighbor> top, PlatonicNeighbor candidate, int maxNeighbors)
+    {
+        if (maxNeighbors <= 0)
+            return;
+
+        var inserted = false;
+        for (var i = 0; i < top.Count; i++)
+        {
+            if (candidate.Confidence <= top[i].Confidence)
+                continue;
+            top.Insert(i, candidate);
+            inserted = true;
+            break;
+        }
+
+        if (!inserted && top.Count < maxNeighbors)
+            top.Add(candidate);
+
+        if (top.Count > maxNeighbors)
+            top.RemoveAt(top.Count - 1);
     }
 
     private void ApplyTriadicSynthesis(string left, string right)
@@ -508,6 +865,15 @@ public sealed class PlatonicSpaceMemory
     private static string Normalize(string value)
         => value.Trim().ToLowerInvariant();
 
+    private static PlatonicNeighborhoodType ClassifyConceptType(string token)
+    {
+        if (TryParseNumber(token, out _))
+            return PlatonicNeighborhoodType.Numeric;
+        if (IsAddOperator(token) || IsMultiplyOperator(token))
+            return PlatonicNeighborhoodType.Relational;
+        return PlatonicNeighborhoodType.Semantic;
+    }
+
     private static bool TryParseNumber(string token, out double value)
         => double.TryParse(token, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out value);
 
@@ -555,6 +921,132 @@ public sealed class PlatonicSpaceMemory
     private static double Clamp01(double value)
         => Math.Max(0.0, Math.Min(1.0, value));
 
+    private static double EuclideanDistance(IReadOnlyList<double> a, IReadOnlyList<double> b)
+    {
+        var length = Math.Min(a.Count, b.Count);
+        var sum = 0.0;
+        for (var i = 0; i < length; i++)
+        {
+            var diff = a[i] - b[i];
+            sum += diff * diff;
+        }
+        return Math.Sqrt(sum);
+    }
+
+    private static int CountRelationsForNode(IEnumerable<MutableRelation> relations, string nodeName)
+        => relations.Count(r =>
+            r.Left.Equals(nodeName, StringComparison.OrdinalIgnoreCase) ||
+            r.Right.Equals(nodeName, StringComparison.OrdinalIgnoreCase));
+
+    private static double FaceDistance(IReadOnlyList<double> left, IReadOnlyList<double> right)
+    {
+        var length = Math.Min(left.Count, right.Count);
+        var sum = 0.0;
+        for (var i = 0; i < length; i++)
+        {
+            var d = left[i] - right[i];
+            sum += d * d;
+        }
+
+        return Math.Sqrt(sum / Math.Max(1, length));
+    }
+
+    private static void MergeNodeInto(
+        MutableNode canonical,
+        MutableNode duplicate,
+        IDictionary<string, MutableNode> nodes,
+        IDictionary<string, MutableRelation> relations)
+    {
+        var totalObs = Math.Max(1, canonical.ObservationCount + duplicate.ObservationCount);
+        var canonicalWeight = canonical.ObservationCount / (double)totalObs;
+        var duplicateWeight = duplicate.ObservationCount / (double)totalObs;
+        for (var i = 0; i < canonical.PositiveFace.Length; i++)
+        {
+            canonical.PositiveFace[i] = (canonical.PositiveFace[i] * canonicalWeight) + (duplicate.PositiveFace[i] * duplicateWeight);
+            canonical.NegativeFace[i] = (canonical.NegativeFace[i] * canonicalWeight) + (duplicate.NegativeFace[i] * duplicateWeight);
+        }
+        canonical.ObservationCount += duplicate.ObservationCount;
+
+        var incidentRelations = relations.Values
+            .Where(r => r.Left.Equals(duplicate.Name, StringComparison.OrdinalIgnoreCase) ||
+                        r.Right.Equals(duplicate.Name, StringComparison.OrdinalIgnoreCase))
+            .OrderBy(r => RelationKey(r.Left, r.Right), StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        foreach (var relation in incidentRelations)
+        {
+            relations.Remove(RelationKey(relation.Left, relation.Right));
+            var remappedLeft = relation.Left.Equals(duplicate.Name, StringComparison.OrdinalIgnoreCase)
+                ? canonical.Name
+                : relation.Left;
+            var remappedRight = relation.Right.Equals(duplicate.Name, StringComparison.OrdinalIgnoreCase)
+                ? canonical.Name
+                : relation.Right;
+            if (remappedLeft.Equals(remappedRight, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            var remappedKey = RelationKey(remappedLeft, remappedRight);
+            if (relations.TryGetValue(remappedKey, out var existing))
+            {
+                var combinedObs = Math.Max(1, existing.ObservationCount + relation.ObservationCount);
+                existing.ThesisContradiction = Clamp01(
+                    ((existing.ThesisContradiction * existing.ObservationCount) + (relation.ThesisContradiction * relation.ObservationCount)) / combinedObs);
+                existing.LastObservedContradiction = Clamp01((existing.LastObservedContradiction + relation.LastObservedContradiction) * 0.5);
+                existing.SynthesisContradiction = Clamp01(
+                    ((existing.SynthesisContradiction * existing.ObservationCount) + (relation.SynthesisContradiction * relation.ObservationCount)) / combinedObs);
+                existing.ObservationCount = combinedObs;
+            }
+            else
+            {
+                relation.Left = remappedLeft;
+                relation.Right = remappedRight;
+                relations[remappedKey] = relation;
+            }
+        }
+
+        nodes.Remove(duplicate.Name);
+    }
+
+    private sealed class LatticeNeighborhood
+    {
+        public Dictionary<string, ConceptRelation> RelationsByNeighbor { get; } = new(StringComparer.OrdinalIgnoreCase);
+        private HashSet<string> NumericNeighbors { get; } = new(StringComparer.OrdinalIgnoreCase);
+        private HashSet<string> RelationalNeighbors { get; } = new(StringComparer.OrdinalIgnoreCase);
+        private HashSet<string> SemanticNeighbors { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+        public void UpsertNeighbor(string neighbor, ConceptRelation relation)
+        {
+            RelationsByNeighbor[neighbor] = relation;
+            NumericNeighbors.Remove(neighbor);
+            RelationalNeighbors.Remove(neighbor);
+            SemanticNeighbors.Remove(neighbor);
+
+            switch (ClassifyConceptType(neighbor))
+            {
+                case PlatonicNeighborhoodType.Numeric:
+                    NumericNeighbors.Add(neighbor);
+                    break;
+                case PlatonicNeighborhoodType.Relational:
+                    RelationalNeighbors.Add(neighbor);
+                    break;
+                default:
+                    SemanticNeighbors.Add(neighbor);
+                    break;
+            }
+        }
+
+        public IReadOnlyCollection<string> GetNeighbors(PlatonicNeighborhoodType type)
+        {
+            return type switch
+            {
+                PlatonicNeighborhoodType.Numeric => NumericNeighbors,
+                PlatonicNeighborhoodType.Relational => RelationalNeighbors,
+                PlatonicNeighborhoodType.Semantic => SemanticNeighbors,
+                _ => RelationsByNeighbor.Keys
+            };
+        }
+    }
+
     private sealed class ConceptNode
     {
         public ConceptNode(string name, double[] positiveFace, double[] negativeFace, int observationCount)
@@ -592,6 +1084,48 @@ public sealed class PlatonicSpaceMemory
         public string Left { get; }
         public string Right { get; }
         public double ThesisContradiction { get; }
+        public double LastObservedContradiction { get; set; }
+        public double SynthesisContradiction { get; set; }
+        public int ObservationCount { get; set; }
+    }
+
+    private sealed class MutableNode
+    {
+        public MutableNode(string name, double[] positiveFace, double[] negativeFace, int observationCount)
+        {
+            Name = name;
+            PositiveFace = positiveFace;
+            NegativeFace = negativeFace;
+            ObservationCount = observationCount;
+        }
+
+        public string Name { get; }
+        public double[] PositiveFace { get; }
+        public double[] NegativeFace { get; }
+        public int ObservationCount { get; set; }
+    }
+
+    private sealed class MutableRelation
+    {
+        public MutableRelation(
+            string left,
+            string right,
+            double thesisContradiction,
+            double lastObservedContradiction,
+            double synthesisContradiction,
+            int observationCount)
+        {
+            Left = left;
+            Right = right;
+            ThesisContradiction = thesisContradiction;
+            LastObservedContradiction = lastObservedContradiction;
+            SynthesisContradiction = synthesisContradiction;
+            ObservationCount = observationCount;
+        }
+
+        public string Left { get; set; }
+        public string Right { get; set; }
+        public double ThesisContradiction { get; set; }
         public double LastObservedContradiction { get; set; }
         public double SynthesisContradiction { get; set; }
         public int ObservationCount { get; set; }

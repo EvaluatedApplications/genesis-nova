@@ -20,7 +20,11 @@ public sealed record SpaceManagerSettings(
     int TargetRelationsPerNode = 6,
     int NodeBuffer = 128,
     double NoiseThreshold = 0.65,
-    double MinUtilityToKeep = 0.15);
+    double MinUtilityToKeep = 0.15,
+    int MaxRelationPrunesPerCycle = 192,
+    int MaxNodePrunesPerCycle = 24,
+    int MaxNodeMergesPerCycle = 12,
+    int MaxRebalancePrunesPerCycle = 192);
 
 public sealed record SpaceManagementResult(
     bool Compacted,
@@ -36,11 +40,6 @@ public sealed record SpaceManagementResult(
 
 public sealed class SpaceManager
 {
-    private static readonly HashSet<string> ProtectedConcepts = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "+", "-", "*", "/", "x", "add", "sub", "mul", "div", "face:poly", "face:log"
-    };
-
     private readonly PlatonicSpaceMemory _memory;
     private readonly SpaceManagerSettings _settings;
 
@@ -53,40 +52,31 @@ public sealed class SpaceManager
     public SpaceManagementResult Manage()
     {
         var snapshot = _memory.ExportSnapshot();
-        var nodesBefore = snapshot.Nodes.Length;
-        var relationsBefore = snapshot.Relations.Length;
-        var tuples = snapshot.Relations
+        var nodes = snapshot.Nodes.Length;
+        var relations = snapshot.Relations.Length;
+        var relationTuples = snapshot.Relations
             .Select(r => (r.Left, r.Right, ObservationCount: (long)r.ObservationCount))
             .ToArray();
-        var quality = TransformQualityMetrics.GenerateReport(tuples);
-        var recommendedTool = RecommendTool(nodesBefore, relationsBefore, quality.NoiseRatio);
+        var quality = TransformQualityMetrics.GenerateReport(relationTuples);
+        var relationBudget = ComputeTargetRelationBudget(nodes);
+
         return new SpaceManagementResult(
             Compacted: false,
-            NodesBefore: nodesBefore,
-            NodesAfter: nodesBefore,
-            RelationsBefore: relationsBefore,
-            RelationsAfter: relationsBefore,
+            NodesBefore: nodes,
+            NodesAfter: nodes,
+            RelationsBefore: relations,
+            RelationsAfter: relations,
             NodesPruned: 0,
             RelationsPruned: 0,
             NoiseRatio: quality.NoiseRatio,
-            RelationBudget: relationsBefore,
-            RecommendedTool: recommendedTool);
+            RelationBudget: relationBudget,
+            RecommendedTool: SpaceToolKind.Observe);
     }
 
-    private static SpaceToolKind RecommendTool(int nodes, int relations, double noiseRatio)
+    private int ComputeTargetRelationBudget(int nodes)
     {
-        if (noiseRatio >= 0.75)
-            return SpaceToolKind.Stabilize;
-
-        if (relations > Math.Max(1, nodes * 8))
-            return SpaceToolKind.Rebalance;
-
-        if (nodes < 128)
-            return SpaceToolKind.Expand;
-
-        if (noiseRatio <= 0.25)
-            return SpaceToolKind.Reinforce;
-
-        return SpaceToolKind.Observe;
+        var dynamicBudget = (nodes * Math.Max(1, _settings.TargetRelationsPerNode)) + Math.Max(0, _settings.NodeBuffer);
+        return Math.Clamp(dynamicBudget, _settings.MinRelations, _settings.MaxRelations);
     }
+
 }

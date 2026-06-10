@@ -14,6 +14,7 @@ namespace GenesisNova.Cognition;
 /// </summary>
 public class BridgeConfidenceMetric
 {
+    private const double UnknownConfidence = 0.5;
     private readonly IReadOnlyDictionary<string, ImmutableHashSet<string>> _symbolToNeighbors;
     private readonly Func<string, IReadOnlyList<(string Symbol, double Distance)>> _getEmbeddingNeighbors;
     
@@ -32,26 +33,106 @@ public class BridgeConfidenceMetric
     /// </summary>
     public double ComputeForConcept(string symbol)
     {
-        // If concept has no symbolic relations, we're uncertain
-        if (!_symbolToNeighbors.TryGetValue(symbol, out var graphNeighbors) || graphNeighbors.Count == 0)
-            return 0.5;
-        
-        // Get k nearest neighbors in embedding space
-        var embeddingNeighbors = _getEmbeddingNeighbors(symbol);
-        if (embeddingNeighbors.Count == 0)
-            return 0.5;
-        
-        // Convert to sets for Jaccard
-        var embeddingSet = embeddingNeighbors.Select(n => n.Symbol).ToHashSet();
-        var graphSet = new HashSet<string>(graphNeighbors);
-        
-        // Jaccard similarity = |A ∩ B| / |A ∪ B|
-        var intersection = embeddingSet.Intersect(graphSet).Count();
-        var union = embeddingSet.Union(graphSet).Count();
-        
-        if (union == 0) return 0.5;
-        
-        return (double)intersection / union;
+        return ComputeJaccard(symbol);
+    }
+
+    /// <summary>
+    /// Compute BridgeConfidence for only a scoped concept subset.
+    /// Keeps signal semantics unchanged while avoiding full-space scans.
+    /// </summary>
+    public IReadOnlyDictionary<string, double> ComputeForConceptSubset(IEnumerable<string> concepts)
+    {
+        var result = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
+        foreach (var concept in concepts ?? Enumerable.Empty<string>())
+        {
+            if (string.IsNullOrWhiteSpace(concept))
+                continue;
+            if (result.ContainsKey(concept))
+                continue;
+            result[concept] = ComputeJaccard(concept);
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Expand a frontier through symbolic neighborhoods.
+    /// Useful for incremental per-turn confidence recomputation on affected concepts.
+    /// </summary>
+    public IReadOnlyCollection<string> ExpandFrontierConcepts(
+        IEnumerable<string> frontierConcepts,
+        int maxHops = 1,
+        int maxConcepts = 256)
+    {
+        var limit = Math.Clamp(maxConcepts, 1, 4096);
+        var hops = Math.Clamp(maxHops, 0, 4);
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var frontier = new Queue<(string Symbol, int Hop)>();
+
+        foreach (var concept in frontierConcepts ?? Enumerable.Empty<string>())
+        {
+            if (string.IsNullOrWhiteSpace(concept))
+                continue;
+            if (!seen.Add(concept))
+                continue;
+            frontier.Enqueue((concept, 0));
+            if (seen.Count >= limit)
+                return seen.ToArray();
+        }
+
+        while (frontier.Count > 0 && seen.Count < limit)
+        {
+            var (symbol, hop) = frontier.Dequeue();
+            if (hop >= hops)
+                continue;
+            if (!_symbolToNeighbors.TryGetValue(symbol, out var neighbors) || neighbors.Count == 0)
+                continue;
+
+            foreach (var neighbor in neighbors)
+            {
+                if (!seen.Add(neighbor))
+                    continue;
+                frontier.Enqueue((neighbor, hop + 1));
+                if (seen.Count >= limit)
+                    break;
+            }
+        }
+
+        return seen.ToArray();
+    }
+
+    /// <summary>
+    /// Compute confidence on an incremental scope derived from a frontier (+ optional affected concepts).
+    /// </summary>
+    public BridgeConfidenceScopeResult ComputeForFrontier(
+        IEnumerable<string> frontierConcepts,
+        IEnumerable<string>? affectedConcepts = null,
+        int maxHops = 1,
+        int maxConcepts = 256)
+    {
+        var frontier = (frontierConcepts ?? Enumerable.Empty<string>())
+            .Where(c => !string.IsNullOrWhiteSpace(c))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        var scope = new HashSet<string>(
+            ExpandFrontierConcepts(frontier, maxHops, maxConcepts),
+            StringComparer.OrdinalIgnoreCase);
+
+        foreach (var concept in affectedConcepts ?? Enumerable.Empty<string>())
+        {
+            if (string.IsNullOrWhiteSpace(concept))
+                continue;
+            if (scope.Count >= Math.Clamp(maxConcepts, 1, 4096))
+                break;
+            scope.Add(concept);
+        }
+
+        var scopedScores = ComputeForConceptSubset(scope);
+        var frontierAverage = ComputeAverageFromMap(frontier, scopedScores);
+        var scopeAverage = scopedScores.Count > 0 ? scopedScores.Values.Average() : UnknownConfidence;
+
+        return new BridgeConfidenceScopeResult(scopedScores, frontierAverage, scopeAverage);
     }
     
     /// <summary>
@@ -59,11 +140,8 @@ public class BridgeConfidenceMetric
     /// </summary>
     public double ComputeAverageForConcepts(IEnumerable<string> concepts)
     {
-        var confidences = concepts
-            .Select(ComputeForConcept)
-            .ToList();
-        
-        return confidences.Count > 0 ? confidences.Average() : 0.5;
+        var scores = ComputeForConceptSubset(concepts);
+        return scores.Count > 0 ? scores.Values.Average() : UnknownConfidence;
     }
     
     /// <summary>
@@ -86,4 +164,50 @@ public class BridgeConfidenceMetric
     /// </summary>
     public bool ShouldExecutePortalBridge(IEnumerable<string> concepts, double threshold = 0.3)
         => ComputeAverageForConcepts(concepts) < threshold;
+
+    private double ComputeJaccard(string symbol)
+    {
+        if (string.IsNullOrWhiteSpace(symbol))
+            return UnknownConfidence;
+
+        if (!_symbolToNeighbors.TryGetValue(symbol, out var graphNeighbors) || graphNeighbors.Count == 0)
+            return UnknownConfidence;
+
+        var embeddingNeighbors = _getEmbeddingNeighbors(symbol);
+        if (embeddingNeighbors.Count == 0)
+            return UnknownConfidence;
+
+        var embeddingSet = embeddingNeighbors
+            .Select(n => n.Symbol)
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        if (embeddingSet.Count == 0)
+            return UnknownConfidence;
+
+        var graphSet = new HashSet<string>(graphNeighbors, StringComparer.OrdinalIgnoreCase);
+        var intersection = embeddingSet.Intersect(graphSet).Count();
+        var union = embeddingSet.Union(graphSet).Count();
+        return union == 0 ? UnknownConfidence : (double)intersection / union;
+    }
+
+    private static double ComputeAverageFromMap(
+        IEnumerable<string> concepts,
+        IReadOnlyDictionary<string, double> scores)
+    {
+        var values = new List<double>();
+        foreach (var concept in concepts)
+        {
+            if (!scores.TryGetValue(concept, out var score))
+                continue;
+            values.Add(score);
+        }
+
+        return values.Count > 0 ? values.Average() : UnknownConfidence;
+    }
 }
+
+public sealed record BridgeConfidenceScopeResult(
+    IReadOnlyDictionary<string, double> ConceptConfidences,
+    double FrontierAverageConfidence,
+    double ScopeAverageConfidence);

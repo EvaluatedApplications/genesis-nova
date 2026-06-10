@@ -32,10 +32,20 @@ public sealed class GenesisTrainer
     private readonly FoldPathDiscovery _foldPathDiscovery;
     private readonly TransformAccumulator _transformAccumulator;
     private PlatonicState _tickState;
+    private SpacePolicyExperience? _lastSpacePolicyExperience;
     private int _tickPatternPromotions;
     private int _trainStepCount;
     private double _cachedConservationLoss;
     private readonly Dictionary<string, int> _conceptCoverageCounts = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly SpaceToolKind[] SpaceToolActions =
+    [
+        SpaceToolKind.Observe,
+        SpaceToolKind.Stabilize,
+        SpaceToolKind.Expand,
+        SpaceToolKind.Rebalance,
+        SpaceToolKind.Reinforce
+    ];
+    private const double SpacePolicyExplorationRate = 0.10;
     
     // Quality metrics caching (Performance optimization)
     private const int QualityLossRefreshInterval = 24;
@@ -45,9 +55,10 @@ public sealed class GenesisTrainer
     private int _lastQualityComputationStep = int.MinValue;
     
     // Phase 1: BridgeConfidence metric (Theory validation)
-    private const int BridgeConfidenceRefreshInterval = 24;
+    private const int BridgeConfidenceScopeLimit = 64;
+    private const int BridgeConfidenceNeighborLimit = 8;
     private BridgeConfidenceMetric? _bridgeConfidence;
-    private int _lastBridgeConfidenceRefreshStep = int.MinValue;
+    private readonly Dictionary<string, double> _bridgeConfidenceByConcept = new(StringComparer.OrdinalIgnoreCase);
     
     // Phase 2: Concept graph (Symbolic structure)
     private ConceptGraph? _conceptGraph;
@@ -488,10 +499,11 @@ public sealed class GenesisTrainer
         // PHASE 1: BridgeConfidence metric (replaces arbitrary weights with ionization energy)
         if (_bridgeConfidence != null && concepts.Count > 0 && _conceptGraph != null)
         {
-            RefreshBridgeConfidenceMetricIfNeeded();
-
-            // Compute average bridge confidence for all concepts in the example
-            var avgBridgeConfidence = _bridgeConfidence.ComputeAverageForConcepts(concepts);
+            RefreshBridgeConfidenceMetricForConcepts(concepts);
+            var avgBridgeConfidence = concepts
+                .Select(GetBridgeConfidenceForConcept)
+                .DefaultIfEmpty(0.5)
+                .Average();
             var ionizationEnergy = _bridgeConfidence.ComputeIonizationEnergyFromConfidence(avgBridgeConfidence);
             
             // Weight based on how much this concept needs practice (high ionization = low confidence = needs training)
@@ -540,21 +552,44 @@ public sealed class GenesisTrainer
         return Math.Clamp(weight, 0.5, 4.0);
     }
 
-    private void RefreshBridgeConfidenceMetricIfNeeded()
+    private void RefreshBridgeConfidenceMetricForConcepts(IReadOnlyList<string> concepts)
     {
         if (_bridgeConfidence is null || _conceptGraph is null)
             return;
-
-        if (_lastBridgeConfidenceRefreshStep != int.MinValue &&
-            (_trainStepCount - _lastBridgeConfidenceRefreshStep) < BridgeConfidenceRefreshInterval)
-        {
+        if (concepts.Count == 0)
             return;
+
+        var scopedGraph = _conceptGraph.GetScopedSnapshot(concepts, BridgeConfidenceScopeLimit);
+        if (scopedGraph.Count == 0)
+            return;
+
+        var scopedConcepts = scopedGraph.Keys.ToArray();
+        _bridgeConfidence = new BridgeConfidenceMetric(
+            scopedGraph,
+            symbol => _platonicSpace.GetNearestConcepts(
+                symbol,
+                scopedConcepts,
+                maxNeighbors: BridgeConfidenceNeighborLimit,
+                maxCandidates: BridgeConfidenceScopeLimit));
+
+        var affected = new HashSet<string>(concepts, StringComparer.OrdinalIgnoreCase);
+        foreach (var concept in concepts)
+        {
+            if (!scopedGraph.TryGetValue(concept, out var neighbors))
+                continue;
+
+            foreach (var neighbor in neighbors)
+                affected.Add(neighbor);
         }
 
-        var graph = _conceptGraph.GetSnapshot();
-        _bridgeConfidence = new BridgeConfidenceMetric(graph, _ => Array.Empty<(string, double)>());
-        _lastBridgeConfidenceRefreshStep = _trainStepCount;
+        foreach (var concept in affected)
+            _bridgeConfidenceByConcept[concept] = _bridgeConfidence.ComputeForConcept(concept);
     }
+
+    private double GetBridgeConfidenceForConcept(string concept)
+        => _bridgeConfidenceByConcept.TryGetValue(concept, out var confidence)
+            ? confidence
+            : 0.5;
 
     private static bool IsNegativeText(string text)
         => text.TrimStart().StartsWith("not ", StringComparison.OrdinalIgnoreCase);
@@ -592,7 +627,10 @@ public sealed class GenesisTrainer
         }
 
         if (_conceptGraph != null && concepts.Count > 0)
+        {
             _conceptGraph.ObserveExample(concepts, concepts);
+            RefreshBridgeConfidenceMetricForConcepts(concepts);
+        }
 
         if (_hypotheses != null && concepts.Count > 0)
         {
@@ -615,13 +653,30 @@ public sealed class GenesisTrainer
             return;
 
         var assessment = _spaceManager.Manage();
-        var tool = assessment.RecommendedTool;
-        if (tool == SpaceToolKind.Observe && assessment.NoiseRatio < 0.2)
+        var averageBridge = concepts.Count == 0
+            ? 0.5
+            : concepts.Select(GetBridgeConfidenceForConcept).DefaultIfEmpty(0.5).Average();
+        var relationPressure = assessment.RelationBudget > 0
+            ? Math.Clamp((double)assessment.RelationsAfter / assessment.RelationBudget, 0.0, 2.0)
+            : 0.0;
+        var pressure = Clamp01((assessment.NoiseRatio * 0.55) + ((1.0 - averageBridge) * 0.35) + (Math.Max(0.0, relationPressure - 1.0) * 0.10));
+        TrainSpacePolicyFromTelemetryOutcome(assessment.NoiseRatio, averageBridge, relationPressure);
+        if (pressure < 0.05)
+        {
+            _lastSpacePolicyExperience = null;
             return;
+        }
 
-        var prompt = $"space nodes={assessment.NodesAfter} relations={assessment.RelationsAfter} noise={assessment.NoiseRatio:F3} pressure={assessment.RelationBudget}";
+        var previousAction = _lastSpacePolicyExperience?.ActionLabel ?? "none";
+        var prompt = $"space-policy nodes={assessment.NodesAfter} relations={assessment.RelationsAfter} noise={assessment.NoiseRatio:F3} bridge={averageBridge:F3} relation-pressure={relationPressure:F3} prev-action={previousAction} concepts={string.Join(",", concepts.Take(4))}";
+        var tool = PredictSpaceTool(prompt, allowExploration: true);
         var label = tool.ToString().ToLowerInvariant();
-        TrainSpaceToolPolicy(prompt, label, assessment.NoiseRatio);
+        _lastSpacePolicyExperience = new SpacePolicyExperience(
+            Prompt: prompt,
+            ActionLabel: label,
+            NoiseRatio: assessment.NoiseRatio,
+            AverageBridgeConfidence: averageBridge,
+            RelationPressure: relationPressure);
 
         var primaryId = EnsureTickElement(concepts[0], ElementKind.Function);
         var (updatedState, generated) = TickExecutor.ExecuteTick(
@@ -634,7 +689,7 @@ public sealed class GenesisTrainer
         PromoteDetectedPatterns(label, generated);
     }
 
-    private void TrainSpaceToolPolicy(string input, string output, double pressure)
+    private void TrainSpaceToolPolicy(string input, string output, double reinforcementScale)
     {
         var inputTokens = _tokenizer.Encode(input);
         var targetTokens = _tokenizer.Encode(output, addEos: true);
@@ -644,9 +699,85 @@ public sealed class GenesisTrainer
             inputTokens,
             targetTokens,
             _tokenizer.BosTokenId,
-            lossScale: Math.Clamp(1.0 + pressure, 0.5, 2.0));
+            lossScale: Math.Clamp(reinforcementScale, 0.2, 2.5));
         _model.CloneParametersToBreakGraph();
     }
+
+    private void TrainSpacePolicyFromTelemetryOutcome(
+        double currentNoise,
+        double currentBridge,
+        double currentRelationPressure)
+    {
+        if (_lastSpacePolicyExperience is not { } previous)
+            return;
+
+        var noiseImprovement = previous.NoiseRatio - currentNoise;
+        var bridgeImprovement = currentBridge - previous.AverageBridgeConfidence;
+        var pressureImprovement = Math.Abs(previous.RelationPressure - 1.0) - Math.Abs(currentRelationPressure - 1.0);
+        var reward = (noiseImprovement * 0.55) + (bridgeImprovement * 0.35) + (pressureImprovement * 0.10);
+
+        if (Math.Abs(reward) < 0.005)
+            return;
+
+        var scale = reward > 0
+            ? Math.Clamp(1.0 + (reward * 6.0), 1.0, 2.5)
+            : Math.Clamp(0.9 + (reward * 2.0), 0.2, 0.9);
+        TrainSpaceToolPolicy(previous.Prompt, previous.ActionLabel, scale);
+    }
+
+    private SpaceToolKind PredictSpaceTool(string prompt, bool allowExploration)
+    {
+        var generated = _inferencePolicy.Generate(new GenerationRequest(prompt, MaxNewTokens: 3, ChunkTokenBudget: 3));
+        var toolText = generated.Output?.Trim();
+        var parsed = SpaceToolKind.Observe;
+
+        if (!string.IsNullOrWhiteSpace(toolText) && !TryParseSpaceTool(toolText, out parsed))
+        {
+            var fallbackToken = toolText
+                .Split(new[] { ' ', '\t', '\r', '\n', ',', ';', ':', '.', '|' }, StringSplitOptions.RemoveEmptyEntries)
+                .FirstOrDefault();
+            if (!string.IsNullOrWhiteSpace(fallbackToken) && TryParseSpaceTool(fallbackToken, out var fallback))
+                parsed = fallback;
+        }
+
+        if (allowExploration && Random.Shared.NextDouble() < SpacePolicyExplorationRate)
+            return SampleExplorationAction(parsed);
+
+        return parsed;
+    }
+
+    private static bool TryParseSpaceTool(string value, out SpaceToolKind tool)
+    {
+        tool = SpaceToolKind.Observe;
+        if (string.IsNullOrWhiteSpace(value))
+            return false;
+
+        var normalized = value.Trim().ToLowerInvariant();
+        return normalized switch
+        {
+            "observe" => (tool = SpaceToolKind.Observe) == SpaceToolKind.Observe,
+            "stabilize" => (tool = SpaceToolKind.Stabilize) == SpaceToolKind.Stabilize,
+            "expand" => (tool = SpaceToolKind.Expand) == SpaceToolKind.Expand,
+            "rebalance" => (tool = SpaceToolKind.Rebalance) == SpaceToolKind.Rebalance,
+            "reinforce" => (tool = SpaceToolKind.Reinforce) == SpaceToolKind.Reinforce,
+            _ => false
+        };
+    }
+
+    private static SpaceToolKind SampleExplorationAction(SpaceToolKind preferred)
+    {
+        var options = SpaceToolActions.Where(action => action != preferred).ToArray();
+        if (options.Length == 0)
+            return preferred;
+        return options[Random.Shared.Next(options.Length)];
+    }
+
+    private readonly record struct SpacePolicyExperience(
+        string Prompt,
+        string ActionLabel,
+        double NoiseRatio,
+        double AverageBridgeConfidence,
+        double RelationPressure);
 
     private void UpdateTransformDiscovery(GenesisExample example)
     {
@@ -705,6 +836,24 @@ public sealed class GenesisTrainer
 
         var primarySymbol = concepts[0];
         var primaryId = EnsureTickElement(primarySymbol, ElementKind.Function);
+        var secondaryIds = concepts.Skip(1).Take(4)
+            .Select(c => EnsureTickElement(c, ElementKind.Object))
+            .ToArray();
+        var actionBudget = Math.Clamp(_trainingTickMultiplier + (concepts.Count / 2), 2, 8);
+        var actionsExecuted = 0;
+
+        void ExecuteIfPossible(TickAction action, string promoteKey)
+        {
+            if (actionsExecuted >= actionBudget)
+                return;
+
+            var (updatedState, generated) = TickExecutor.ExecuteTick(action, _tickState);
+            _tickState = updatedState;
+            actionsExecuted++;
+
+            if (generated.Length > 0)
+                PromoteDetectedPatterns(promoteKey, generated);
+        }
 
         if (TryExtractArithmeticObservation(example, out var arithmetic))
         {
@@ -715,43 +864,106 @@ public sealed class GenesisTrainer
             for (var i = 0; i < dimension; i++)
                 delta[i] = outputEmbedding[i] - inputEmbedding[i];
 
-            var (afterLearn, _) = TickExecutor.ExecuteTick(
+            ExecuteIfPossible(
                 new TickAction(
                     Kind: TickKind.LocalLearn,
                     PrimaryElementId: primaryId,
                     Parameter: arithmetic.OperationConcept,
                     AuxiliaryEmbedding: delta),
-                _tickState);
-            _tickState = afterLearn;
+                arithmetic.OperationConcept);
 
             var leftId = EnsureTickElement(arithmetic.LeftToken, ElementKind.Object);
             var rightId = EnsureTickElement(arithmetic.RightToken, ElementKind.Object);
             var resultId = EnsureTickElement(arithmetic.ResultToken, ElementKind.Object);
-            var (afterFold, foldElements) = TickExecutor.ExecuteTick(
+            ExecuteIfPossible(
                 new TickAction(
                     Kind: TickKind.FoldChain,
                     PrimaryElementId: primaryId,
                     SecondaryIds: [leftId, rightId, resultId],
                     Parameter: arithmetic.OperationConcept),
-                _tickState);
-            _tickState = afterFold;
-            PromoteDetectedPatterns(arithmetic.OperationConcept, foldElements);
+                arithmetic.OperationConcept);
+            ExecuteIfPossible(
+                new TickAction(
+                    Kind: TickKind.Gap,
+                    PrimaryElementId: primaryId,
+                    SecondaryIds: [leftId, resultId],
+                    Parameter: arithmetic.OperationConcept),
+                arithmetic.OperationConcept);
+            ExecuteIfPossible(
+                new TickAction(
+                    Kind: TickKind.Analogy,
+                    PrimaryElementId: resultId,
+                    SecondaryIds: [leftId, rightId],
+                    Parameter: arithmetic.OperationConcept),
+                arithmetic.OperationConcept);
+            ExecuteIfPossible(
+                new TickAction(
+                    Kind: TickKind.Relate,
+                    PrimaryElementId: resultId,
+                    Parameter: arithmetic.OperationConcept),
+                arithmetic.OperationConcept);
             return;
         }
 
-        var secondary = concepts.Skip(1).Take(2)
-            .Select(c => EnsureTickElement(c, ElementKind.Object))
-            .ToArray();
-        if (secondary.Length >= 1)
+        if (secondaryIds.Length >= 1)
         {
-            var (updatedState, generated) = TickExecutor.ExecuteTick(
+            ExecuteIfPossible(
+                new TickAction(
+                    Kind: TickKind.Relate,
+                    PrimaryElementId: secondaryIds[0]),
+                primarySymbol);
+            ExecuteIfPossible(
                 new TickAction(
                     Kind: TickKind.FoldChain,
                     PrimaryElementId: primaryId,
-                    SecondaryIds: secondary),
-                _tickState);
-            _tickState = updatedState;
-            PromoteDetectedPatterns(primarySymbol, generated);
+                    SecondaryIds: secondaryIds.Take(3).ToArray()),
+                primarySymbol);
+        }
+
+        if (secondaryIds.Length >= 2)
+        {
+            ExecuteIfPossible(
+                new TickAction(
+                    Kind: TickKind.Gap,
+                    PrimaryElementId: primaryId,
+                    SecondaryIds: [secondaryIds[0], secondaryIds[1]]),
+                primarySymbol);
+            ExecuteIfPossible(
+                new TickAction(
+                    Kind: TickKind.Analogy,
+                    PrimaryElementId: secondaryIds[0],
+                    SecondaryIds: [secondaryIds[1], primaryId]),
+                primarySymbol);
+        }
+
+        var composeCandidate = secondaryIds
+            .Prepend(primaryId)
+            .Select(FindTickElementById)
+            .Where(e => e is not null && e.RelatedTo.Length >= 2)
+            .Cast<PlatonicElement>()
+            .OrderByDescending(e => e.LocalTransformConfidence + e.BridgeConfidence)
+            .FirstOrDefault();
+        if (composeCandidate != null)
+        {
+            ExecuteIfPossible(
+                new TickAction(
+                    Kind: TickKind.Compose,
+                    PrimaryElementId: composeCandidate.Id),
+                primarySymbol);
+            ExecuteIfPossible(
+                new TickAction(
+                    Kind: TickKind.Surprise,
+                    PrimaryElementId: composeCandidate.Id),
+                primarySymbol);
+        }
+
+        if (concepts.Count >= 4 && (_tickState.CurrentTick % 5 == 0))
+        {
+            ExecuteIfPossible(
+                new TickAction(
+                    Kind: TickKind.BranchDetect,
+                    PrimaryElementId: primaryId),
+                primarySymbol);
         }
     }
 
@@ -800,6 +1012,9 @@ public sealed class GenesisTrainer
         if (existing is not null)
             return existing.Id;
 
+        var baseConfidence = GetBridgeConfidenceForConcept(symbol);
+        var kindBias = kind == ElementKind.Function ? 0.1 : 0.0;
+
         var element = new PlatonicElement(
             Id: _tickState.NextId,
             Kind: kind,
@@ -807,7 +1022,7 @@ public sealed class GenesisTrainer
             Symbol: symbol,
             GeneratedAtTick: _tickState.CurrentTick,
             NoveltyScore: 0.6,
-            BridgeConfidence: 0.4,
+            BridgeConfidence: Clamp01(baseConfidence + kindBias),
             RelatedTo: ImmutableArray<int>.Empty,
             GenerationPath: "tick-observe");
 
@@ -819,6 +1034,9 @@ public sealed class GenesisTrainer
 
         return element.Id;
     }
+
+    private PlatonicElement? FindTickElementById(int id)
+        => _tickState.Elements.FirstOrDefault(e => e.Id == id);
 
     private void ObservePlatonicSpace(GenesisExample example, IReadOnlyList<string> concepts)
     {

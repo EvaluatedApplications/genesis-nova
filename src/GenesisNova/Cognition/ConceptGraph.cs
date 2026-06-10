@@ -161,6 +161,61 @@ public class ConceptGraph
             _lock.ExitReadLock();
         }
     }
+
+    /// <summary>
+    /// Get a bounded graph snapshot focused on seed concepts and nearby neighbors.
+    /// This supports fast per-turn confidence updates without scanning the full graph.
+    /// </summary>
+    public ImmutableDictionary<string, ImmutableHashSet<string>> GetScopedSnapshot(
+        IEnumerable<string> seedConcepts,
+        int maxConcepts = 64)
+    {
+        var limit = Math.Clamp(maxConcepts, 4, 256);
+        var queue = new Queue<string>((seedConcepts ?? Array.Empty<string>())
+            .Where(static c => !string.IsNullOrWhiteSpace(c))
+            .Select(static c => c.Trim().ToLowerInvariant())
+            .Distinct(StringComparer.OrdinalIgnoreCase));
+        var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var scoped = new Dictionary<string, ImmutableHashSet<string>>(StringComparer.OrdinalIgnoreCase);
+
+        _lock.EnterReadLock();
+        try
+        {
+            while (queue.Count > 0 && visited.Count < limit)
+            {
+                var concept = queue.Dequeue();
+                if (!visited.Add(concept))
+                    continue;
+
+                if (!_relations.TryGetValue(concept, out var neighbors))
+                {
+                    scoped[concept] = ImmutableHashSet<string>.Empty;
+                    continue;
+                }
+
+                scoped[concept] = neighbors;
+                foreach (var neighbor in neighbors)
+                {
+                    if (visited.Count + queue.Count >= limit)
+                        break;
+                    if (!visited.Contains(neighbor))
+                        queue.Enqueue(neighbor);
+                }
+            }
+
+            var trimmed = scoped.ToDictionary(
+                kvp => kvp.Key,
+                kvp => kvp.Value
+                    .Where(visited.Contains)
+                    .ToImmutableHashSet(StringComparer.OrdinalIgnoreCase),
+                StringComparer.OrdinalIgnoreCase);
+            return trimmed.ToImmutableDictionary(StringComparer.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            _lock.ExitReadLock();
+        }
+    }
     
     /// <summary>
     /// Observe a training example by adding concept relations.

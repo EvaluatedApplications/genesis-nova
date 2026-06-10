@@ -145,6 +145,11 @@ public static class TickExecutor
         
         var relationEmbedding = InterpolateEmbeddings(
             element.Embedding, nearest.Embedding, state.EmbeddingDimension);
+        var bridgeConfidence = ComputeDerivedBridgeConfidence(
+            element,
+            new[] { nearest },
+            noveltyScore: 1.0,
+            fallback: 0.5);
         
         var relation = new PlatonicElement(
             Id: state.NextId,
@@ -154,7 +159,7 @@ public static class TickExecutor
             GeneratedAtTick: state.CurrentTick,
             ComplementId: null,
             NoveltyScore: 1.0,
-            BridgeConfidence: 0.5,
+            BridgeConfidence: bridgeConfidence,
             RelatedTo: ImmutableArray.Create(element.Id, nearest.Id),
             GenerationPath: $"R1:relate:{element.Id},{nearest.Id}"
         );
@@ -185,6 +190,11 @@ public static class TickExecutor
             return new TickResult(null, false, "Insufficient related elements");
         
         var compositionEmbedding = SumEmbeddings(relatedElements, state.EmbeddingDimension);
+        var bridgeConfidence = ComputeDerivedBridgeConfidence(
+            element,
+            relatedElements,
+            noveltyScore: 0.8,
+            fallback: 0.3);
         
         var composition = new PlatonicElement(
             Id: state.NextId,
@@ -194,7 +204,7 @@ public static class TickExecutor
             GeneratedAtTick: state.CurrentTick,
             ComplementId: null,
             NoveltyScore: 0.8,
-            BridgeConfidence: 0.3,
+            BridgeConfidence: bridgeConfidence,
             RelatedTo: ImmutableArray.CreateRange(relatedElements.Select(r => r.Id)),
             GenerationPath: $"R2:compose:{string.Join(",", relatedElements.Select(r => r.Id))}"
         );
@@ -215,12 +225,11 @@ public static class TickExecutor
             return new TickResult(null, false, "Element needs neighbors for surprise");
         
         const double surpriseThreshold = 0.4;
-        var expectedEmbedding = ComputeMeanEmbedding(
-            element.RelatedTo.Select(id => FindElementById(elements, id))
+        var neighbors = element.RelatedTo.Select(id => FindElementById(elements, id))
                 .Where(e => e != null)
                 .Cast<PlatonicElement>()
-                .ToList(),
-            state.EmbeddingDimension);
+                .ToList();
+        var expectedEmbedding = ComputeMeanEmbedding(neighbors, state.EmbeddingDimension);
         
         var surprise = EuclideanDistance(element.Embedding, expectedEmbedding);
         if (surprise < surpriseThreshold)
@@ -232,9 +241,16 @@ public static class TickExecutor
         
         // Probe magnitude: follow surprise in the unexpected direction
         var probeMagnitude = (float)Math.Sqrt(directionEmbedding.Sum(d => d * d));
+        if (probeMagnitude < 1e-6f)
+            probeMagnitude = 1e-6f;
         var probeEmbedding = new double[state.EmbeddingDimension];
         for (int d = 0; d < state.EmbeddingDimension; d++)
             probeEmbedding[d] = element.Embedding[d] + (directionEmbedding[d] / probeMagnitude) * 0.5;
+        var bridgeConfidence = ComputeDerivedBridgeConfidence(
+            element,
+            neighbors,
+            noveltyScore: Math.Min(1.0, surprise),
+            fallback: 0.4);
         
         var probeElement = new PlatonicElement(
             Id: state.NextId,
@@ -244,7 +260,7 @@ public static class TickExecutor
             GeneratedAtTick: state.CurrentTick,
             ComplementId: null,
             NoveltyScore: Math.Min(1.0, surprise),
-            BridgeConfidence: 0.4,
+            BridgeConfidence: bridgeConfidence,
             RelatedTo: ImmutableArray.Create(element.Id),
             GenerationPath: $"R3:surprise:{element.Id}",
             IsHypothesis: true
@@ -279,6 +295,11 @@ public static class TickExecutor
         var analogyEmbedding = new double[state.EmbeddingDimension];
         for (int d = 0; d < state.EmbeddingDimension; d++)
             analogyEmbedding[d] = element.Embedding[d] + delta[d];
+        var bridgeConfidence = ComputeDerivedBridgeConfidence(
+            element,
+            new[] { neighbor, neighborTarget },
+            noveltyScore: 0.9,
+            fallback: 0.3);
         
         var analogyElement = new PlatonicElement(
             Id: state.NextId,
@@ -288,7 +309,7 @@ public static class TickExecutor
             GeneratedAtTick: state.CurrentTick,
             ComplementId: null,
             NoveltyScore: 0.9,
-            BridgeConfidence: 0.3,
+            BridgeConfidence: bridgeConfidence,
             RelatedTo: ImmutableArray.Create(element.Id, neighbor.Id, neighborTarget.Id),
             GenerationPath: $"R4:analogy:{element.Id}~{neighbor.Id}→{neighborTarget.Id}",
             IsHypothesis: true
@@ -317,6 +338,11 @@ public static class TickExecutor
         
         // Close gap via direct relation
         var gapEmbedding = InterpolateEmbeddings(a.Embedding, c.Embedding, state.EmbeddingDimension);
+        var bridgeConfidence = ComputeDerivedBridgeConfidence(
+            element,
+            new[] { a, c },
+            noveltyScore: 0.7,
+            fallback: 0.4);
         
         var gapRelation = new PlatonicElement(
             Id: state.NextId,
@@ -326,7 +352,7 @@ public static class TickExecutor
             GeneratedAtTick: state.CurrentTick,
             ComplementId: null,
             NoveltyScore: 0.7,
-            BridgeConfidence: 0.4,
+            BridgeConfidence: bridgeConfidence,
             RelatedTo: ImmutableArray.Create(a.Id, element.Id, c.Id),
             GenerationPath: $"R5:gap:{a.Id}→{element.Id}→{c.Id}"
         );
@@ -354,7 +380,8 @@ public static class TickExecutor
         {
             LocalTransformDelta = delta,
             LocalTransformConfidence = Math.Min(1.0, element.LocalTransformConfidence + 0.1),
-            LocalTransformObservations = element.LocalTransformObservations + 1
+            LocalTransformObservations = element.LocalTransformObservations + 1,
+            BridgeConfidence = Clamp01((element.BridgeConfidence * 0.85) + (Math.Min(1.0, element.LocalTransformConfidence + 0.1) * 0.15))
         };
         
         // Note: This modifies in place via PlatonicState update pattern
@@ -375,12 +402,12 @@ public static class TickExecutor
         var childElement = new PlatonicElement(
             Id: state.NextId,
             Kind: ElementKind.Function,
-            Embedding: new double[state.EmbeddingDimension],  // offset from parent
+            Embedding: element.Embedding.ToArray(),
             Symbol: $"{element.Symbol}_branch",
             GeneratedAtTick: state.CurrentTick,
             ComplementId: null,
             NoveltyScore: 0.6,
-            BridgeConfidence: 0.5,
+            BridgeConfidence: Clamp01((element.BridgeConfidence * 0.9) + 0.05),
             RelatedTo: ImmutableArray.Create(element.Id),
             GenerationPath: $"R7:branch:{element.Id}",
             DevolvedParentId: element.Id
@@ -392,10 +419,11 @@ public static class TickExecutor
         var updatedParent = element with
         {
             IsDevolved = true,
-            DevolvedChildIds = ImmutableArray.Create(state.NextId)
+            DevolvedChildIds = ImmutableArray.Create(state.NextId),
+            BridgeConfidence = Clamp01(element.BridgeConfidence * 0.95)
         };
         
-        return new TickResult(childElement, true, "R7 branch created");
+        return new TickResult(updatedParent, true, "R7 branch created");
     }
     
     /// <summary>R8: Discover fold chain pattern</summary>
@@ -420,6 +448,11 @@ public static class TickExecutor
             return new TickResult(null, false, "Chain elements not found");
         
         var foldEmbedding = SumEmbeddings(chainElements, state.EmbeddingDimension);
+        var bridgeConfidence = ComputeDerivedBridgeConfidence(
+            element,
+            chainElements,
+            noveltyScore: 0.85,
+            fallback: 0.4);
         
         var foldElement = new PlatonicElement(
             Id: state.NextId,
@@ -429,7 +462,7 @@ public static class TickExecutor
             GeneratedAtTick: state.CurrentTick,
             ComplementId: null,
             NoveltyScore: 0.85,
-            BridgeConfidence: 0.4,
+            BridgeConfidence: bridgeConfidence,
             RelatedTo: ImmutableArray.CreateRange(chainElements.Select(c => c.Id)),
             GenerationPath: $"R8:fold:{string.Join(",", chainElements.Select(c => c.Id))}"
         );
@@ -449,6 +482,7 @@ public static class TickExecutor
         var toolName = string.IsNullOrWhiteSpace(parameter)
             ? "observe"
             : parameter.Trim().ToLowerInvariant();
+        var bridgeConfidence = Clamp01((element.BridgeConfidence * 0.85) + 0.1);
 
         var toolElement = new PlatonicElement(
             Id: state.NextId,
@@ -458,7 +492,7 @@ public static class TickExecutor
             GeneratedAtTick: state.CurrentTick,
             ComplementId: null,
             NoveltyScore: 0.55,
-            BridgeConfidence: 0.45,
+            BridgeConfidence: bridgeConfidence,
             RelatedTo: ImmutableArray.Create(element.Id),
             GenerationPath: $"R9:space-tool:{toolName}",
             IsHypothesis: true);
@@ -477,7 +511,30 @@ public static class TickExecutor
             .Where(e => e.Kind == element.Kind && e.Id != element.Id)
             .OrderBy(e => EuclideanDistance(e.Embedding, element.Embedding))
             .FirstOrDefault();
-    
+
+    private static double ComputeDerivedBridgeConfidence(
+        PlatonicElement primary,
+        IEnumerable<PlatonicElement> related,
+        double noveltyScore,
+        double fallback)
+    {
+        var sample = new List<double>();
+        if (!double.IsNaN(primary.BridgeConfidence))
+            sample.Add(Clamp01(primary.BridgeConfidence));
+        var relatedCount = 0;
+        foreach (var element in related)
+        {
+            if (!double.IsNaN(element.BridgeConfidence))
+                sample.Add(Clamp01(element.BridgeConfidence));
+            relatedCount++;
+        }
+
+        var baseConfidence = sample.Count > 0 ? sample.Average() : fallback;
+        var relationBoost = Math.Min(0.15, relatedCount * 0.03);
+        var noveltyPenalty = Math.Max(0.0, Clamp01(noveltyScore) - 0.8) * 0.1;
+        return Clamp01(baseConfidence + relationBoost - noveltyPenalty);
+    }
+     
     private static double[] InterpolateEmbeddings(double[] a, double[] b, int dim)
     {
         var result = new double[dim];
@@ -514,4 +571,7 @@ public static class TickExecutor
         }
         return Math.Sqrt(sum);
     }
+
+    private static double Clamp01(double value)
+        => Math.Max(0.0, Math.Min(1.0, value));
 }

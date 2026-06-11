@@ -4,7 +4,11 @@ public sealed record PlatonicNodeSnapshot(
     string Name,
     double[] PositiveFace,
     double[] NegativeFace,
-    int ObservationCount);
+    int ObservationCount,
+    int UseCount = 0,
+    int SuccessCount = 0,
+    int FailureCount = 0,
+    long LastUsedStep = 0);
 
 public sealed record PlatonicRelationSnapshot(
     string Left,
@@ -12,7 +16,11 @@ public sealed record PlatonicRelationSnapshot(
     double ThesisContradiction,
     double LastObservedContradiction,
     double SynthesisContradiction,
-    int ObservationCount);
+    int ObservationCount,
+    int UseCount = 0,
+    int SuccessCount = 0,
+    int FailureCount = 0,
+    long LastUsedStep = 0);
 
 public sealed record PlatonicMemorySnapshot(
     int FaceDimension,

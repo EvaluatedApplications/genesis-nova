@@ -1,8 +1,9 @@
+using EvalApp.Consumer;
 using GenesisNova.Train;
 
 namespace GenesisNova.Runtime;
 
-internal sealed class PlanAutonomousRoundStep
+internal sealed class PlanAutonomousRoundStep : IStep<GenesisAutonomousTrainTaskData>
 {
     private readonly GenesisAutonomousTrainingPlanner _planner;
 
@@ -11,8 +12,9 @@ internal sealed class PlanAutonomousRoundStep
         _planner = planner;
     }
 
-    public GenesisAutonomousTrainTaskData Execute(GenesisAutonomousTrainTaskData data)
+    public ValueTask<GenesisAutonomousTrainTaskData> ExecuteAsync(GenesisAutonomousTrainTaskData data, CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested();
         data.UiLogger?.Invoke($"[auto] round {data.RoundIndex + 1}: planner entering...");
         var plan = _planner.SuggestComposite(data.Request, data.History, data.RoundIndex);
         data.UiLogger?.Invoke($"[auto] round {plan.Round}: planner ready.");
@@ -23,6 +25,6 @@ internal sealed class PlanAutonomousRoundStep
                 $"[auto]   dataset={creator.CreatorName} pool={creator.SampleCount} train={creator.TrainCount} difficulty={creator.Difficulty} priority={creator.Priority:F3}");
         }
 
-        return data with { Plan = plan };
+        return ValueTask.FromResult(data with { Plan = plan });
     }
 }

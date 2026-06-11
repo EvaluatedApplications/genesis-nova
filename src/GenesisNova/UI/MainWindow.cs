@@ -25,6 +25,7 @@ public class MainWindow : Form
     private PlatonicActivationView? _latestActivation;
     private string _latestVisualizerRoute = "decision=n/a";
     private int _activeTrainingOperations;
+    private readonly SemaphoreSlim _replCommandGate = new(1, 1);
     private SplitContainer? _replVisualizerSplit;
     private DateTime _lastTrimTime = DateTime.MinValue;
     private const int TrimDebounceMs = 500;  // Only trim if >500ms since last trim
@@ -73,6 +74,7 @@ public class MainWindow : Form
         _autonomousTrainingCts?.Cancel();
         _autonomousTrainingCts?.Dispose();
         _autonomousTrainingCts = null;
+        _replCommandGate.Dispose();
         base.OnFormClosed(e);
     }
 
@@ -317,6 +319,7 @@ public class MainWindow : Form
 
         Task.Run(async () =>
         {
+            await _replCommandGate.WaitAsync();
             try
             {
                 var result = await ExecuteReplPromptAsync(command);
@@ -325,6 +328,10 @@ public class MainWindow : Form
             catch (Exception ex)
             {
                 AppendToRepl($"Error: {ex.Message}\n> ", Color.Red);
+            }
+            finally
+            {
+                _replCommandGate.Release();
             }
         });
     }
@@ -379,7 +386,7 @@ public class MainWindow : Form
                 var payload = trimmed["/trainfile ".Length..].Trim();
                 var (path, epochs) = ParsePathAndEpochs(payload);
                 var resolvedPath = ResolveTrainingPath(path);
-                var report = await _runtime.TrainAsync(resolvedPath, epochs);
+                var report = await ExecuteTraining(resolvedPath, epochs);
                 return
                     $"trained examples={report.ExampleCount} epochs={report.Epochs} loss={report.AverageLoss.TotalLoss:F4} " +
                     $"success={report.ExampleSuccessRate:P1}";
@@ -391,7 +398,22 @@ public class MainWindow : Form
         var modelInput = trimmed;
         try
         {
-            var predict = await _runtime.PredictAsync(modelInput);
+            GenesisPredictTaskData? predict = null;
+            var waitingNoticeShown = false;
+            while (predict is null)
+            {
+                predict = await _runtime.TryPredictAsync(modelInput, gateWaitMilliseconds: 200);
+                if (predict is not null)
+                    break;
+
+                if (!waitingNoticeShown)
+                {
+                    waitingNoticeShown = true;
+                    AppendToRepl("[repl] waiting for a safe model slot...\n", Color.DarkGray);
+                }
+
+                await Task.Delay(120);
+            }
             var output = predict.Result?.Output?.Trim();
             if (string.IsNullOrWhiteSpace(output))
                 output = "(no response)";
@@ -1432,10 +1454,16 @@ public class MainWindow : Form
         try
         {
             var logPath = Path.Combine(AppContext.BaseDirectory, "train.log");
-            var report = await _runtime.TrainAsync(
-                filePath, 
-                epochs, 
-                logPath: logPath);
+            GenesisTrainingReport? report = null;
+            for (var epoch = 0; epoch < epochs; epoch++)
+            {
+                report = await _runtime.TrainAsync(
+                    filePath,
+                    1,
+                    logPath: logPath);
+            }
+            if (report is null)
+                throw new InvalidOperationException("Training report missing.");
             
             sw.Stop();
             AppendOutput($"Training complete in {sw.Elapsed.TotalSeconds:F1}s");

@@ -7,17 +7,20 @@ namespace GenesisNova.Train;
 public sealed record PreTokenizedExample(
     int[] InputTokens,
     int[] TargetTokens,
+    GenesisTrainingExampleKind TrainingKind,
     GenesisExample Original);
 
 internal sealed class ExampleProgressAccumulator
 {
-    public ExampleProgressAccumulator(GenesisExample example)
+    public ExampleProgressAccumulator(GenesisExample example, GenesisTrainingExampleKind trainingKind)
     {
         Example = example;
+        TrainingKind = trainingKind;
         BestTokenLoss = double.MaxValue;
     }
 
     public GenesisExample Example { get; }
+    public GenesisTrainingExampleKind TrainingKind { get; }
     public int SeenCount { get; private set; }
     public int SuccessCount { get; private set; }
     public double TokenLossSum { get; private set; }
@@ -75,12 +78,6 @@ public sealed class GenesisTrainingOrchestrator
 {
     private readonly GenesisTrainer _trainer;
     private readonly GenesisNovaConfig _config;
-    private static readonly IReadOnlyDictionary<string, GenesisTrainingExampleKind> CreatorKinds =
-        ExampleCreatorRegistry.All
-            .Concat(ExampleCreatorRegistry.Legacy)
-            .GroupBy(x => x.Name, StringComparer.OrdinalIgnoreCase)
-            .ToDictionary(g => g.Key, g => g.First().TrainingKind, StringComparer.OrdinalIgnoreCase);
-
     public GenesisTrainingOrchestrator(GenesisTrainer trainer, GenesisNovaConfig? config = null)
     {
         _trainer = trainer;
@@ -111,7 +108,7 @@ public sealed class GenesisTrainingOrchestrator
             foreach (var (input, output) in generated)
             {
                 // No route labels - implicit routing emerges from model training
-                examples.Add(new GenesisExample(input, output));
+                examples.Add(new GenesisExample(input, output, creator.TrainingKind, creator.Name));
             }
         }
 
@@ -129,8 +126,7 @@ public sealed class GenesisTrainingOrchestrator
         IReadOnlyList<GenesisExample> examples,
         int epochs,
         Action<string>? logger = null,
-        CancellationToken cancellationToken = default,
-        IReadOnlyDictionary<string, string>? exampleCreatorMap = null)
+        CancellationToken cancellationToken = default)
     {
         if (examples.Count == 0)
             throw new ArgumentException("No training examples provided.", nameof(examples));
@@ -191,6 +187,7 @@ public sealed class GenesisTrainingOrchestrator
             cancellationToken.ThrowIfCancellationRequested();
             var epochStart = System.Diagnostics.Stopwatch.StartNew();
             var epochSum = 0.0;
+            var epochProcessedExampleCount = 0;
             var batchCount = 0;
             var epochPool = BuildEpochPool(preTokenized, perExampleProgress);
 
@@ -240,37 +237,39 @@ public sealed class GenesisTrainingOrchestrator
                     sumMemory += loss.MemoryLoss;
                     sumTotal += loss.TotalLoss;
                     epochSum += loss.TotalLoss * batch.Count;
+                    epochProcessedExampleCount += batch.Count;
                     foreach (var update in batchResult.ExampleLosses)
                     {
                         var key = ComposeExampleKey(update.Example);
+                        var trainingKind = update.Example.TrainingKind;
+                        var normalizedUpdate = trainingKind == GenesisTrainingExampleKind.PromptAnswer
+                            ? update
+                            : update with { IsCorrect = false };
                         if (!perExampleProgress.TryGetValue(key, out var entry))
                         {
-                            entry = new ExampleProgressAccumulator(update.Example);
+                            entry = new ExampleProgressAccumulator(update.Example, trainingKind);
                             perExampleProgress[key] = entry;
                         }
 
-                        entry.Observe(update);
-                        if (update.WasSkipped)
+                        entry.Observe(normalizedUpdate);
+                        if (update.WasSkipped && update.IsCorrect)
                             skippedCorrectExampleCount++;
-                        if (exampleCreatorMap is not null &&
-                            exampleCreatorMap.TryGetValue(key, out var creatorName) &&
-                            !string.IsNullOrWhiteSpace(creatorName))
-                        {
-                            var trainingKind = CreatorKinds.TryGetValue(creatorName, out var creatorKind)
-                                ? creatorKind
-                                : GenesisTrainingExampleKind.WindowedText;
-                            if (trainingKind == GenesisTrainingExampleKind.PromptAnswer)
-                                promptAnswerExampleCount += 1;
-                            else
-                                windowedTextExampleCount += 1;
 
+                        if (trainingKind == GenesisTrainingExampleKind.PromptAnswer)
+                            promptAnswerExampleCount += 1;
+                        else if (trainingKind == GenesisTrainingExampleKind.WindowedText)
+                            windowedTextExampleCount += 1;
+
+                        if (!string.IsNullOrWhiteSpace(update.Example.SourceCreatorName))
+                        {
+                            var creatorName = update.Example.SourceCreatorName;
                             if (!perCreatorProgress.TryGetValue(creatorName, out var creatorEntry))
                             {
                                 creatorEntry = new CreatorProgressAccumulator(creatorName, trainingKind);
                                 perCreatorProgress[creatorName] = creatorEntry;
                             }
 
-                            creatorEntry.Observe(update);
+                            creatorEntry.Observe(normalizedUpdate);
                         }
                     }
 
@@ -334,12 +333,23 @@ public sealed class GenesisTrainingOrchestrator
                     $"noise={spaceResult.NoiseRatio:F3}");
             }
 
-            var epochLoss = epochSum / Math.Max(1, examples.Count);
-            var epochSuccessRate = perExampleProgress.Count == 0
+            var epochLoss = epochSum / Math.Max(1, epochProcessedExampleCount);
+            var epochPromptAnswer = perExampleProgress.Values
+                .Where(x => x.TrainingKind == GenesisTrainingExampleKind.PromptAnswer)
+                .ToArray();
+            var epochWindowed = perExampleProgress.Values
+                .Where(x => x.TrainingKind == GenesisTrainingExampleKind.WindowedText)
+                .ToArray();
+            var epochSuccessRate = epochPromptAnswer.Length == 0
                 ? 0.0
-                : perExampleProgress.Values.Average(x => x.SuccessRate);
+                : epochPromptAnswer.Average(x => x.SuccessRate);
+            var epochWindowedTokenLoss = epochWindowed.Length == 0
+                ? 0.0
+                : epochWindowed.Average(x => x.AverageTokenLoss);
             logger?.Invoke($"[EPOCH] {e}/{epochs} loss={epochLoss:F4} time={epochStart.ElapsedMilliseconds:D5}ms batches={batchCount}");
-            logger?.Invoke($"[EPOCH] {e}/{epochs} example_success={epochSuccessRate:P1}");
+            logger?.Invoke(
+                $"[EPOCH] {e}/{epochs} prompt_answer_success={epochSuccessRate:P1} " +
+                $"windowed_text_token_loss={epochWindowedTokenLoss:F4}");
         }
 
         overallStart.Stop();
@@ -351,12 +361,24 @@ public sealed class GenesisTrainingOrchestrator
         var avgTotalLoss = sumTotal / Math.Max(1, totalSteps);
         var contradictionRate = EstimateContradictionRate(examples);
         var trackedExamples = perExampleProgress.Values.ToArray();
-        var correctCount = trackedExamples.Count(x => x.SuccessRate >= 0.5);
-        var incorrectCount = Math.Max(0, trackedExamples.Length - correctCount);
-        var successRate = trackedExamples.Length == 0
+        var promptAnswerExamples = trackedExamples
+            .Where(x => x.TrainingKind == GenesisTrainingExampleKind.PromptAnswer)
+            .ToArray();
+        var windowedTextExamples = trackedExamples
+            .Where(x => x.TrainingKind == GenesisTrainingExampleKind.WindowedText)
+            .ToArray();
+        var correctCount = promptAnswerExamples.Count(x => x.SuccessRate >= 0.5);
+        var incorrectCount = Math.Max(0, promptAnswerExamples.Length - correctCount);
+        var successRate = promptAnswerExamples.Length == 0
             ? 0.0
-            : trackedExamples.Average(x => x.SuccessRate);
-        var weakExamples = trackedExamples
+            : promptAnswerExamples.Average(x => x.SuccessRate);
+        var promptAnswerAvgTokenLoss = promptAnswerExamples.Length == 0
+            ? 0.0
+            : promptAnswerExamples.Average(x => x.AverageTokenLoss);
+        var windowedTextAvgTokenLoss = windowedTextExamples.Length == 0
+            ? 0.0
+            : windowedTextExamples.Average(x => x.AverageTokenLoss);
+        var weakExamples = promptAnswerExamples
             .OrderBy(x => x.SuccessRate)
             .ThenByDescending(x => x.AverageTokenLoss)
             .ThenByDescending(x => x.SeenCount)
@@ -403,7 +425,10 @@ public sealed class GenesisTrainingOrchestrator
             .ToArray();
 
         logger?.Invoke($"[DONE] Training complete in {overallStart.ElapsedMilliseconds / 1000.0:F1}s. Avg loss={avgTokenLoss:F4}");
-        logger?.Invoke($"[DONE] per-example success={successRate:P1} tracked={trackedExamples.Length} weak={weakExamples.Length}");
+        logger?.Invoke(
+            $"[DONE] prompt-answer success={successRate:P1} tracked={promptAnswerExamples.Length} weak={weakExamples.Length}");
+        logger?.Invoke(
+            $"[DONE] token-loss prompt-answer={promptAnswerAvgTokenLoss:F4} windowed-text={windowedTextAvgTokenLoss:F4}");
         if (creatorProgress.Length > 0)
         {
             foreach (var creator in creatorProgress)
@@ -440,6 +465,8 @@ public sealed class GenesisTrainingOrchestrator
             SkippedCorrectExampleCount: skippedCorrectExampleCount,
             PromptAnswerExampleCount: promptAnswerExampleCount,
             WindowedTextExampleCount: windowedTextExampleCount,
+            PromptAnswerAverageTokenLoss: promptAnswerAvgTokenLoss,
+            WindowedTextAverageTokenLoss: windowedTextAvgTokenLoss,
             WeakExamples: weakExamples,
             CreatorProgress: creatorProgress);
     }
@@ -495,9 +522,11 @@ public sealed class GenesisTrainingOrchestrator
             if (target.Length > maxTargetTokens)
             {
                 target = target.Take(maxTargetTokens).ToArray();
+                if (target.Length > 0)
+                    target[^1] = _trainer.EosTokenId;
                 trimmed++;
             }
-            result.Add(new PreTokenizedExample(input, target, ex));
+            result.Add(new PreTokenizedExample(input, target, ex.TrainingKind, ex));
         }
 
         if (trimmed > 0)

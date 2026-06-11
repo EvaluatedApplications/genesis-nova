@@ -224,9 +224,7 @@ public sealed class PublicTextCorpusCreator : IExampleCreator
 
     private static string ApplyPromptVariant(string input, int difficulty, int ordinal)
     {
-        var variants = PromptVariants(Math.Max(0, difficulty));
-        var prompt = variants[(ordinal + Math.Max(0, difficulty)) % variants.Length];
-        return prompt.Replace("{q}", NormalizeSnippet(input), StringComparison.Ordinal);
+        return NormalizeSnippet(input);
     }
 
     [Obsolete("Use LoadCorpusSnippetsAsync() instead.", false)]
@@ -828,12 +826,7 @@ public sealed class PublicTextCorpusCreator : IExampleCreator
     }
 
     private static string[] PromptVariants(int difficulty)
-        => difficulty switch
-        {
-            0 => ["{q}", "question: {q}"],
-            1 => ["{q}", "question: {q}", "solve: {q}", "answer: {q}"],
-            _ => ["{q}", "question: {q}", "solve: {q}", "answer: {q}", "please answer: {q}", "math question: {q}"]
-        };
+        => ["{q}"];
 
     private string ResolveLocalCorpusPath()
     {

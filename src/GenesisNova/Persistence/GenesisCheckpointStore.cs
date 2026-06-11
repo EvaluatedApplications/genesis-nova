@@ -22,20 +22,23 @@ public static class GenesisCheckpointStore
         GenesisNeuralModel model,
         PlatonicMemorySnapshot? platonicSpace = null,
         GenesisConversationSnapshot? conversation = null,
-        GenesisAutonomousTrainingSnapshot? autonomousTraining = null)
+        GenesisAutonomousTrainingSnapshot? autonomousTraining = null,
+        string? trainerLearningStateJson = null)
     {
         var snapshot = model.Export();
         var payload = new GenesisCheckpoint(
             Config: config,
             Vocabulary: tokenizer.Vocabulary.ToArray(),
             Embeddings: MatrixSnapshot.From(snapshot.Embeddings),
-            RouteWeights: new MatrixSnapshot(0, 0, []),
-            RouteBias: [],
             OutputWeights: MatrixSnapshot.From(snapshot.OutputWeights),
             OutputBias: snapshot.OutputBias,
             PlatonicSpace: platonicSpace,
             Conversation: conversation,
-            AutonomousTraining: autonomousTraining);
+            AutonomousTraining: autonomousTraining,
+            RouteWeights: snapshot.RouteWeights is not null ? MatrixSnapshot.From(snapshot.RouteWeights) : null,
+            RouteBias: snapshot.RouteBias,
+            TrainerLearningStateJson: trainerLearningStateJson,
+            Version: GenesisCheckpoint.CurrentVersion);
 
         var json = JsonSerializer.Serialize(payload, JsonOptions);
         var dir = Path.GetDirectoryName(path);
@@ -60,10 +63,11 @@ public static class GenesisCheckpointStore
     public static (GenesisNovaConfig Config, WhitespaceGenesisTokenizer Tokenizer, GenesisNeuralModel Model, PlatonicMemorySnapshot? PlatonicSpace, GenesisConversationSnapshot? Conversation, GenesisAutonomousTrainingSnapshot? AutonomousTraining) Load(string path)
     {
         var payload = ReadPayload(path);
-        return CreateRuntimePayload(payload, payload.Config);
+        var loaded = CreateRuntimePayload(payload, payload.Config);
+        return (loaded.Config, loaded.Tokenizer, loaded.Model, loaded.PlatonicSpace, loaded.Conversation, loaded.AutonomousTraining);
     }
 
-    public static (GenesisNovaConfig Config, WhitespaceGenesisTokenizer Tokenizer, GenesisNeuralModel Model, PlatonicMemorySnapshot? PlatonicSpace, GenesisConversationSnapshot? Conversation, GenesisAutonomousTrainingSnapshot? AutonomousTraining) LoadForRuntime(
+    public static (GenesisNovaConfig Config, WhitespaceGenesisTokenizer Tokenizer, GenesisNeuralModel Model, PlatonicMemorySnapshot? PlatonicSpace, GenesisConversationSnapshot? Conversation, GenesisAutonomousTrainingSnapshot? AutonomousTraining, string? TrainerLearningStateJson) LoadForRuntime(
         string path,
         GenesisNovaConfig runtimeConfig)
     {
@@ -76,6 +80,28 @@ public static class GenesisCheckpointStore
         var json = ExecuteWithCheckpointLock(path, () => File.ReadAllText(path));
         return JsonSerializer.Deserialize<GenesisCheckpoint>(json, JsonOptions)
             ?? throw new InvalidOperationException("Failed to deserialize checkpoint.");
+    }
+
+    public static void CopyCheckpointFile(string sourcePath, string destinationPath)
+    {
+        ExecuteWithCheckpointLock(sourcePath, () =>
+        {
+            var dir = Path.GetDirectoryName(destinationPath);
+            if (!string.IsNullOrWhiteSpace(dir))
+                Directory.CreateDirectory(dir);
+
+            var tempPath = $"{destinationPath}.{Environment.ProcessId}.{Guid.NewGuid():N}.tmp";
+            try
+            {
+                File.Copy(sourcePath, tempPath, overwrite: true);
+                File.Move(tempPath, destinationPath, overwrite: true);
+            }
+            finally
+            {
+                if (File.Exists(tempPath))
+                    File.Delete(tempPath);
+            }
+        });
     }
 
     private static void ExecuteWithCheckpointLock(string path, Action action)
@@ -102,7 +128,7 @@ public static class GenesisCheckpointStore
         }
     }
 
-    private static (GenesisNovaConfig Config, WhitespaceGenesisTokenizer Tokenizer, GenesisNeuralModel Model, PlatonicMemorySnapshot? PlatonicSpace, GenesisConversationSnapshot? Conversation, GenesisAutonomousTrainingSnapshot? AutonomousTraining) CreateRuntimePayload(
+    private static (GenesisNovaConfig Config, WhitespaceGenesisTokenizer Tokenizer, GenesisNeuralModel Model, PlatonicMemorySnapshot? PlatonicSpace, GenesisConversationSnapshot? Conversation, GenesisAutonomousTrainingSnapshot? AutonomousTraining, string? TrainerLearningStateJson) CreateRuntimePayload(
         GenesisCheckpoint payload,
         GenesisNovaConfig runtimeConfig)
     {
@@ -125,17 +151,23 @@ public static class GenesisCheckpointStore
         };
 
         var model = new GenesisNeuralModel(effectiveConfig);
+        var routeWeights = IsUsableRouteSnapshot(payload.RouteWeights, payload.RouteBias, payload.Embeddings.Cols)
+            ? payload.RouteWeights!.ToMatrix()
+            : null;
+        var routeBias = routeWeights is not null ? payload.RouteBias!.ToArray() : null;
         var snapshot = new ModelSnapshot(
             payload.Embeddings.ToMatrix(),
             payload.OutputWeights.ToMatrix(),
-            payload.OutputBias);
+            payload.OutputBias,
+            routeWeights,
+            routeBias);
 
         if (effectiveConfig.HiddenSize > payload.Config.HiddenSize)
             snapshot = ExpandSnapshot(snapshot, effectiveConfig.HiddenSize);
 
         model.Import(snapshot);
 
-        return (effectiveConfig, tokenizer, model, payload.PlatonicSpace, payload.Conversation, payload.AutonomousTraining);
+        return (effectiveConfig, tokenizer, model, payload.PlatonicSpace, payload.Conversation, payload.AutonomousTraining, payload.TrainerLearningStateJson);
     }
 
     private static ModelSnapshot ExpandSnapshot(ModelSnapshot snapshot, int hiddenSize)
@@ -143,10 +175,29 @@ public static class GenesisCheckpointStore
         if (snapshot.Embeddings.GetLength(1) >= hiddenSize)
             return snapshot;
 
-        var vocab = snapshot.Embeddings.GetLength(0);
         var expandedEmb = ExpandColumns(snapshot.Embeddings, hiddenSize, fill: 0.0);
         var expandedOut = ExpandRows(snapshot.OutputWeights, hiddenSize, fill: 0.0);
-        return new ModelSnapshot(expandedEmb, expandedOut, snapshot.OutputBias.ToArray(), snapshot.RouteWeights, snapshot.RouteBias);
+        var expandedRoute = snapshot.RouteWeights is not null
+            ? ExpandRows(snapshot.RouteWeights, hiddenSize, fill: 0.0)
+            : null;
+        return new ModelSnapshot(
+            expandedEmb,
+            expandedOut,
+            snapshot.OutputBias.ToArray(),
+            expandedRoute,
+            snapshot.RouteBias?.ToArray());
+    }
+
+    private static bool IsUsableRouteSnapshot(MatrixSnapshot? routeWeights, double[]? routeBias, int hiddenSize)
+    {
+        if (routeWeights is null || routeBias is null)
+            return false;
+
+        return routeWeights.Rows == hiddenSize
+            && routeWeights.Rows > 0
+            && routeWeights.Cols > 0
+            && routeWeights.Values.Length == routeWeights.Rows * routeWeights.Cols
+            && routeBias.Length == routeWeights.Cols;
     }
 
     private static double[,] ExpandColumns(double[,] matrix, int targetCols, double fill)

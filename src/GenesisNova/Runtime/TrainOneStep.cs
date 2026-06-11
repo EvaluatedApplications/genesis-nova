@@ -1,6 +1,8 @@
+using EvalApp.Consumer;
+
 namespace GenesisNova.Runtime;
 
-internal sealed class TrainOneStep
+internal sealed class TrainOneStep : IStep<GenesisTrainOneTaskData>
 {
     private readonly GenesisRuntimeState _state;
 
@@ -9,9 +11,10 @@ internal sealed class TrainOneStep
         _state = state;
     }
 
-    public GenesisTrainOneTaskData Execute(GenesisTrainOneTaskData data)
+    public ValueTask<GenesisTrainOneTaskData> ExecuteAsync(GenesisTrainOneTaskData data, CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested();
         var loss = _state.Trainer.TrainStep(data.Example);
-        return data with { Loss = loss };
+        return ValueTask.FromResult(data with { Loss = loss });
     }
 }

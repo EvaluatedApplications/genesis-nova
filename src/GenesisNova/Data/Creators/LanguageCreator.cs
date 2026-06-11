@@ -26,74 +26,18 @@ public sealed class LanguageCreator : IExampleCreator
         if (_pairs.Length == 0)
             return ImmutableArray<(string, string)>.Empty;
 
-        var variants = PromptVariants(Math.Max(0, difficulty));
         var examples = ImmutableArray.CreateBuilder<(string Input, string Output)>(count);
         for (var i = 0; i < count; i++)
         {
             var (q, a) = _pairs[i % _pairs.Length];
-            var input = ApplyVariant(q, variants[i % variants.Length]);
-            examples.Add((input, a));
+            examples.Add((NormalizeQuestion(q), a));
         }
 
         return examples.ToImmutable();
     }
 
-    private static string[] PromptVariants(int difficulty)
-        => difficulty switch
-        {
-            0 => ExpandSynonyms(
-                ["{q}", "{questionWord}: {q}"],
-                new Dictionary<string, string[]>
-                {
-                    ["{questionWord}"] = ["question", "prompt"]
-                }),
-            1 => ExpandSynonyms(
-                ["{q}", "{questionWord}: {q}", "{pleaseLead}: {q}", "{answerLead}: {q}"],
-                new Dictionary<string, string[]>
-                {
-                    ["{questionWord}"] = ["question", "prompt"],
-                    ["{pleaseLead}"] = ["please answer", "please respond"],
-                    ["{answerLead}"] = ["answer this", "reply to this"]
-                }),
-            2 => ExpandSynonyms(
-                ["{q}", "{questionWord}: {q}", "{pleaseLead}: {q}", "{answerLead}: {q}", "{introLead}: {q}", "{userLead}: {q}"],
-                new Dictionary<string, string[]>
-                {
-                    ["{questionWord}"] = ["question", "prompt"],
-                    ["{pleaseLead}"] = ["please answer", "please respond"],
-                    ["{answerLead}"] = ["answer this", "reply to this"],
-                    ["{introLead}"] = ["i have a question", "quick question"],
-                    ["{userLead}"] = ["user asks", "the user asks"]
-                }),
-            _ => ExpandSynonyms(
-                ["{q}", "{questionWord}: {q}", "{pleaseLead}: {q}", "{answerLead}: {q}", "{introLead}: {q}", "{userLead}: {q}", "{sentenceLead}: {q}", "{clarityLead}: {q}", "{continueLead}: {q}"],
-                new Dictionary<string, string[]>
-                {
-                    ["{questionWord}"] = ["question", "prompt"],
-                    ["{pleaseLead}"] = ["please answer", "please respond"],
-                    ["{answerLead}"] = ["answer this", "reply to this"],
-                    ["{introLead}"] = ["i have a question", "quick question"],
-                    ["{userLead}"] = ["user asks", "the user asks"],
-                    ["{sentenceLead}"] = ["respond in one short sentence", "answer in one concise sentence"],
-                    ["{clarityLead}"] = ["for clarity, can you answer this question", "to be clear, can you answer this"],
-                    ["{continueLead}"] = ["before we continue, tell me", "before moving on, tell me"]
-                })
-        };
-
-    private static string ApplyVariant(string question, string template)
-        => template.Replace("{q}", NormalizeQuestion(question), StringComparison.Ordinal);
-
     private static string NormalizeQuestion(string question)
-    {
-        var trimmed = question.Trim();
-        if (trimmed.Length == 0)
-            return trimmed;
-
-        if (trimmed.EndsWith("?") || trimmed.EndsWith("!") || trimmed.EndsWith("."))
-            return trimmed;
-
-        return $"{trimmed}?";
-    }
+        => question.Trim();
 
     private static string[] ExpandSynonyms(string[] templates, IReadOnlyDictionary<string, string[]> replacements)
     {

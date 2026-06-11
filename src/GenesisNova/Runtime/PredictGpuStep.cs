@@ -1,8 +1,9 @@
+using EvalApp.Consumer;
 using GenesisNova.Infer;
 
 namespace GenesisNova.Runtime;
 
-internal sealed class PredictGpuStep
+internal sealed class PredictGpuStep : IStep<GenesisPredictTaskData>
 {
     private readonly GenesisRuntimeState _state;
 
@@ -11,12 +12,13 @@ internal sealed class PredictGpuStep
         _state = state;
     }
 
-    public GenesisPredictTaskData Execute(GenesisPredictTaskData data)
+    public ValueTask<GenesisPredictTaskData> ExecuteAsync(GenesisPredictTaskData data, CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested();
         var result = _state.Inference.Generate(new GenerationRequest(
             Input: data.Input,
             MaxNewTokens: data.MaxNewTokens));
         _state.Trainer.ObserveInferenceResult(data.Input, result.Output, result);
-        return data with { Result = result };
+        return ValueTask.FromResult(data with { Result = result });
     }
 }

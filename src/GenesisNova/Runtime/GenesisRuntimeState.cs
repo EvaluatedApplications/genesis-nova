@@ -1,3 +1,4 @@
+using System.Text.Json;
 using GenesisNova.Core;
 using GenesisNova.Infer;
 using GenesisNova.Model;
@@ -45,7 +46,8 @@ public sealed class GenesisRuntimeState
         WhitespaceGenesisTokenizer tokenizer,
         GenesisNeuralModel model,
         PlatonicMemorySnapshot? platonicSpaceSnapshot = null,
-        GenesisConversationSnapshot? conversationSnapshot = null)
+        GenesisConversationSnapshot? conversationSnapshot = null,
+        string? trainerLearningStateJson = null)
     {
         ConfigureCpuThreadPool(config);
         Config = config;
@@ -56,6 +58,7 @@ public sealed class GenesisRuntimeState
             Memory.ImportSnapshot(platonicSpaceSnapshot);
         Conversation = new GenesisConversationMemory();
         Trainer = new GenesisTrainer(Tokenizer, Model, Memory, config);
+        ImportTrainerLearningState(trainerLearningStateJson);
         if (conversationSnapshot is not null)
             Conversation.ImportSnapshot(conversationSnapshot);
         Orchestrator = new GenesisTrainingOrchestrator(Trainer, config);
@@ -68,6 +71,22 @@ public sealed class GenesisRuntimeState
             Trainer.TransformLibrary,
             Trainer.TransformAccumulator);
         Trainer.SetInferencePolicy(Inference);
+    }
+
+    private void ImportTrainerLearningState(string? trainerLearningStateJson)
+    {
+        if (string.IsNullOrWhiteSpace(trainerLearningStateJson))
+            return;
+
+        try
+        {
+            var state = JsonSerializer.Deserialize<GenesisTrainerLearningState>(trainerLearningStateJson);
+            Trainer.ImportLearningState(state);
+        }
+        catch
+        {
+            Trainer.ImportLearningState(null);
+        }
     }
 
     private static void ConfigureCpuThreadPool(GenesisNovaConfig config)

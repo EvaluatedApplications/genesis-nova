@@ -39,6 +39,10 @@ public sealed class GenesisTrainer
     private int _trainStepCount;
     private double _cachedConservationLoss;
     private readonly Dictionary<string, int> _conceptCoverageCounts = new(StringComparer.OrdinalIgnoreCase);
+    private readonly SpaceDecisionJournal _spaceDecisionJournal = new(MaxSpaceDecisionJournalEntries);
+    private readonly Queue<MasteredRehearsalExample> _masteredRehearsalRing = new();
+    private readonly Dictionary<int, int> _spacePolicyActionCounters = new();
+    private readonly Queue<ConceptPlanDecisionJournalEntry> _conceptPlanDecisionJournal = new();
     private static readonly SpaceToolKind[] SpaceToolActions =
     [
         SpaceToolKind.DefaultAlgorithm,
@@ -60,7 +64,8 @@ public sealed class GenesisTrainer
         SpaceToolKind.AnchorBindingEdit,
         SpaceToolKind.AttentionScopeSelect,
         SpaceToolKind.CommitLevelSet,
-        SpaceToolKind.RewardTagEmit
+        SpaceToolKind.RewardTagEmit,
+        SpaceToolKind.DiscoverAbstractions
     ];
     private const double SpacePolicyExplorationRate = 0.10;
     private const int SpacePolicyRewardHorizon = 4;
@@ -68,6 +73,12 @@ public sealed class GenesisTrainer
     private const int MaxConceptCount = 24;
     private const double MinConceptMirrorCoverage = 0.35;
     private const double ConceptPlanRewardBaseline = 0.55;
+    private const int MaxSpaceDecisionJournalEntries = 256;
+    private const int MaxMasteredRehearsalEntries = 64;
+    private const int MasteredRehearsalInterval = 25;
+    private const double MasteredRehearsalProbability = 0.15;
+    private const double MasteredRehearsalLossScale = 0.25;
+    private const int MaxConceptPlanDecisionJournalEntries = 256;
 
     private int _biasAppliedCount;
     private int _biasAppliedCorrectCount;
@@ -80,6 +91,9 @@ public sealed class GenesisTrainer
     private int _fallbackCount;
     private int _fallbackCorrectCount;
     private int _telemetryObservationCount;
+    private int _spaceToolParseFailureCount;
+    private readonly Queue<GenesisExample> _pendingInferenceIntrospection = new();
+    private const int MaxPendingInferenceIntrospection = 128;
     private InferenceTelemetryHint _inferenceTelemetryHint = InferenceTelemetryHint.Default;
     private int _conceptPlanCalls;
     private int _conceptPlanDirectCount;
@@ -87,6 +101,11 @@ public sealed class GenesisTrainer
     private int _conceptPlanFallbackCount;
     private double _conceptPlanCoverageSum;
     private double _conceptPlanNoveltySum;
+    private int _masteredSkippedCount;
+    private int _masteredRehearsalCount;
+    private int _masteredInterleavedRehearsalCount;
+    private int _spacePolicyRetrospectiveCreditCount;
+    private int _conceptPlanRetrospectiveCreditCount;
     
     // Quality metrics caching (Performance optimization)
     private const int QualityLossRefreshInterval = 24;
@@ -175,12 +194,139 @@ public sealed class GenesisTrainer
     public int[] EncodeTarget(string output)
         => _tokenizer.Encode(output, addEos: true);
 
+    public int EosTokenId => _tokenizer.EosTokenId;
+
     public FoldPathDiscovery FoldPathDiscovery => _foldPathDiscovery;
     public TransformAccumulator TransformAccumulator => _transformAccumulator;
     public TransformLibrary? TransformLibrary => _transforms;
     public int TickPatternPromotions => _tickPatternPromotions;
     public int HiddenSize => _model.HiddenSize;
     public InferenceTelemetryHint InferenceTelemetryHint => _inferenceTelemetryHint;
+    public int SpaceToolParseFailureCount => _spaceToolParseFailureCount;
+    public int PendingInferenceIntrospectionCount => _pendingInferenceIntrospection.Count;
+    public int MasteredRehearsalCount => _masteredRehearsalCount;
+    public int MasteredInterleavedRehearsalCount => _masteredInterleavedRehearsalCount;
+    
+    public GenesisTrainerLearningState ExportLearningState()
+        => new(
+            SpaceDecisionJournalEntries: _spaceDecisionJournal.Entries,
+            MasteredRehearsalRing: _masteredRehearsalRing.ToArray(),
+            SpacePolicyActionCounters: new Dictionary<int, int>(_spacePolicyActionCounters),
+            SpacePolicyTrajectory: _spacePolicyTrajectory
+                .Select(t => new SpacePolicyTransitionSnapshot(
+                    t.State.ToDeterministicEncoding(),
+                    t.ActionId,
+                    t.NoiseRatio,
+                    t.AverageBridgeConfidence,
+                    t.RelationPressure,
+                    t.StepIndex))
+                .ToArray(),
+            ConceptCoverageCounts: new Dictionary<string, int>(_conceptCoverageCounts, StringComparer.OrdinalIgnoreCase),
+            Telemetry: new GenesisTrainerTelemetryState(
+                _biasAppliedCount,
+                _biasAppliedCorrectCount,
+                _biasNotAppliedCount,
+                _biasNotAppliedCorrectCount,
+                _platonicConfidenceCorrectCount,
+                _platonicConfidenceIncorrectCount,
+                _platonicConfidenceCorrectSum,
+                _platonicConfidenceIncorrectSum,
+                _fallbackCount,
+                _fallbackCorrectCount,
+                _telemetryObservationCount,
+                _spaceToolParseFailureCount,
+                _conceptPlanCalls,
+                _conceptPlanDirectCount,
+                _conceptPlanMergedCount,
+                _conceptPlanFallbackCount,
+                _conceptPlanCoverageSum,
+                _conceptPlanNoveltySum,
+                _masteredSkippedCount,
+                _masteredRehearsalCount,
+                _masteredInterleavedRehearsalCount,
+                _spacePolicyRetrospectiveCreditCount,
+                _conceptPlanRetrospectiveCreditCount),
+            SpacePolicyStepCounter: _spacePolicyStepCounter,
+            PriorSpaceActionId: _priorSpaceActionId,
+            ConceptPlanDecisionJournalEntries: _conceptPlanDecisionJournal.ToArray());
+
+    public void ImportLearningState(GenesisTrainerLearningState? state)
+    {
+        if (state is null)
+            return;
+
+        _spaceDecisionJournal.ReplaceWith((state.SpaceDecisionJournalEntries ?? Array.Empty<SpaceDecisionJournalEntry>()).Take(MaxSpaceDecisionJournalEntries));
+        _masteredRehearsalRing.Clear();
+        foreach (var example in (state.MasteredRehearsalRing ?? Array.Empty<MasteredRehearsalExample>()).Where(e => !string.IsNullOrWhiteSpace(e.Input) && !string.IsNullOrWhiteSpace(e.Output)).TakeLast(MaxMasteredRehearsalEntries))
+            _masteredRehearsalRing.Enqueue(example);
+
+        _spacePolicyActionCounters.Clear();
+        foreach (var pair in state.SpacePolicyActionCounters ?? new Dictionary<int, int>())
+        {
+            if (pair.Key >= 0 && pair.Key <= SpaceToolActions.Length)
+                _spacePolicyActionCounters[pair.Key] = Math.Clamp(pair.Value, 0, int.MaxValue);
+        }
+
+        _spacePolicyTrajectory.Clear();
+        foreach (var item in (state.SpacePolicyTrajectory ?? Array.Empty<SpacePolicyTransitionSnapshot>()).TakeLast(MaxSpacePolicyTrajectory))
+        {
+            if (!SpacePolicyState.TryFromDeterministicEncoding(item.StateEncoding, out var transitionState))
+                continue;
+            _spacePolicyTrajectory.Enqueue(new SpacePolicyTransition(
+                transitionState,
+                Math.Clamp(item.ActionId, 0, SpaceToolActions.Length),
+                Math.Clamp(item.NoiseRatio, 0.0, 2.0),
+                Math.Clamp(item.AverageBridgeConfidence, 0.0, 1.0),
+                Math.Clamp(item.RelationPressure, 0.0, 2.0),
+                Math.Max(0, item.StepIndex)));
+        }
+
+        _conceptCoverageCounts.Clear();
+        foreach (var pair in state.ConceptCoverageCounts ?? new Dictionary<string, int>())
+        {
+            var concept = NormalizeConceptToken(pair.Key);
+            if (concept.Length == 0)
+                continue;
+            _conceptCoverageCounts[concept] = Math.Clamp(pair.Value, 0, int.MaxValue);
+        }
+
+        var telemetry = state.Telemetry;
+        if (telemetry is not null)
+        {
+            _biasAppliedCount = Math.Max(0, telemetry.BiasAppliedCount);
+            _biasAppliedCorrectCount = Math.Max(0, telemetry.BiasAppliedCorrectCount);
+            _biasNotAppliedCount = Math.Max(0, telemetry.BiasNotAppliedCount);
+            _biasNotAppliedCorrectCount = Math.Max(0, telemetry.BiasNotAppliedCorrectCount);
+            _platonicConfidenceCorrectCount = Math.Max(0, telemetry.PlatonicConfidenceCorrectCount);
+            _platonicConfidenceIncorrectCount = Math.Max(0, telemetry.PlatonicConfidenceIncorrectCount);
+            _platonicConfidenceCorrectSum = Math.Max(0.0, telemetry.PlatonicConfidenceCorrectSum);
+            _platonicConfidenceIncorrectSum = Math.Max(0.0, telemetry.PlatonicConfidenceIncorrectSum);
+            _fallbackCount = Math.Max(0, telemetry.FallbackCount);
+            _fallbackCorrectCount = Math.Max(0, telemetry.FallbackCorrectCount);
+            _telemetryObservationCount = Math.Max(0, telemetry.TelemetryObservationCount);
+            _spaceToolParseFailureCount = Math.Max(0, telemetry.SpaceToolParseFailureCount);
+            _conceptPlanCalls = Math.Max(0, telemetry.ConceptPlanCalls);
+            _conceptPlanDirectCount = Math.Max(0, telemetry.ConceptPlanDirectCount);
+            _conceptPlanMergedCount = Math.Max(0, telemetry.ConceptPlanMergedCount);
+            _conceptPlanFallbackCount = Math.Max(0, telemetry.ConceptPlanFallbackCount);
+            _conceptPlanCoverageSum = Math.Max(0.0, telemetry.ConceptPlanCoverageSum);
+            _conceptPlanNoveltySum = Math.Max(0.0, telemetry.ConceptPlanNoveltySum);
+            _masteredSkippedCount = Math.Max(0, telemetry.MasteredSkippedCount);
+            _masteredRehearsalCount = Math.Max(0, telemetry.MasteredRehearsalCount);
+            _masteredInterleavedRehearsalCount = Math.Max(0, telemetry.MasteredInterleavedRehearsalCount);
+            _spacePolicyRetrospectiveCreditCount = Math.Max(0, telemetry.SpacePolicyRetrospectiveCreditCount);
+            _conceptPlanRetrospectiveCreditCount = Math.Max(0, telemetry.ConceptPlanRetrospectiveCreditCount);
+        }
+
+        _spacePolicyStepCounter = Math.Max(0, state.SpacePolicyStepCounter);
+        _priorSpaceActionId = Math.Clamp(state.PriorSpaceActionId, 0, SpaceToolActions.Length);
+        _conceptPlanDecisionJournal.Clear();
+        foreach (var entry in (state.ConceptPlanDecisionJournalEntries ?? Array.Empty<ConceptPlanDecisionJournalEntry>()).TakeLast(MaxConceptPlanDecisionJournalEntries))
+        {
+            if (!string.IsNullOrWhiteSpace(entry.Prompt) && entry.SelectedLatentConcepts.Count > 0)
+                _conceptPlanDecisionJournal.Enqueue(entry);
+        }
+    }
     
     public void SetInferencePolicy(GenesisInferenceEngine inferencePolicy)
         => _inferencePolicy = inferencePolicy ?? throw new ArgumentNullException(nameof(inferencePolicy));
@@ -198,7 +344,8 @@ public sealed class GenesisTrainer
             inputTokens,
             targetTokens,
             _tokenizer.BosTokenId,
-            lossScale: weight);
+            lossScale: weight,
+            routeLabel: ResolveRouteLabel(example));
         
         // Break computation graph after training
         _model.CloneParametersToBreakGraph();
@@ -239,7 +386,8 @@ public sealed class GenesisTrainer
             inputTokens,
             targetTokens,
             _tokenizer.BosTokenId,
-            lossScale: weight);
+            lossScale: weight,
+            routeLabel: ResolveRouteLabel(example));
          
         // Break computation graph after each example to allow sequential training
         _model.CloneParametersToBreakGraph();
@@ -294,16 +442,10 @@ public sealed class GenesisTrainer
         {
             var result = _inferencePolicy.Generate(request);
             
-            // Observe telemetry: resolve correctness (prefer explicit, fall back to heuristic)
-            var correctness = expectedCorrect ?? DeriveHeuristicSuccess(result);
-            _inferencePolicy.ReportTelemetryOutcome(correctness, result);
-            
-            // Apply adaptive hints - CRITICAL: without this, inference diverges between REPL and training
-            _inferenceTelemetryHint = ComputeInferenceTelemetryHint();
-            _inferencePolicy.ApplyTelemetryHint(_inferenceTelemetryHint);
-            
-            // Track observation count for diagnostics
-            _telemetryObservationCount++;
+            var outcome = expectedCorrect.HasValue
+                ? (expectedCorrect.Value ? InferenceOutcome.Success : InferenceOutcome.Failure)
+                : DeriveHeuristicOutcome(result);
+            ObserveKnownInferenceOutcome(outcome, result);
             
             return result;
         }
@@ -374,10 +516,29 @@ public sealed class GenesisTrainer
           var concepts = ObserveLearningSignals(example);
           var shouldSkip = ShouldSkipTrainingExample(example, targetTokens);
           TrainingLoss loss;
+          var effectiveWeight = weight;
           if (shouldSkip)
           {
              skippedCorrectCount++;
-             loss = new TrainingLoss(0, 0);
+             _masteredSkippedCount++;
+             AddMasteredRehearsalExample(example);
+             if (Random.Shared.NextDouble() < MasteredRehearsalProbability)
+             {
+                effectiveWeight = weight * MasteredRehearsalLossScale;
+                _masteredRehearsalCount++;
+                loss = _model.TrainExample(
+                   inputTokens,
+                   targetTokens,
+                   _tokenizer.BosTokenId,
+                   lossScale: effectiveWeight,
+                   routeLabel: ResolveRouteLabel(example));
+                totalTokenLoss += loss.TokenLoss * targetTokens.Length * effectiveWeight;
+                totalTokenWeight += targetTokens.Length * effectiveWeight;
+             }
+             else
+             {
+                loss = new TrainingLoss(0, 0);
+             }
           }
           else
           {
@@ -385,12 +546,14 @@ public sealed class GenesisTrainer
                 inputTokens,
                 targetTokens,
                 _tokenizer.BosTokenId,
-                lossScale: weight);
-             totalTokenLoss += loss.TokenLoss * targetTokens.Length * weight;
-             totalTokenWeight += targetTokens.Length * weight;
+                lossScale: effectiveWeight,
+                routeLabel: ResolveRouteLabel(example));
+             totalTokenLoss += loss.TokenLoss * targetTokens.Length * effectiveWeight;
+             totalTokenWeight += targetTokens.Length * effectiveWeight;
           }
                   
           _trainStepCount++;
+          MaybeInterleaveMasteredRehearsal();
 
           var consistencyLoss = EstimatePlatonicConsistency(concepts, IsNegativeText(example.Output));
           var conservationLoss = EstimateConservationDrift(inputTokens);
@@ -415,7 +578,7 @@ public sealed class GenesisTrainer
               conservationLoss,
               memoryLoss,
               stepTotal);
-          var isCorrect = shouldSkip || loss.TokenLoss <= 0.25;
+          var isCorrect = shouldSkip;
           perExample.Add(new GenesisPerExampleLoss(example, stepLoss, isCorrect, shouldSkip));
            
           // Collect gen-0 only periodically to keep memory stable without full collection pauses.
@@ -520,7 +683,7 @@ public sealed class GenesisTrainer
     public double ComputeSchedulingPriority(GenesisExample example)
     {
        var weight = ComputeTrainingWeight(example);
-       var concepts = ResolveConcepts(example);
+       var concepts = ResolveConceptsReadOnly(example);
        if (concepts.Count == 0)
            return weight;
 
@@ -576,10 +739,13 @@ public sealed class GenesisTrainer
         return _cachedConservationLoss;
     }
 
-    private IReadOnlyList<string> ResolveConcepts(GenesisExample example)
-        => ResolveConcepts(example.Input, example.Output);
+    private IReadOnlyList<string> ResolveConceptsReadOnly(GenesisExample example)
+        => ResolveConcepts(example.Input, example.Output, trainConceptPlanPolicy: false);
 
-    private IReadOnlyList<string> ResolveConcepts(string input, string output)
+    private IReadOnlyList<string> ResolveConcepts(GenesisExample example, bool trainConceptPlanPolicy = false)
+        => ResolveConcepts(example.Input, example.Output, trainConceptPlanPolicy);
+
+    private IReadOnlyList<string> ResolveConcepts(string input, string output, bool trainConceptPlanPolicy = false)
     {
         var mirror = ExtractMirrorConcepts(input, output);
         var prompt = BuildConceptPlanPrompt(input, output, mirror);
@@ -590,7 +756,7 @@ public sealed class GenesisTrainer
                 MaxNewTokens: maxTokens,
                 ChunkTokenBudget: Math.Min(16, maxTokens)),
             contextLabel: "concept-plan",
-            expectedCorrect: null);  // Let heuristic determine correctness
+            expectedCorrect: null);
          
         var planned = ParseConceptPlan(generated.Output);
         var mode = ConceptPlanSelectionMode.PlannedDirect;
@@ -640,12 +806,13 @@ public sealed class GenesisTrainer
             SelectedConcepts: selected,
             Mode: mode,
             MirrorCoverage: Math.Clamp(mirrorCoverage, 0.0, 1.0),
-            NoveltyRatio: Math.Clamp(noveltyRatio, 0.0, 1.0)));
+            NoveltyRatio: Math.Clamp(noveltyRatio, 0.0, 1.0)),
+            trainConceptPlanPolicy);
          
         return selected;
     }
 
-    private void ObserveConceptPlanTelemetry(ConceptPlanTelemetry telemetry)
+    private void ObserveConceptPlanTelemetry(ConceptPlanTelemetry telemetry, bool trainConceptPlanPolicy)
     {
         _conceptPlanCalls++;
         _conceptPlanCoverageSum += telemetry.MirrorCoverage;
@@ -677,9 +844,13 @@ public sealed class GenesisTrainer
         var scale = centeredReward >= 0
             ? Math.Clamp(1.0 + (centeredReward * 2.8), 1.0, 2.4)
             : Math.Clamp(0.9 + (centeredReward * 1.8), 0.3, 0.9);
+        if (!trainConceptPlanPolicy)
+            return;
+
         var target = string.Join(' ', telemetry.SelectedConcepts.Take(MaxConceptCount));
         if (string.IsNullOrWhiteSpace(target))
             return;
+        JournalConceptPlanDecision(telemetry.Prompt, target, telemetry.SelectedConcepts);
         TrainConceptPlanPolicy(telemetry.Prompt, target, scale);
     }
 
@@ -729,10 +900,47 @@ public sealed class GenesisTrainer
         return words.Length == 0 ? ["unknown"] : words;
     }
 
+    /// <summary>
+    /// Resolves the route-classification supervision label for an example. Honors an explicit
+    /// <see cref="GenesisExample.RouteLabel"/> when present; otherwise derives one heuristically so
+    /// the widened 3-way route head (0 = neural-only, 1 = platonic-direct, 2 = platonic-assisted)
+    /// gets a training signal without requiring new labeled data:
+    ///   - Input is a bare compact arithmetic expression AND output is a single number  -> 1 (direct).
+    ///   - Input/output otherwise CONTAINS an arithmetic sub-expression alongside words  -> 2 (assisted).
+    ///   - Everything else                                                               -> null (no
+    ///     route supervision; leaves the head free to learn neural-only from token loss alone).
+    /// Additive and backward-compatible: returns the existing label untouched when one is supplied.
+    /// </summary>
+    private static int? ResolveRouteLabel(GenesisExample example)
+    {
+        if (example.RouteLabel is >= 0 and < GenesisNova.Model.GenesisNeuralModel.RouteCount)
+            return example.RouteLabel;
+        if (example.RouteLabel.HasValue)
+            return null; // out-of-range stored label — ignore rather than mislabel.
+
+        var input = example.Input ?? string.Empty;
+        var output = example.Output ?? string.Empty;
+
+        var bareExpr = System.Text.RegularExpressions.Regex.IsMatch(
+            input, @"^\s*-?\d+(?:\.\d+)?\s*[+\-*/x]\s*-?\d+(?:\.\d+)?\s*$");
+        var bareNumberOut = System.Text.RegularExpressions.Regex.IsMatch(
+            output, @"^\s*-?\d+(?:\.\d+)?\s*$");
+        if (bareExpr && bareNumberOut)
+            return 1; // platonic-direct: pure arithmetic in, pure number out.
+
+        var hasSubExpr = System.Text.RegularExpressions.Regex.IsMatch(
+            input + " " + output, @"-?\d+(?:\.\d+)?\s*[+\-*/x]\s*-?\d+(?:\.\d+)?");
+        var hasWords = System.Text.RegularExpressions.Regex.IsMatch(output, @"[A-Za-z]{2,}");
+        if (hasSubExpr && hasWords)
+            return 2; // platonic-assisted: computation embedded in a natural-language answer.
+
+        return null;
+    }
+
     private double ComputeTrainingWeight(GenesisExample example)
     {
         var weight = 1.0;
-        var concepts = ResolveConcepts(example);
+        var concepts = ResolveConceptsReadOnly(example);
         
         // PHASE 1: BridgeConfidence metric (replaces arbitrary weights with ionization energy)
         if (_bridgeConfidence != null && concepts.Count > 0 && _conceptGraph != null)
@@ -847,14 +1055,45 @@ public sealed class GenesisTrainer
             return;
 
         var example = new GenesisExample(input ?? string.Empty, output ?? string.Empty);
-        _ = ObserveLearningSignals(example, trackCoverage: false);
+        var outcome = ResolveInferenceOutcome(example, telemetry, isCorrect);
+        if (outcome == InferenceOutcome.Success)
+        {
+            _ = ObserveLearningSignals(example, trackCoverage: false, trainConceptPlanPolicy: false);
+        }
+        else if (outcome == InferenceOutcome.Unknown)
+        {
+            EnqueuePendingInferenceIntrospection(example);
+        }
+
         if (telemetry is not null)
-            ObserveInferenceTelemetry(example, telemetry, isCorrect);
+            ObserveInferenceTelemetry(telemetry, outcome);
     }
 
-    private void ObserveInferenceTelemetry(GenesisExample example, GenerationResult telemetry, bool? isCorrect)
+    private void ObserveInferenceTelemetry(GenerationResult telemetry, InferenceOutcome outcome)
     {
-        var resolvedCorrectness = isCorrect ?? TryResolveCorrectness(example) ?? DeriveHeuristicSuccess(telemetry);
+        ObserveKnownInferenceOutcome(outcome, telemetry);
+    }
+
+    private InferenceOutcome ResolveInferenceOutcome(GenesisExample example, GenerationResult? telemetry, bool? isCorrect)
+    {
+        if (isCorrect.HasValue)
+            return isCorrect.Value ? InferenceOutcome.Success : InferenceOutcome.Failure;
+
+        var arithmeticCorrectness = TryResolveCorrectness(example);
+        if (arithmeticCorrectness.HasValue)
+            return arithmeticCorrectness.Value ? InferenceOutcome.Success : InferenceOutcome.Failure;
+
+        return telemetry is null
+            ? InferenceOutcome.Unknown
+            : DeriveHeuristicOutcome(telemetry);
+    }
+
+    private void ObserveKnownInferenceOutcome(InferenceOutcome outcome, GenerationResult telemetry)
+    {
+        if (outcome == InferenceOutcome.Unknown)
+            return;
+
+        var resolvedCorrectness = outcome == InferenceOutcome.Success;
         _inferencePolicy.ReportTelemetryOutcome(resolvedCorrectness, telemetry);
 
         _telemetryObservationCount++;
@@ -893,8 +1132,17 @@ public sealed class GenesisTrainer
                 _fallbackCorrectCount++;
         }
 
+        ObserveRetrospectiveEvidenceCredit(telemetry, resolvedCorrectness);
+
         _inferenceTelemetryHint = ComputeInferenceTelemetryHint();
         _inferencePolicy.ApplyTelemetryHint(_inferenceTelemetryHint);
+    }
+
+    private void EnqueuePendingInferenceIntrospection(GenesisExample example)
+    {
+        _pendingInferenceIntrospection.Enqueue(example);
+        while (_pendingInferenceIntrospection.Count > MaxPendingInferenceIntrospection)
+            _pendingInferenceIntrospection.Dequeue();
     }
 
     private bool? TryResolveCorrectness(GenesisExample example)
@@ -904,18 +1152,8 @@ public sealed class GenesisTrainer
         return arithmetic.AbsoluteError <= 0.05;
     }
 
-    private static bool DeriveHeuristicSuccess(GenerationResult result)
-    {
-        // Conservative heuristic: only mark as successful if confidence is high
-        if (result.UsedPlatonicQuery)
-            return result.PlatonicConfidence >= 0.75 && !result.UsedNeuralFallback;
-
-        if (result.UsedNeuralFallback)
-            return result.AppliedBiasCount > 0 && result.AverageBiasMagnitude > 0.15;
-
-        // Fallback neural: no output = definitely wrong
-        return false;
-    }
+    private static InferenceOutcome DeriveHeuristicOutcome(GenerationResult _)
+        => InferenceOutcome.Unknown;
 
     private InferenceTelemetryHint ComputeInferenceTelemetryHint()
     {
@@ -952,11 +1190,17 @@ public sealed class GenesisTrainer
             EnableContextBias: enableContextBias);
     }
 
-    private IReadOnlyList<string> ObserveLearningSignals(GenesisExample example, bool trackCoverage = true)
+    private IReadOnlyList<string> ObserveLearningSignals(
+        GenesisExample example,
+        bool trackCoverage = true,
+        bool allowTransformDiscovery = true,
+        bool allowSpaceToolLoop = true,
+        bool trainConceptPlanPolicy = true)
     {
-        var concepts = ResolveConcepts(example);
+        var concepts = ResolveConcepts(example, trainConceptPlanPolicy);
         ObservePlatonicSpace(example, concepts);
-        UpdateTransformDiscovery(example);
+        if (allowTransformDiscovery)
+            UpdateTransformDiscovery(example);
         var hasArithmetic = TryExtractArithmeticObservation(example, out _);
         var baseTicks = Math.Max(1, _trainingTickMultiplier / 2);
         var conceptBoost = Math.Clamp((concepts.Count - 1) / 3, 0, 2);
@@ -967,7 +1211,8 @@ public sealed class GenesisTrainer
             : Math.Clamp(baseTicks + conceptBoost + structuralBoost + arithmeticBoost, 1, 24);
         for (var i = 0; i < tickIterations; i++)
             RunTickPatternLoop(example, concepts);
-        RunSpaceToolLoop(concepts);
+        if (allowSpaceToolLoop)
+            RunSpaceToolLoop(concepts);
 
         if (trackCoverage)
         {
@@ -1020,10 +1265,40 @@ public sealed class GenesisTrainer
         }
 
         var state = CreateSpacePolicyState(assessment, averageBridge, relationPressure, _priorSpaceActionId, concepts);
-        var tool = PredictSpaceTool(state, allowExploration: true);
+        if (!TryPredictSpaceTool(state, allowExploration: true, out var tool))
+        {
+            TrainSpaceToolPolicy(state.ToDeterministicEncoding(), EncodeSpaceToolActionId(0), 0.10);
+            return;
+        }
+
         var actionId = ToSpaceToolActionId(tool);
         _priorSpaceActionId = actionId;
+        _spacePolicyActionCounters.TryGetValue(actionId, out var actionCount);
+        _spacePolicyActionCounters[actionId] = actionCount + 1;
         EnqueueSpacePolicyTransition(state, actionId, assessment.NoiseRatio, averageBridge, relationPressure);
+        _spaceDecisionJournal.Record(new SpaceDecisionJournalEntry(
+            Step: _spacePolicyStepCounter,
+            ActionId: actionId,
+            Tool: tool.ToString(),
+            AffectedConcepts: concepts.Take(8)
+                .Select(NormalizeConceptToken)
+                .Where(c => c.Length > 0)
+                .Concat(new[]
+                {
+                    $"state:{state.ConceptFeatures}",
+                    FormattableString.Invariant($"noise:{Math.Clamp(assessment.NoiseRatio, 0.0, 2.0):F1}"),
+                    FormattableString.Invariant($"bridge:{Math.Clamp(averageBridge, 0.0, 1.0):F1}"),
+                    FormattableString.Invariant($"pressure:{Math.Clamp(relationPressure, 0.0, 2.0):F1}")
+                })
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray(),
+            StateEncoding: state.ToDeterministicEncoding(),
+            PreMutationNoiseRatio: assessment.NoiseRatio,
+            PreMutationAverageBridgeConfidence: averageBridge,
+            PreMutationRelationPressure: relationPressure,
+            PreMutationNodes: assessment.NodesAfter,
+            PreMutationRelations: assessment.RelationsAfter,
+            AccumulatedRetrospectiveReward: 0.0));
         var label = ToSpaceToolLabel(tool);
 
         _ = _spaceManager.ExecuteTool(
@@ -1044,6 +1319,105 @@ public sealed class GenesisTrainer
     private void TrainSpaceToolPolicy(string input, string output, double reinforcementScale)
         => TrainControlPolicy(input, output, reinforcementScale);
 
+    private void ObserveRetrospectiveEvidenceCredit(GenerationResult telemetry, bool success)
+    {
+        var evidence = telemetry.Evidence;
+        if (evidence is null || evidence.Count == 0)
+            return;
+
+        _platonicSpace.ReinforceEvidence(evidence, success);
+        var evidenceConcepts = evidence
+            .SelectMany(e => new[] { e.Concept, e.RelatedConcept })
+            .Where(c => !string.IsNullOrWhiteSpace(c))
+            .Select(c => NormalizeConceptToken(c!))
+            .Where(c => c.Length > 0)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (evidenceConcepts.Count == 0)
+            return;
+
+        var contribution = Math.Clamp(evidence.Sum(e => Math.Abs(e.Contribution)) / Math.Max(1, evidence.Count), 0.05, 1.0);
+        var direction = success ? 1.0 : -1.0;
+        foreach (var entry in _spaceDecisionJournal.FindOverlapping(evidenceConcepts).Take(24))
+        {
+            var age = Math.Max(0, _spacePolicyStepCounter - entry.Step);
+            var discount = 1.0 / (1.0 + (age / 16.0));
+            var reward = direction * 0.08 * contribution * discount;
+            var targetAction = reward >= 0.0 ? entry.ActionId : 0;
+            var scale = reward >= 0.0
+                ? Math.Clamp(0.25 + Math.Abs(reward), 0.10, 0.50)
+                : Math.Clamp(0.08 + Math.Abs(reward), 0.05, 0.25);
+            TrainSpaceToolPolicy(entry.StateEncoding, EncodeSpaceToolActionId(targetAction), scale);
+            _spaceDecisionJournal.ApplyRetrospectiveReward(entry.Step, entry.ActionId, reward);
+            _spacePolicyRetrospectiveCreditCount++;
+        }
+
+        ApplyConceptPlanRetrospectiveCredit(evidenceConcepts, success, contribution);
+    }
+
+    private void ApplyConceptPlanRetrospectiveCredit(IReadOnlySet<string> evidenceConcepts, bool success, double contribution)
+    {
+        if (!success || evidenceConcepts.Count == 0)
+            return;
+
+        foreach (var entry in _conceptPlanDecisionJournal.Where(e => e.SelectedLatentConcepts.Any(evidenceConcepts.Contains)).TakeLast(12))
+        {
+            var age = Math.Max(0, _trainStepCount - entry.Step);
+            var discount = 1.0 / (1.0 + (age / 32.0));
+            var scale = Math.Clamp(0.12 + (0.10 * contribution * discount), 0.05, 0.35);
+            TrainConceptPlanPolicy(entry.Prompt, entry.Target, scale);
+            _conceptPlanRetrospectiveCreditCount++;
+        }
+    }
+
+    private void JournalConceptPlanDecision(string prompt, string target, IReadOnlyList<string> selectedConcepts)
+    {
+        var latent = selectedConcepts
+            .Select(NormalizeConceptToken)
+            .Where(c => c.Length > 0 && !_conceptCoverageCounts.ContainsKey(c))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(MaxConceptCount)
+            .ToArray();
+        if (latent.Length == 0)
+            return;
+
+        _conceptPlanDecisionJournal.Enqueue(new ConceptPlanDecisionJournalEntry(_trainStepCount, prompt, target, latent));
+        while (_conceptPlanDecisionJournal.Count > MaxConceptPlanDecisionJournalEntries)
+            _conceptPlanDecisionJournal.Dequeue();
+    }
+
+    private void AddMasteredRehearsalExample(GenesisExample example)
+    {
+        if (string.IsNullOrWhiteSpace(example.Input) || string.IsNullOrWhiteSpace(example.Output))
+            return;
+
+        _masteredRehearsalRing.Enqueue(new MasteredRehearsalExample(example.Input, example.Output, ResolveRouteLabel(example)));
+        while (_masteredRehearsalRing.Count > MaxMasteredRehearsalEntries)
+            _masteredRehearsalRing.Dequeue();
+    }
+
+    private void MaybeInterleaveMasteredRehearsal()
+    {
+        if (_trainStepCount <= 0 || _trainStepCount % MasteredRehearsalInterval != 0 || _masteredRehearsalRing.Count == 0)
+            return;
+
+        var mastered = _masteredRehearsalRing.ElementAt(Random.Shared.Next(_masteredRehearsalRing.Count));
+        var inputTokens = _tokenizer.Encode(mastered.Input);
+        var targetTokens = _tokenizer.Encode(mastered.Output, addEos: true);
+        if (targetTokens.Length == 0)
+            return;
+
+        _model.EnsureVocabularySize(_tokenizer.VocabularySize);
+        _ = _model.TrainExample(
+            inputTokens,
+            targetTokens,
+            _tokenizer.BosTokenId,
+            lossScale: MasteredRehearsalLossScale,
+            routeLabel: mastered.RouteLabel);
+        _model.CloneParametersToBreakGraph();
+        _masteredRehearsalCount++;
+        _masteredInterleavedRehearsalCount++;
+    }
+
     private void TrainConceptPlanPolicy(string input, string output, double reinforcementScale)
         => TrainControlPolicy(input, output, reinforcementScale);
 
@@ -1057,7 +1431,7 @@ public sealed class GenesisTrainer
             inputTokens,
             targetTokens,
             _tokenizer.BosTokenId,
-            lossScale: Math.Clamp(reinforcementScale, 0.2, 2.5));
+            lossScale: Math.Clamp(reinforcementScale, 0.05, 0.5));
         _model.CloneParametersToBreakGraph();
     }
 
@@ -1123,66 +1497,41 @@ public sealed class GenesisTrainer
             Bridge: Math.Clamp(averageBridge, 0.0, 1.0),
             RelationPressure: Math.Clamp(relationPressure, 0.0, 2.0),
             PriorActionId: Math.Max(0, priorActionId),
-            ConceptAnchors: CompactConceptAnchors(concepts));
+            ConceptFeatures: ComputeConceptAnchorFeatures(concepts));
 
-    private SpaceToolKind PredictSpaceTool(SpacePolicyState state, bool allowExploration)
+    private bool TryPredictSpaceTool(SpacePolicyState state, bool allowExploration, out SpaceToolKind tool)
     {
         var prompt = state.ToDeterministicEncoding();
         var generated = GenerateAndObserveInference(
             new GenerationRequest(prompt, MaxNewTokens: 2, ChunkTokenBudget: 2),
             contextLabel: "space-tool",
-            expectedCorrect: null);  // Let heuristic determine correctness
-         
-        var toolText = generated.Output?.Trim();
-        var parsed = SpaceToolKind.DefaultAlgorithm;
-        if (!string.IsNullOrWhiteSpace(toolText))
-            parsed = DecodePredictedSpaceTool(toolText);
+            expectedCorrect: null);
 
-        if (allowExploration && Random.Shared.NextDouble() < SpacePolicyExplorationRate)
-            return SampleExplorationAction(parsed);
+        if (!TryDecodePredictedSpaceTool(generated.Output ?? string.Empty, out var parsed))
+        {
+            _spaceToolParseFailureCount++;
+            tool = default;
+            return false;
+        }
 
-        return parsed;
+        tool = allowExploration && Random.Shared.NextDouble() < SpacePolicyExplorationRate
+            ? SampleExplorationAction(parsed)
+            : parsed;
+        return true;
     }
 
-    private SpaceToolKind DecodePredictedSpaceTool(string output)
+    private static bool TryDecodePredictedSpaceTool(string output, out SpaceToolKind tool)
     {
+        tool = default;
         var candidates = output
             .Split(new[] { ' ', '\t', '\r', '\n', ',', ';', ':', '.', '|', '=', '[', ']' }, StringSplitOptions.RemoveEmptyEntries);
         foreach (var candidate in candidates.Prepend(output))
         {
             if (TryParseSpaceToolActionId(candidate, out var actionId) &&
-                TryGetSpaceToolFromActionId(actionId, out var byId))
+                TryGetSpaceToolFromActionId(actionId, out tool))
             {
-                return byId;
+                return true;
             }
-
-            if (TryParseSpaceTool(candidate, out var parsed))
-                return parsed;
-        }
-
-        return SpaceToolKind.DefaultAlgorithm;
-    }
-
-    private static bool TryParseSpaceTool(string value, out SpaceToolKind tool)
-    {
-        tool = SpaceToolKind.DefaultAlgorithm;
-        if (string.IsNullOrWhiteSpace(value))
-            return false;
-
-        if (Enum.TryParse<SpaceToolKind>(value.Trim(), ignoreCase: true, out var parsed))
-        {
-            tool = parsed;
-            return true;
-        }
-
-        var normalized = NormalizeSpaceToolToken(value);
-        if (string.IsNullOrEmpty(normalized))
-            return false;
-
-        if (TryMapSpaceToolAlias(normalized, out parsed))
-        {
-            tool = parsed;
-            return true;
         }
 
         return false;
@@ -1220,8 +1569,12 @@ public sealed class GenesisTrainer
             return false;
 
         var trimmed = value.Trim();
-        if (trimmed.StartsWith("a", StringComparison.OrdinalIgnoreCase))
-            trimmed = trimmed[1..];
+        if (!trimmed.StartsWith("a", StringComparison.OrdinalIgnoreCase) || trimmed.Length < 2)
+            return false;
+
+        trimmed = trimmed[1..];
+        if (trimmed.Length != 2)
+            return false;
 
         if (!int.TryParse(trimmed, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var parsed))
             return false;
@@ -1233,49 +1586,19 @@ public sealed class GenesisTrainer
         return true;
     }
 
-    private static string CompactConceptAnchors(IReadOnlyList<string> concepts)
-        => string.Join(".",
-            concepts
-                .Where(c => !string.IsNullOrWhiteSpace(c))
-                .Select(c => new string(c.ToLowerInvariant().Where(ch => char.IsLetterOrDigit(ch)).Take(10).ToArray()))
-                .Where(c => c.Length > 0)
-                .Distinct(StringComparer.Ordinal)
-                .Take(4));
-
-    private static string NormalizeSpaceToolToken(string value)
-        => new string(value
-            .Trim()
-            .ToLowerInvariant()
-            .Where(c => char.IsLetterOrDigit(c))
-            .ToArray());
-
-    private static bool TryMapSpaceToolAlias(string normalized, out SpaceToolKind tool)
+    private static string ComputeConceptAnchorFeatures(IReadOnlyList<string> concepts)
     {
-        tool = SpaceToolKind.DefaultAlgorithm;
-        return normalized switch
-        {
-            "defaultalgorithm" or "default" or "algorithm" => (tool = SpaceToolKind.DefaultAlgorithm) == SpaceToolKind.DefaultAlgorithm,
-            "observe" => (tool = SpaceToolKind.Observe) == SpaceToolKind.Observe,
-            "stabilize" => (tool = SpaceToolKind.Stabilize) == SpaceToolKind.Stabilize,
-            "expand" => (tool = SpaceToolKind.Expand) == SpaceToolKind.Expand,
-            "rebalance" => (tool = SpaceToolKind.Rebalance) == SpaceToolKind.Rebalance,
-            "reinforce" => (tool = SpaceToolKind.Reinforce) == SpaceToolKind.Reinforce,
-            "createconcept" => (tool = SpaceToolKind.CreateConcept) == SpaceToolKind.CreateConcept,
-            "editconceptface" => (tool = SpaceToolKind.EditConceptFace) == SpaceToolKind.EditConceptFace,
-            "editrelationcontradiction" => (tool = SpaceToolKind.EditRelationContradiction) == SpaceToolKind.EditRelationContradiction,
-            "createorstrengthenrelation" => (tool = SpaceToolKind.CreateOrStrengthenRelation) == SpaceToolKind.CreateOrStrengthenRelation,
-            "weakenordecayrelation" => (tool = SpaceToolKind.WeakenOrDecayRelation) == SpaceToolKind.WeakenOrDecayRelation,
-            "triadconsistencyedit" => (tool = SpaceToolKind.TriadConsistencyEdit) == SpaceToolKind.TriadConsistencyEdit,
-            "neighborhoodretype" => (tool = SpaceToolKind.NeighborhoodRetype) == SpaceToolKind.NeighborhoodRetype,
-            "centroidpullpush" => (tool = SpaceToolKind.CentroidPullPush) == SpaceToolKind.CentroidPullPush,
-            "mergeconcepthint" => (tool = SpaceToolKind.MergeConceptHint) == SpaceToolKind.MergeConceptHint,
-            "prunehint" => (tool = SpaceToolKind.PruneHint) == SpaceToolKind.PruneHint,
-            "anchorbindingedit" => (tool = SpaceToolKind.AnchorBindingEdit) == SpaceToolKind.AnchorBindingEdit,
-            "attentionscopeselect" => (tool = SpaceToolKind.AttentionScopeSelect) == SpaceToolKind.AttentionScopeSelect,
-            "commitlevelset" => (tool = SpaceToolKind.CommitLevelSet) == SpaceToolKind.CommitLevelSet,
-            "rewardtagemit" => (tool = SpaceToolKind.RewardTagEmit) == SpaceToolKind.RewardTagEmit,
-            _ => false
-        };
+        var normalizedLengths = concepts
+            .Where(c => !string.IsNullOrWhiteSpace(c))
+            .Select(c => NormalizeConceptToken(c).Length)
+            .Where(length => length > 0)
+            .ToArray();
+        if (normalizedLengths.Length == 0)
+            return "cnt=0,avg=0.00,spread=0";
+
+        var averageLength = normalizedLengths.Average();
+        var spread = normalizedLengths.Max() - normalizedLengths.Min();
+        return FormattableString.Invariant($"cnt={normalizedLengths.Length},avg={averageLength:F2},spread={spread}");
     }
 
     private static SpaceToolKind SampleExplorationAction(SpaceToolKind preferred)
@@ -1796,6 +2119,13 @@ public sealed class GenesisTrainer
          double RelationPressure,
          int StepIndex);
 
+     private enum InferenceOutcome
+     {
+         Unknown = 0,
+         Success = 1,
+         Failure = 2
+     }
+
      private readonly record struct ConceptPlanTelemetry(
          string Prompt,
          string ModelOutput,
@@ -1818,11 +2148,11 @@ public sealed class GenesisTrainer
          double Bridge,
          double RelationPressure,
          int PriorActionId,
-         string ConceptAnchors)
+         string ConceptFeatures)
      {
          public string ToDeterministicEncoding()
              => FormattableString.Invariant(
-                 $"sp|n={Nodes}|r={Relations}|z={Noise:F4}|b={Bridge:F4}|p={RelationPressure:F4}|pa={PriorActionId}|ca={ConceptAnchors}");
+                 $"sp|n={Nodes}|r={Relations}|z={Noise:F4}|b={Bridge:F4}|p={RelationPressure:F4}|pa={PriorActionId}|cf={ConceptFeatures}");
 
          public static bool TryFromDeterministicEncoding(string value, out SpacePolicyState state)
          {
@@ -1831,7 +2161,7 @@ public sealed class GenesisTrainer
                  return false;
 
              var segments = value.Split('|', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-             if (segments.Length < 8 || !segments[0].Equals("sp", StringComparison.OrdinalIgnoreCase))
+             if (segments.Length < 7 || !segments[0].Equals("sp", StringComparison.OrdinalIgnoreCase))
                  return false;
 
              var dict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -1863,7 +2193,8 @@ public sealed class GenesisTrainer
                  return false;
              }
 
-             dict.TryGetValue("ca", out var conceptAnchors);
+             if (!dict.TryGetValue("cf", out var conceptFeatures))
+                 dict.TryGetValue("ca", out conceptFeatures);
              state = new SpacePolicyState(
                  Nodes: Math.Max(0, nodes),
                  Relations: Math.Max(0, relations),
@@ -1871,7 +2202,7 @@ public sealed class GenesisTrainer
                  Bridge: Math.Clamp(bridge, 0.0, 1.0),
                  RelationPressure: Math.Clamp(relationPressure, 0.0, 2.0),
                  PriorActionId: Math.Max(0, priorActionId),
-                 ConceptAnchors: conceptAnchors ?? string.Empty);
+                 ConceptFeatures: conceptFeatures ?? string.Empty);
              return true;
          }
      }

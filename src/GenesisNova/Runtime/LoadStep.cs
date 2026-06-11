@@ -1,9 +1,10 @@
+using EvalApp.Consumer;
 using GenesisNova.Core;
 using GenesisNova.Persistence;
 
 namespace GenesisNova.Runtime;
 
-internal sealed class LoadStep
+internal sealed class LoadStep : IStep<GenesisLoadTaskData>
 {
     private readonly GenesisRuntimeState _state;
     private readonly AutonomousHistoryStore _historyStore;
@@ -22,12 +23,13 @@ internal sealed class LoadStep
         _runtimeConfig = runtimeConfig;
     }
 
-    public GenesisLoadTaskData Execute(GenesisLoadTaskData data)
+    public ValueTask<GenesisLoadTaskData> ExecuteAsync(GenesisLoadTaskData data, CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested();
         var loaded = GenesisCheckpointStore.LoadForRuntime(data.Path, _runtimeConfig);
-        _state.Replace(loaded.Config, loaded.Tokenizer, loaded.Model, loaded.PlatonicSpace, loaded.Conversation);
+        _state.Replace(loaded.Config, loaded.Tokenizer, loaded.Model, loaded.PlatonicSpace, loaded.Conversation, loaded.TrainerLearningStateJson);
         _historyStore.Restore(loaded.AutonomousTraining);
         _persister.Persist(reason: "load", detail: data.Path);
-        return data with { Loaded = true };
+        return ValueTask.FromResult(data with { Loaded = true });
     }
 }

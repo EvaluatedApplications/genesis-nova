@@ -1,6 +1,8 @@
+using EvalApp.Consumer;
+
 namespace GenesisNova.Runtime;
 
-internal sealed class PersistCompactConversationStep
+internal sealed class PersistCompactConversationStep : IStep<GenesisCompactConversationTaskData>
 {
     private readonly GenesisCheckpointPersister _persister;
 
@@ -9,11 +11,12 @@ internal sealed class PersistCompactConversationStep
         _persister = persister;
     }
 
-    public GenesisCompactConversationTaskData Execute(GenesisCompactConversationTaskData data)
+    public ValueTask<GenesisCompactConversationTaskData> ExecuteAsync(GenesisCompactConversationTaskData data, CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested();
         _persister.Persist(
             reason: "conversation-compact",
             detail: data.Note ?? "manual-compact");
-        return data;
+        return ValueTask.FromResult(data);
     }
 }

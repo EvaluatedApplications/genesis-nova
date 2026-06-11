@@ -10,6 +10,7 @@ public sealed class WhitespaceGenesisTokenizer : IGenesisTokenizer
         AddToken("<pad>");
         AddToken("<bos>");
         AddToken("<eos>");
+        AddDigitTokens();
     }
 
     public int PadTokenId => 0;
@@ -48,6 +49,13 @@ public sealed class WhitespaceGenesisTokenizer : IGenesisTokenizer
             if (char.IsWhiteSpace(ch))
             {
                 FlushBuffer();
+                continue;
+            }
+
+            if (IsAsciiDigit(ch))
+            {
+                FlushBuffer();
+                tokens.Add(ch.ToString());
                 continue;
             }
 
@@ -112,6 +120,8 @@ public sealed class WhitespaceGenesisTokenizer : IGenesisTokenizer
 
         foreach (var token in tokens)
             AddToken(token);
+
+        AddDigitTokens();
     }
 
     private int AddToken(string token)
@@ -125,8 +135,17 @@ public sealed class WhitespaceGenesisTokenizer : IGenesisTokenizer
         return id;
     }
 
+    private void AddDigitTokens()
+    {
+        for (var digit = '0'; digit <= '9'; digit++)
+            AddToken(digit.ToString());
+    }
+
     private static bool ShouldConcatenate(string previous, string current)
     {
+        if (IsDigitToken(previous) && IsDigitToken(current))
+            return true;
+
         if (current.Length == 1 && IsOperatorOrPunctuation(current[0]))
             return true;
 
@@ -135,6 +154,12 @@ public sealed class WhitespaceGenesisTokenizer : IGenesisTokenizer
 
         return false;
     }
+
+    private static bool IsDigitToken(string token)
+        => token.Length == 1 && IsAsciiDigit(token[0]);
+
+    private static bool IsAsciiDigit(char ch)
+        => ch >= '0' && ch <= '9';
 
     private static bool IsOperatorOrPunctuation(char ch)
         => char.IsPunctuation(ch) || char.IsSymbol(ch);

@@ -29,7 +29,7 @@ public static class VramAllocationCalculator
     // Bytes ~= 4 * (2*vocab + h*r + 2*vocab + h + r)
     private const int BytesPerParameter = 4;
     private const int VocabularySize = 8192;  // Assumed for calculation
-    private const int RouteCount = 2;         // Actual from GenesisNeuralModel.NumRoutes
+    private const int RouteCount = 3;         // Actual from GenesisNeuralModel.NumRoutes (neural / platonic-direct / platonic-assisted)
     
     // === TIER-BASED TRAINING CAPS (from ResolveTrainingHiddenCap) ===
     public static int GetTrainingHiddenCap(int vramMb)

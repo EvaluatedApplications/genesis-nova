@@ -19,4 +19,7 @@ public sealed record GenesisNovaConfig(
     int MaxPlatonicNodes = 12_000,
     int MaxPlatonicRelations = 48_000,
     double L2RegularizationCoefficient = 0.0,
-    int TrainingTickMultiplier = 16);
+    int TrainingTickMultiplier = 16,
+    // Upper bound on mid-generation platonic tool invocations for the platonic-assisted
+    // reasoning route (route 2). Bounds the interleave so it cannot run away. Default 3.
+    int MaxPlatonicAssistInvocations = 3);

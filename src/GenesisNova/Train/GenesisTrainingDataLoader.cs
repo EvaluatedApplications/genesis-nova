@@ -57,8 +57,8 @@ public static class GenesisTrainingDataLoader
         await using var writer = new StreamWriter(stream, new UTF8Encoding(false));
         foreach (var ex in examples)
         {
-            // Save only input => output (no route labels)
-            await writer.WriteLineAsync($"{ex.Input} => {ex.Output}");
+            var routeSuffix = ex.RouteLabel.HasValue ? $" | route={ex.RouteLabel.Value}" : string.Empty;
+            await writer.WriteLineAsync($"{ex.Input} => {ex.Output}{routeSuffix}");
         }
 
         await writer.FlushAsync();
@@ -78,8 +78,23 @@ public static class GenesisTrainingDataLoader
             return new GenesisExample(input, right);
 
         var output = right[..pipe].Trim();
-        // Note: route metadata is parsed but no longer used (routes are inferred by model)
-        
-        return new GenesisExample(input, output);
+        var routeLabel = ParseRouteLabel(right[(pipe + 1)..]);
+         
+        return new GenesisExample(input, output, RouteLabel: routeLabel);
+    }
+
+    private static int? ParseRouteLabel(string metadata)
+    {
+        foreach (var part in metadata.Split('|', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var keyValue = part.Split(new[] { '=', ':' }, 2, StringSplitOptions.TrimEntries);
+            if (keyValue.Length == 2 &&
+                keyValue[0].Equals("route", StringComparison.OrdinalIgnoreCase) &&
+                int.TryParse(keyValue[1], out var parsed) &&
+                parsed is >= 0 and <= 1)
+                return parsed;
+        }
+
+        return null;
     }
 }

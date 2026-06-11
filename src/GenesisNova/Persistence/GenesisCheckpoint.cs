@@ -8,13 +8,18 @@ public sealed record GenesisCheckpoint(
     GenesisNovaConfig Config,
     string[] Vocabulary,
     MatrixSnapshot Embeddings,
-    MatrixSnapshot RouteWeights,
-    double[] RouteBias,
     MatrixSnapshot OutputWeights,
     double[] OutputBias,
     PlatonicMemorySnapshot? PlatonicSpace = null,
     GenesisConversationSnapshot? Conversation = null,
-    GenesisAutonomousTrainingSnapshot? AutonomousTraining = null);
+    GenesisAutonomousTrainingSnapshot? AutonomousTraining = null,
+    MatrixSnapshot? RouteWeights = null,
+    double[]? RouteBias = null,
+    string? TrainerLearningStateJson = null,
+    int Version = 0)
+{
+    public const int CurrentVersion = 2;
+}
 
 public sealed record MatrixSnapshot(int Rows, int Cols, double[] Values)
 {

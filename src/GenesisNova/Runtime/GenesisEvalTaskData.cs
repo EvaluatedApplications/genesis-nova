@@ -66,6 +66,5 @@ public sealed record GenesisAutonomousTrainTaskData(
     GenesisAutonomousCompositePlan? Plan = null,
     IReadOnlyDictionary<string, ImmutableArray<GenesisExample>>? CandidatePools = null,
     IReadOnlyList<GenesisExample>? TrainingExamples = null,
-    IReadOnlyDictionary<string, string>? ExampleCreatorMap = null,
     IReadOnlyList<GenesisAutonomousTrainingRound>? CreatorRounds = null,
     GenesisTrainingReport? Report = null);

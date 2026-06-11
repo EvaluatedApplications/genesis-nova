@@ -22,11 +22,15 @@ public sealed class GenesisInferenceEngine
     private readonly TransformLibrary? _transformLibrary;
     private readonly TransformAccumulator? _transformAccumulator;
     private readonly Func<string?>? _platonicFilePathProvider;
+    private readonly bool _enableDiagnosticFaceArithmeticShortcut;
+    private readonly int _maxPlatonicAssistInvocations;
     private readonly object _platonicFileCacheLock = new();
     private string? _cachedPlatonicFilePath;
     private DateTime _cachedPlatonicFileWriteUtc;
     private IReadOnlyCollection<string>? _cachedPlatonicFileConcepts;
     private readonly object _telemetryLock = new();
+    private readonly object _routeTelemetryLock = new();
+    private readonly List<RouteDecisionTelemetry> _lastRouteDecisions = new();
     private double _adaptiveBiasScale = DefaultNeuralBiasScale;
     private double _telemetrySuccessEma = 0.5;
     private double _checkpointConceptEfficacyEma = 0.5;
@@ -40,7 +44,9 @@ public sealed class GenesisInferenceEngine
         Func<string?>? platonicFilePathProvider = null,
         FoldPathDiscovery? foldPathDiscovery = null,
         TransformLibrary? transformLibrary = null,
-        TransformAccumulator? transformAccumulator = null)
+        TransformAccumulator? transformAccumulator = null,
+        bool enableDiagnosticFaceArithmeticShortcut = false,
+        int maxPlatonicAssistInvocations = 3)
     {
         _tokenizer = tokenizer;
         _model = model;
@@ -49,6 +55,19 @@ public sealed class GenesisInferenceEngine
         _foldPathDiscovery = foldPathDiscovery;
         _transformLibrary = transformLibrary;
         _transformAccumulator = transformAccumulator;
+        _enableDiagnosticFaceArithmeticShortcut = enableDiagnosticFaceArithmeticShortcut;
+        _maxPlatonicAssistInvocations = Math.Clamp(maxPlatonicAssistInvocations, 0, 16);
+    }
+
+    public bool DiagnosticFaceArithmeticShortcutEnabled => _enableDiagnosticFaceArithmeticShortcut;
+
+    public IReadOnlyList<RouteDecisionTelemetry> LastRouteDecisions
+    {
+        get
+        {
+            lock (_routeTelemetryLock)
+                return _lastRouteDecisions.ToArray();
+        }
     }
 
     public GenerationResult Generate(GenerationRequest request)
@@ -96,6 +115,7 @@ public sealed class GenesisInferenceEngine
 
     private GenerationResult GenerateSingle(GenerationRequest request)
     {
+        ResetRouteTelemetry();
         _model.EnsureVocabularySize(_tokenizer.VocabularySize);
         var chunkBudget = Math.Max(1, request.ChunkTokenBudget);
 
@@ -116,6 +136,7 @@ public sealed class GenesisInferenceEngine
         var totalPlatonicHops = 0;
         string? routedTransform = null;
         string? transformIntercept = null;
+        var evidence = new List<PlatonicEvidence>();
 
         while (generatedTokens.Count < request.MaxNewTokens)
         {
@@ -145,6 +166,8 @@ public sealed class GenesisInferenceEngine
 
             routedTransform ??= chunkResult.RoutedTransform;
             transformIntercept ??= chunkResult.TransformIntercept;
+            if (chunkResult.Evidence is { Count: > 0 })
+                evidence.AddRange(chunkResult.Evidence);
 
             if (chunkResult.GeneratedTokens[^1] == _tokenizer.EosTokenId)
                 break;
@@ -184,47 +207,169 @@ public sealed class GenesisInferenceEngine
             ChunksGenerated: Math.Max(1, decisionPaths.Count),
             PlatonicHopCount: totalPlatonicHops,
             RoutedTransform: routedTransform,
-            TransformIntercept: transformIntercept);
+            TransformIntercept: transformIntercept,
+            Evidence: CollapseEvidence(evidence));
     }
 
     private GenerationResult GenerateSinglePass(
         GenerationRequest request,
         IReadOnlyList<int> inputTokens)
     {
-        var (routeId, _) = _model.PredictRoute(inputTokens);
+        var (routeId, routeConfidence) = _model.PredictRoute(inputTokens);
+
+        // Mode 2 (platonic-assisted reasoning): generate neurally but invoke the platonic space
+        // mid-generation as an internal scratchpad. Falls back to pure neural if no sub-step fires.
+        if (routeId == 2)
+        {
+            var assisted = GenerateNeuralWithPlatonicAssist(request, inputTokens);
+            RecordRouteDecision(
+                routeId, 2,
+                platonicAttempted: assisted.PlatonicAssistInvocations > 0,
+                platonicSucceeded: assisted.PlatonicAssistFired > 0,
+                predictedRouteProducedFinalAnswer: assisted.PlatonicAssistFired > 0,
+                supervisionLabel: 2,
+                assisted.DecisionPath, routeConfidence,
+                assisted.PlatonicAssistInvocations, assisted.PlatonicAssistFired);
+            return assisted;
+        }
+
+        // Mode 1 (platonic-direct): answer straight from a platonic transform/query.
         if (routeId == 1)
         {
             if (TryGenerateFromDiscoveredTransform(request, out var discovered))
+            {
+                RecordRouteDecision(routeId, 1, true, true, true, 1, discovered.DecisionPath, routeConfidence);
                 return discovered;
+            }
             if (TryGenerateFromPlatonicPlan(request, out var platonic))
+            {
+                RecordRouteDecision(routeId, 1, true, true, true, 1, platonic.DecisionPath, routeConfidence);
                 return platonic;
+            }
             // Platonic route attempted but no tool fired — fall through to neural.
+            var fallback = GenerateNeuralTokens(request, inputTokens, neuralFallback: true);
+            RecordRouteDecision(routeId, 0, true, false, false, 0, fallback.DecisionPath, routeConfidence);
+            return fallback;
         }
 
-        return GenerateNeuralTokens(request, inputTokens, neuralFallback: routeId == 1);
+        // Mode 0 (neural-only).
+        var neural = GenerateNeuralTokens(request, inputTokens, neuralFallback: false);
+        RecordRouteDecision(routeId, 0, false, false, true, 0, neural.DecisionPath, routeConfidence);
+        return neural;
     }
 
-    private GenerationResult GenerateNeuralTokens(
+    private void ResetRouteTelemetry()
+    {
+        lock (_routeTelemetryLock)
+            _lastRouteDecisions.Clear();
+    }
+
+    private void RecordRouteDecision(
+        int predictedRoute,
+        int finalRoute,
+        bool platonicAttempted,
+        bool platonicSucceeded,
+        bool predictedRouteProducedFinalAnswer,
+        int? supervisionLabel,
+        string decisionPath,
+        double routeConfidence,
+        int platonicAssistInvocations = 0,
+        int platonicAssistFired = 0)
+    {
+        lock (_routeTelemetryLock)
+        {
+            _lastRouteDecisions.Add(new RouteDecisionTelemetry(
+                PredictedRoute: predictedRoute,
+                FinalRoute: finalRoute,
+                PlatonicRouteAttempted: platonicAttempted,
+                PlatonicRouteSucceeded: platonicSucceeded,
+                PredictedRouteProducedFinalAnswer: predictedRouteProducedFinalAnswer,
+                SupervisionLabel: supervisionLabel,
+                DecisionPath: decisionPath,
+                RouteConfidence: routeConfidence,
+                PlatonicAssistInvocations: platonicAssistInvocations,
+                PlatonicAssistFired: platonicAssistFired));
+        }
+    }
+
+    /// <summary>
+    /// Mode 2: platonic-assisted reasoning. Generates neurally in bounded segments and, between
+    /// segments, may invoke the platonic space as an internal scratchpad: it scans the working
+    /// context (prompt + tokens so far) for a platonic-resolvable arithmetic sub-step, resolves it
+    /// EXACTLY via the log/poly face homomorphism (TryResolveAssistSubResult), tokenizes the
+    /// sub-result, INJECTS it back into the working sequence, then continues neural decode
+    /// conditioned on it.
+    ///
+    /// Bounded by <see cref="_maxPlatonicAssistInvocations"/> tool calls per generation. If nothing
+    /// fires (no resolvable sub-step, or low decode confidence) it degrades to pure neural output —
+    /// never hangs and never injects garbage.
+    /// </summary>
+    private GenerationResult GenerateNeuralWithPlatonicAssist(
         GenerationRequest request,
-        IReadOnlyList<int> inputTokens,
-        bool neuralFallback)
+        IReadOnlyList<int> inputTokens)
     {
         var (adaptiveBiasScale, checkpointContextEnabled) = GetAdaptiveTelemetryState();
         var checkpointContextConcepts = checkpointContextEnabled
             ? LoadCheckpointContextConcepts()
             : Array.Empty<string>();
+
         var generated = new List<int>(Math.Max(1, request.MaxNewTokens));
+        var evidence = new List<PlatonicEvidence>();
         var totalBiasCount = 0;
         var biasMagnitudeSum = 0.0;
         var prev = _tokenizer.BosTokenId;
+
+        var assistInvocations = 0;
+        var assistFired = 0;
+        var injectedAny = false;
+        var totalAssistConfidence = 0.0;
+        var alreadyResolved = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // Re-invoke the platonic tool roughly every (budget / (cap+1)) decoded tokens so calls are
+        // spread across the generation rather than all bunched at the start.
+        var maxInvocations = _maxPlatonicAssistInvocations;
+        var segment = maxInvocations > 0
+            ? Math.Max(1, request.MaxNewTokens / (maxInvocations + 1))
+            : int.MaxValue;
+        var nextAssistAt = segment;
+
         for (var i = 0; i < request.MaxNewTokens; i++)
         {
+            // Platonic tool-invocation point (bounded): try to resolve a sub-step from the current
+            // working context and inject its exact result before continuing neural decode.
+            if (maxInvocations > 0 && assistInvocations < maxInvocations && generated.Count >= nextAssistAt)
+            {
+                nextAssistAt += segment;
+                assistInvocations++;
+                var workingText = BuildChunkContext(request.Input, generated, _tokenizer);
+                if (TryResolveAssistSubResult(workingText, alreadyResolved, out var subResult, out var subConfidence))
+                {
+                    var injectTokens = _tokenizer.Encode(subResult, addEos: false);
+                    var room = request.MaxNewTokens - generated.Count;
+                    if (injectTokens.Length > 0 && room > 0)
+                    {
+                        foreach (var t in injectTokens.Take(room))
+                        {
+                            generated.Add(t);
+                            prev = t;
+                        }
+                        assistFired++;
+                        injectedAny = true;
+                        totalAssistConfidence += subConfidence;
+                        // Re-align the loop counter with the now-larger sequence.
+                        i = generated.Count - 1;
+                        if (generated.Count >= request.MaxNewTokens)
+                            break;
+                    }
+                }
+            }
+
             double biasMagnitude;
             IReadOnlyDictionary<int, double>? biases;
+            IReadOnlyList<PlatonicEvidence> stepEvidence;
             if (checkpointContextConcepts.Count > 0)
-                biases = BuildTokenBiases(inputTokens, generated, adaptiveBiasScale, checkpointContextConcepts, out biasMagnitude);
+                biases = BuildTokenBiases(inputTokens, generated, adaptiveBiasScale, checkpointContextConcepts, out biasMagnitude, out stepEvidence);
             else
-                biases = BuildTokenBiases(inputTokens, generated, adaptiveBiasScale, out biasMagnitude);
+                biases = BuildTokenBiases(inputTokens, generated, adaptiveBiasScale, out biasMagnitude, out stepEvidence);
 
             var next = _model.PredictNextToken(
                 inputTokens,
@@ -238,6 +383,154 @@ public sealed class GenesisInferenceEngine
             {
                 totalBiasCount += biases.Count;
                 biasMagnitudeSum += biasMagnitude;
+                if (stepEvidence.Count > 0)
+                    evidence.AddRange(stepEvidence);
+            }
+            generated.Add(next);
+            if (next == _tokenizer.EosTokenId)
+                break;
+            prev = next;
+        }
+
+        var avgAssistConfidence = assistFired > 0 ? totalAssistConfidence / assistFired : 0.0;
+        return new GenerationResult(
+            Output: _tokenizer.Decode(generated),
+            GeneratedTokens: generated.ToArray(),
+            UsedPlatonicQuery: injectedAny,
+            UsedNeuralFallback: !injectedAny,
+            DecisionPath: injectedAny
+                ? $"neural+platonic-assist[{assistFired}/{assistInvocations}]"
+                : "neural-token+platonic-bias(assist-miss)",
+            PlatonicConfidence: avgAssistConfidence,
+            AppliedBiasCount: totalBiasCount,
+            AverageBiasMagnitude: totalBiasCount > 0 ? biasMagnitudeSum / Math.Max(1, generated.Count) : 0.0,
+            ChunksGenerated: 1,
+            PlatonicHopCount: assistFired,
+            Evidence: CollapseEvidence(evidence),
+            PlatonicAssistInvocations: assistInvocations,
+            PlatonicAssistFired: assistFired);
+    }
+
+    /// <summary>
+    /// Identifies a platonic-resolvable arithmetic sub-step inside <paramref name="workingText"/>
+    /// and resolves it EXACTLY through the face homomorphism (log/poly faces) or a discovered
+    /// transform. Returns the formatted sub-result and a decode-consistency confidence.
+    /// Returns false when no resolvable sub-step exists or confidence is too low.
+    /// </summary>
+    private bool TryResolveAssistSubResult(
+        string workingText,
+        HashSet<string> alreadyResolved,
+        out string subResult,
+        out double confidence)
+    {
+        subResult = string.Empty;
+        confidence = 0.0;
+        if (string.IsNullOrWhiteSpace(workingText))
+            return false;
+
+        // Scan for the LAST compact arithmetic sub-expression (e.g. "12+7", "8*3") anywhere in the
+        // working text — the most recent sub-step is the one the model is currently working toward.
+        var matches = System.Text.RegularExpressions.Regex.Matches(
+            workingText,
+            @"(-?\d+(?:\.\d+)?)\s*([+\-*/x])\s*(-?\d+(?:\.\d+)?)");
+        for (var m = matches.Count - 1; m >= 0; m--)
+        {
+            var match = matches[m];
+            var key = match.Value.Trim();
+            if (alreadyResolved.Contains(key))
+                continue;
+
+            if (!double.TryParse(match.Groups[1].Value, System.Globalization.NumberStyles.Any,
+                    System.Globalization.CultureInfo.InvariantCulture, out var left) ||
+                !double.TryParse(match.Groups[3].Value, System.Globalization.NumberStyles.Any,
+                    System.Globalization.CultureInfo.InvariantCulture, out var right))
+                continue;
+
+            var op = match.Groups[2].Value switch
+            {
+                "+" => ArithmeticOperation.Add,
+                "-" => ArithmeticOperation.Subtract,
+                "*" or "x" => ArithmeticOperation.Multiply,
+                "/" => ArithmeticOperation.Divide,
+                _ => ArithmeticOperation.Add
+            };
+            if (op == ArithmeticOperation.Divide && Math.Abs(right) < 1e-12)
+                continue; // division by zero — skip
+
+            // Prefer a learned/discovered transform when the capability exists; otherwise resolve
+            // via the exact face homomorphism. Both keep the arithmetic exact.
+            double value;
+            double quality;
+            var operationName = ToOperationName(op);
+            if (_foldPathDiscovery is not null &&
+                _foldPathDiscovery.HasOperation(operationName) &&
+                _foldPathDiscovery.TryPredict(operationName, left, right, out var predicted, out _))
+            {
+                value = predicted;
+                quality = 0.85;
+            }
+            else
+            {
+                var additiveFace = op is ArithmeticOperation.Add or ArithmeticOperation.Subtract;
+                var rightFaceSign = op is ArithmeticOperation.Subtract or ArithmeticOperation.Divide ? -1.0 : 1.0;
+                if (!TryFaceArithmetic(left, right, additiveFace, rightFaceSign, out value, out quality))
+                    continue;
+            }
+
+            if (LooksLikeIntegerOperands(left, right) && Math.Abs(value - Math.Round(value)) > 0.25)
+                continue;
+            if (quality <= 0.50)
+                continue; // low decode confidence — fall back to pure neural for this step
+
+            alreadyResolved.Add(key);
+            // Inject as " = <result> " so the neural decoder can continue conditioned on the
+            // resolved scratchpad value and transform it back into words.
+            subResult = $" = {FormatNumber(value)} ";
+            confidence = quality;
+            return true;
+        }
+
+        return false;
+    }
+
+    private GenerationResult GenerateNeuralTokens(
+        GenerationRequest request,
+        IReadOnlyList<int> inputTokens,
+        bool neuralFallback)
+    {
+        var (adaptiveBiasScale, checkpointContextEnabled) = GetAdaptiveTelemetryState();
+        var checkpointContextConcepts = checkpointContextEnabled
+            ? LoadCheckpointContextConcepts()
+            : Array.Empty<string>();
+        var generated = new List<int>(Math.Max(1, request.MaxNewTokens));
+        var evidence = new List<PlatonicEvidence>();
+        var totalBiasCount = 0;
+        var biasMagnitudeSum = 0.0;
+        var prev = _tokenizer.BosTokenId;
+        for (var i = 0; i < request.MaxNewTokens; i++)
+        {
+            double biasMagnitude;
+            IReadOnlyDictionary<int, double>? biases;
+            IReadOnlyList<PlatonicEvidence> stepEvidence;
+            if (checkpointContextConcepts.Count > 0)
+                biases = BuildTokenBiases(inputTokens, generated, adaptiveBiasScale, checkpointContextConcepts, out biasMagnitude, out stepEvidence);
+            else
+                biases = BuildTokenBiases(inputTokens, generated, adaptiveBiasScale, out biasMagnitude, out stepEvidence);
+
+            var next = _model.PredictNextToken(
+                inputTokens,
+                prev,
+                stepIndex: i,
+                disallowToken: i == 0 ? _tokenizer.EosTokenId : null,
+                penalizedTokens: generated,
+                repetitionPenalty: 0.35,
+                tokenBiases: biases);
+            if (biases is not null)
+            {
+                totalBiasCount += biases.Count;
+                biasMagnitudeSum += biasMagnitude;
+                if (stepEvidence.Count > 0)
+                    evidence.AddRange(stepEvidence);
             }
             generated.Add(next);
             if (next == _tokenizer.EosTokenId)
@@ -255,7 +548,8 @@ public sealed class GenesisInferenceEngine
             AppliedBiasCount: totalBiasCount,
             AverageBiasMagnitude: totalBiasCount > 0 ? biasMagnitudeSum / Math.Max(1, generated.Count) : 0.0,
             ChunksGenerated: 1,
-            PlatonicHopCount: 0);
+            PlatonicHopCount: 0,
+            Evidence: CollapseEvidence(evidence));
     }
 
     private static string BuildChunkContext(string baseInput, IReadOnlyList<int> generatedTokens, IGenesisTokenizer tokenizer)
@@ -350,7 +644,8 @@ public sealed class GenesisInferenceEngine
         var conceptResult = _memory.QueryConceptChain(
             anchors,
             maxHops: maxHops,
-            beamWidth: beamWidth);
+            beamWidth: beamWidth,
+            evidence: out var evidence);
         if (string.IsNullOrWhiteSpace(conceptResult.Text))
             return false;
 
@@ -370,7 +665,8 @@ public sealed class GenesisInferenceEngine
             AppliedBiasCount: 0,
             AverageBiasMagnitude: 0.0,
             ChunksGenerated: 1,
-            PlatonicHopCount: conceptResult.Hops);
+            PlatonicHopCount: conceptResult.Hops,
+            Evidence: evidence);
         return true;
     }
 
@@ -380,6 +676,8 @@ public sealed class GenesisInferenceEngine
         if (!TryParseArithmeticInput(input, out var left, out var right, out var op, out var likelyContextWrapped, out var isExplicitArithmeticExpression))
             return false;
         if (likelyContextWrapped)
+            return false;
+        if (!_enableDiagnosticFaceArithmeticShortcut)
             return false;
 
         var additiveFace = op is ArithmeticOperation.Add or ArithmeticOperation.Subtract;
@@ -496,7 +794,7 @@ public sealed class GenesisInferenceEngine
     /// Performs arithmetic in face embedding space.
     /// Add/sub: sum poly sub-faces → decode result = blended[0] * 10.
     /// Mul/div: sum log sub-faces → decode result = sign * exp(blended[logStart] * 10).
-    /// This is not a learned behaviour — it exploits the homomorphic structure of seeded faces.
+    /// This diagnostic shortcut is opt-in because it is not a learned behaviour.
     /// </summary>
     private bool TryFaceArithmetic(double left, double right, bool additiveFace, double rightFaceSign, out double result, out double quality)
     {
@@ -587,7 +885,15 @@ public sealed class GenesisInferenceEngine
         IReadOnlyList<int> generatedTokens,
         double strength,
         out double averageBiasMagnitude)
-        => BuildTokenBiases(inputTokens, generatedTokens, strength, checkpointContextConcepts: null, out averageBiasMagnitude);
+        => BuildTokenBiases(inputTokens, generatedTokens, strength, null, out averageBiasMagnitude);
+
+    private IReadOnlyDictionary<int, double>? BuildTokenBiases(
+        IReadOnlyList<int> inputTokens,
+        IReadOnlyList<int> generatedTokens,
+        double strength,
+        out double averageBiasMagnitude,
+        out IReadOnlyList<PlatonicEvidence> evidence)
+        => BuildTokenBiases(inputTokens, generatedTokens, strength, null, out averageBiasMagnitude, out evidence);
 
     private IReadOnlyDictionary<int, double>? BuildTokenBiases(
         IReadOnlyList<int> inputTokens,
@@ -595,13 +901,24 @@ public sealed class GenesisInferenceEngine
         double strength,
         IReadOnlyCollection<string>? checkpointContextConcepts,
         out double averageBiasMagnitude)
+        => BuildTokenBiases(inputTokens, generatedTokens, strength, checkpointContextConcepts, out averageBiasMagnitude, out _);
+
+    private IReadOnlyDictionary<int, double>? BuildTokenBiases(
+        IReadOnlyList<int> inputTokens,
+        IReadOnlyList<int> generatedTokens,
+        double strength,
+        IReadOnlyCollection<string>? checkpointContextConcepts,
+        out double averageBiasMagnitude,
+        out IReadOnlyList<PlatonicEvidence> evidence)
     {
         averageBiasMagnitude = 0.0;
+        evidence = Array.Empty<PlatonicEvidence>();
         var contextConcepts = BuildContextConcepts(inputTokens, generatedTokens, checkpointContextConcepts);
         if (contextConcepts.Count == 0)
             return null;
 
         var biases = new Dictionary<int, double>();
+        var evidenceItems = new List<PlatonicEvidence>();
         for (var token = 0; token < _tokenizer.VocabularySize; token++)
         {
             if (token == _tokenizer.PadTokenId || token == _tokenizer.BosTokenId || token == _tokenizer.EosTokenId)
@@ -615,10 +932,13 @@ public sealed class GenesisInferenceEngine
 
             var total = 0.0;
             var count = 0;
+            var applied = new List<PlatonicEvidence>();
             foreach (var concept in contextConcepts)
             {
-                total += _memory.GetContradiction(candidate, concept);
+                var contradiction = _memory.GetContradiction(candidate, concept);
+                total += contradiction;
                 count++;
+                applied.Add(new PlatonicEvidence(candidate, concept, 0.5 - contradiction, 1));
             }
 
             if (count == 0)
@@ -627,13 +947,23 @@ public sealed class GenesisInferenceEngine
             var avg = total / count;
             var bias = Math.Clamp((0.5 - avg) * (0.9 * Math.Max(0.0, strength)), -0.9, 0.9);
             if (Math.Abs(bias) > 1e-6)
+            {
                 biases[token] = bias;
+                if (evidenceItems.Count < 512)
+                {
+                    evidenceItems.AddRange(applied
+                        .OrderByDescending(e => Math.Abs(e.Contribution))
+                        .Take(2)
+                        .Select(e => e with { Contribution = e.Contribution * (0.9 * Math.Max(0.0, strength)) }));
+                }
+            }
         }
 
         if (biases.Count == 0)
             return null;
 
         averageBiasMagnitude = biases.Values.Average(v => Math.Abs(v));
+        evidence = CollapseEvidence(evidenceItems);
         return biases;
     }
 
@@ -654,6 +984,25 @@ public sealed class GenesisInferenceEngine
             }
         }
         return concepts;
+    }
+
+    private static IReadOnlyList<PlatonicEvidence> CollapseEvidence(IEnumerable<PlatonicEvidence> evidence)
+    {
+        var collapsed = evidence
+            .Where(e => !string.IsNullOrWhiteSpace(e.Concept))
+            .GroupBy(e => (
+                Concept: e.Concept.Trim().ToLowerInvariant(),
+                Related: string.IsNullOrWhiteSpace(e.RelatedConcept) ? null : e.RelatedConcept.Trim().ToLowerInvariant(),
+                e.Hop))
+            .Select(g => new PlatonicEvidence(
+                g.Key.Concept,
+                g.Key.Related,
+                g.Sum(e => e.Contribution),
+                g.Key.Hop))
+            .OrderByDescending(e => Math.Abs(e.Contribution))
+            .Take(32)
+            .ToArray();
+        return collapsed;
     }
 
     private void AddTokens(IReadOnlyList<int> tokens, HashSet<string> concepts)
@@ -791,3 +1140,17 @@ public sealed class GenesisInferenceEngine
         Divide
     }
 }
+
+public sealed record RouteDecisionTelemetry(
+    int PredictedRoute,
+    int FinalRoute,
+    bool PlatonicRouteAttempted,
+    bool PlatonicRouteSucceeded,
+    bool PredictedRouteProducedFinalAnswer,
+    int? SupervisionLabel,
+    string DecisionPath,
+    double RouteConfidence,
+    // Introspective telemetry (additive). For the platonic-assisted reasoning route these record
+    // how many mid-generation platonic tool calls were attempted and how many fired.
+    int PlatonicAssistInvocations = 0,
+    int PlatonicAssistFired = 0);

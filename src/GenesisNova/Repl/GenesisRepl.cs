@@ -302,15 +302,31 @@ public sealed class GenesisRepl
         var input = payload[..arrow].Trim();
         var right = payload[(arrow + 2)..].Trim();
         var output = right;
+        int? routeLabel = null;
 
         var pipe = right.IndexOf('|');
         if (pipe >= 0)
         {
             output = right[..pipe].Trim();
-            // Note: metadata after | is parsed but no longer used (routes are inferred by model)
+            routeLabel = ParseRouteLabel(right[(pipe + 1)..]);
         }
 
-        return new GenesisExample(input, output);
+        return new GenesisExample(input, output, RouteLabel: routeLabel);
+    }
+
+    private static int? ParseRouteLabel(string metadata)
+    {
+        foreach (var part in metadata.Split('|', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var keyValue = part.Split(new[] { '=', ':' }, 2, StringSplitOptions.TrimEntries);
+            if (keyValue.Length == 2 &&
+                keyValue[0].Equals("route", StringComparison.OrdinalIgnoreCase) &&
+                int.TryParse(keyValue[1], out var parsed) &&
+                parsed is >= 0 and <= 2)
+                return parsed;
+        }
+
+        return null;
     }
 
     private static void PrintHelp()

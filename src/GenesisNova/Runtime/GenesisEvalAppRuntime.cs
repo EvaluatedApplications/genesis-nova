@@ -25,6 +25,8 @@ public sealed class GenesisEvalAppRuntime
     private readonly AutonomousHistoryStore _historyStore = new();
     private readonly GenesisCheckpointPersister _persister;
     private readonly SemaphoreSlim _modelOpsGate = new(1, 1);
+    private string? _loadedCheckpointPath;
+    private DateTime _loadedCheckpointWriteUtc = DateTime.MinValue;
 
     public GenesisEvalAppRuntime(GenesisNovaConfig? config = null)
     {
@@ -53,9 +55,19 @@ public sealed class GenesisEvalAppRuntime
 
         var autonomousPlanner = new GenesisAutonomousTrainingPlanner();
         var planAutonomousRoundStep = new PlanAutonomousRoundStep(autonomousPlanner);
-        var generateAutonomousPoolsStep = new GenerateAutonomousCandidatePoolsStep();
+        var generateCandidatePoolItemStep = new GenerateCandidatePoolItemStep();
         var buildAutonomousBatchStep = new BuildAutonomousTrainingBatchStep();
         var runAutonomousRoundStep = new RunAutonomousTrainingRoundStep(_state.Orchestrator);
+
+        // Data-driven parallelism for the candidate-pool prep ForEach: derived from
+        // measured VRAM headroom + CPU width (see GpuResourceGatePlanner). The pipeline
+        // (and therefore the ForEach TunableConfig) is compiled once here, before any
+        // per-call request exists, so we bound the build-time ceiling by the request's
+        // default MaxGenerationConcurrency. The adaptive tuner then scales within
+        // [1, max] at runtime; lower per-request caps are additionally honored by the
+        // planner when sizing per-creator pools.
+        var poolPrepParallelism = GpuResourceGatePlanner.CandidatePoolPrepGate(
+            requestedConcurrency: new GenesisAutonomousTrainingRequest().MaxGenerationConcurrency);
 
         _persister = new GenesisCheckpointPersister(_state, _runtimeConfig, _historyStore);
 
@@ -74,42 +86,53 @@ public sealed class GenesisEvalAppRuntime
         Eval.App("GenesisNovaRuntime")
             .WithContext(NullGlobalContext.Instance)
             .WithResource(ResourceKind.Cpu, new TunableConfig(Min: 1, Max: Environment.ProcessorCount, Default: Math.Max(2, Environment.ProcessorCount / 2)))
-            .WithResource(ResourceKind.Of("gpu"), new TunableConfig(Min: 1, Max: 1, Default: 1))  // GPU serialized to 1
+            // GPU kernel concurrency stays serialized (single CUDA stream); see GpuResourceGatePlanner.
+            .WithResource(ResourceKind.Of("gpu"), GpuResourceGatePlanner.GpuGate())
             .WithResource(ResourceKind.DiskIO, new TunableConfig(Min: 1, Max: 2, Default: 1))
             .WithTuning()  // Enable adaptive tuning (requires license)
             .DefineDomain("GenesisNova", _state)
                 .DefineTask<GenesisTrainTaskData>("Train")
                     .Gate(ResourceKind.Cpu, null, g => g
-                        .AddStep("LoadExamples", loadExamplesStep.Execute)
-                        .AddStep("RunTraining", runTrainingStep.Execute))
-                    .Gate(ResourceKind.DiskIO, null, g => g.AddStep("SaveCheckpoint", saveCheckpointStep.Execute))
+                        .AddStep("LoadExamples", loadExamplesStep)
+                        .AddStep("RunTraining", runTrainingStep))
+                    .Gate(ResourceKind.DiskIO, null, g => g.AddStep("SaveCheckpoint", saveCheckpointStep))
                     .Run(out train)
                 .DefineTask<GenesisTrainOneTaskData>("TrainOne")
-                    .AddStep("TrainOneStep", trainOneStep.Execute)
+                    .AddStep("TrainOneStep", trainOneStep)
                     .Run(out trainOne)
                 .DefineTask<GenesisPredictTaskData>("Predict")
-                    .Gate(ResourceKind.Of("gpu"), null, g => g.AddStep("PredictGpu", predictGpuStep.Execute))
+                    .Gate(ResourceKind.Of("gpu"), null, g => g.AddStep("PredictGpu", predictGpuStep))
                     .Run(out predict)
                 .DefineTask<GenesisSaveTaskData>("Save")
-                    .Gate(ResourceKind.DiskIO, null, g => g.AddStep("Save", saveStep.Execute))
+                    .Gate(ResourceKind.DiskIO, null, g => g.AddStep("Save", saveStep))
                     .Run(out save)
                 .DefineTask<GenesisLoadTaskData>("Load")
-                    .Gate(ResourceKind.DiskIO, null, g => g.AddStep("Load", loadStep.Execute))
+                    .Gate(ResourceKind.DiskIO, null, g => g.AddStep("Load", loadStep))
                     .Run(out load)
                 .DefineTask<GenesisConversationTaskData>("Conversation")
-                    .AddStep("Observe", observeConversationStep.Execute)
-                    .Gate(ResourceKind.DiskIO, null, g => g.AddStep("Persist", persistConversationStep.Execute))
+                    .AddStep("Observe", observeConversationStep)
+                    .Gate(ResourceKind.DiskIO, null, g => g.AddStep("Persist", persistConversationStep))
                     .Run(out conversation)
                 .DefineTask<GenesisCompactConversationTaskData>("CompactConversation")
-                    .AddStep("Compact", compactConversationStep.Execute)
-                    .Gate(ResourceKind.DiskIO, null, g => g.AddStep("Persist", persistCompactConversationStep.Execute))
+                    .AddStep("Compact", compactConversationStep)
+                    .Gate(ResourceKind.DiskIO, null, g => g.AddStep("Persist", persistCompactConversationStep))
                     .Run(out compactConversation)
                 .DefineTask<GenesisAutonomousTrainTaskData>("AutonomousTrainRound")
-                    .AddStep("PlanRound", planAutonomousRoundStep.Execute)
+                    .AddStep("PlanRound", planAutonomousRoundStep)
                     .Gate(ResourceKind.Cpu, null, g => g
-                        .AddStep("GeneratePools", generateAutonomousPoolsStep.Execute)
-                        .AddStep("BuildBatch", buildAutonomousBatchStep.Execute)
-                        .AddStep("RunTraining", runAutonomousRoundStep.Execute))
+                        // Candidate-pool generation: resource-gated, VRAM/CPU-tunable ForEach.
+                        // Replaces the former raw Parallel.ForEach so per-creator generation
+                        // participates in the shared CPU gate + adaptive tuner. Parallelism
+                        // bounds are derived from measured VRAM headroom (see GpuResourceGatePlanner).
+                        .ForEach(
+                            GenerateAutonomousCandidatePoolsStep.SelectWorkItems,
+                            GenerateAutonomousCandidatePoolsStep.MergePools,
+                            "CandidatePools",
+                            poolPrepParallelism,
+                            sub => sub.Gate(ResourceKind.Cpu, null, gg =>
+                                gg.AddStep("GeneratePool", generateCandidatePoolItemStep)))
+                        .AddStep("BuildBatch", buildAutonomousBatchStep)
+                        .AddStep("RunTraining", runAutonomousRoundStep))
                     .Run(out autonomousRound)
                 .Build();
 
@@ -157,11 +180,10 @@ public sealed class GenesisEvalAppRuntime
         return await WithModelGateAsync(async () =>
         {
             PerformGpuMemoryCleanup(uiLogger);
-            _historyStore.Clear();
             var resetCreators = PublicTextCorpusCreator.ResetForFreshRun(ExampleCreatorRegistry.All);
             uiLogger?.Invoke(
-                $"[auto] fresh run reset: history cleared, corpus creators reset={resetCreators}, local corpus files preserved");
-            var planningHistory = new List<GenesisAutonomousTrainingRound>();
+                $"[auto] continuity: retained {_historyStore.History.Count} prior history rounds, corpus creators reset={resetCreators}, local corpus files preserved");
+            var planningHistory = _historyStore.History.ToList();
             var rounds = new List<GenesisAutonomousTrainingRound>();
             GenesisTrainingReport? lastReport = null;
             var baseRequest = request;
@@ -242,20 +264,6 @@ public sealed class GenesisEvalAppRuntime
                             WindowedTextExampleCount: report.WindowedTextExampleCount,
                             CreatorSummary: BuildCreatorSummary(report)));
 
-                        var currentLoss = report.AverageLoss.TokenLoss;
-                        var improved = currentLoss < _lossTracker.BestLoss;
-                        if (improved)
-                            _lossTracker.BestLoss = currentLoss;
-                        
-                        // CRITICAL: Always persist after each autonomous round, not just on improvement
-                        // This ensures model state is saved after every round regardless of loss trajectory
-                        var reason = improved ? "auto-train-improved" : "auto-train-completed";
-                        _persister.Persist(
-                            reason: reason,
-                            detail: $"datasets={plan.CreatorPlans.Count} trained={examples.Count} epochs={plan.Epochs} loss={currentLoss:F4} improved={improved}",
-                            exampleCount: examples.Count,
-                            loss: currentLoss);
-
                         var avgDifficulty = plan.CreatorPlans.Count == 0
                             ? 0
                             : (int)Math.Round(plan.CreatorPlans.Average(p => p.Difficulty));
@@ -281,6 +289,17 @@ public sealed class GenesisEvalAppRuntime
                             planningHistory.Add(creatorRound);
                             _historyStore.Append(creatorRound);
                         }
+
+                        var currentLoss = report.AverageLoss.TokenLoss;
+                        var improved = currentLoss < _lossTracker.BestLoss;
+                        if (improved)
+                            _lossTracker.BestLoss = currentLoss;
+
+                        _persister.Persist(
+                            reason: improved ? "auto-train-improved" : "auto-train-completed",
+                            detail: $"datasets={plan.CreatorPlans.Count} trained={examples.Count} epochs={plan.Epochs} loss={currentLoss:F4} improved={improved}",
+                            exampleCount: examples.Count,
+                            loss: currentLoss);
                     }
                     catch (System.AccessViolationException ex)
                     {
@@ -324,20 +343,54 @@ public sealed class GenesisEvalAppRuntime
         string input,
         int maxTokens = 48)
     {
-        return await WithModelGateAsync(async () =>
+        return await WithModelGateAsync(() => RunPredictCoreAsync(input, maxTokens));
+    }
+
+    public async Task<GenesisPredictTaskData?> TryPredictAsync(
+        string input,
+        int maxTokens = 48,
+        int gateWaitMilliseconds = 150,
+        CancellationToken cancellationToken = default)
+    {
+        var waitMs = Math.Max(1, gateWaitMilliseconds);
+        if (!await _modelOpsGate.WaitAsync(waitMs, cancellationToken))
+            return null;
+
+        try
         {
-            var result = await _predictPipeline.RunAsync(new GenesisPredictTaskData(
-                Input: input,
-                MaxNewTokens: maxTokens));
-            return ExtractData(result);
-        });
+            return await RunPredictCoreAsync(input, maxTokens);
+        }
+        finally
+        {
+            _modelOpsGate.Release();
+        }
     }
 
     public async Task SaveAsync(string path)
         => _ = await WithModelGateAsync(async () => await _savePipeline.RunAsync(new GenesisSaveTaskData(path)));
 
     public async Task LoadAsync(string path)
-        => _ = await WithModelGateAsync(async () => await _loadPipeline.RunAsync(new GenesisLoadTaskData(path)));
+        => _ = await WithModelGateAsync(async () =>
+        {
+            _ = await _loadPipeline.RunAsync(new GenesisLoadTaskData(path));
+            TrackLoadedCheckpoint(path);
+            return true;
+        });
+
+    public async Task<bool> RollbackToLastGoodAsync()
+        => await WithModelGateAsync(() =>
+        {
+            var path = GenesisLocalStateStore.ResolveLastGoodCheckpointPath(_runtimeConfig);
+            if (!File.Exists(path))
+                return Task.FromResult(false);
+
+            LoadStateFromCheckpoint(path);
+            GenesisLocalStateStore.AppendJournalEntry(
+                _runtimeConfig,
+                "rollback-last-good",
+                detail: path);
+            return Task.FromResult(true);
+        });
 
     public async Task<GenesisConversationTaskData> ObserveConversationAsync(
         string userInput,
@@ -386,111 +439,129 @@ public sealed class GenesisEvalAppRuntime
             RouteAccuracy: 0.0);
     }
 
-    public int VocabularySize => _state.Tokenizer.VocabularySize;
-    public int HiddenSize => _state.Model.HiddenSize;
-    public string ConversationBrief => _state.Conversation.BuildContextBrief();
+    public int VocabularySize => WithModelGate(() => _state.Tokenizer.VocabularySize);
+    public int HiddenSize => WithModelGate(() => _state.Model.HiddenSize);
+    public string ConversationBrief => WithModelGate(() => _state.Conversation.BuildContextBrief());
     public bool AutoResumeEnabled => _runtimeConfig.AutoResume;
     public string AutoCheckpointPath => GenesisLocalStateStore.ResolveCheckpointPath(_runtimeConfig);
     public GenesisNovaConfig Config => _runtimeConfig;
     
     public void UpdateConfig(Func<GenesisNovaConfig, GenesisNovaConfig> updater)
     {
-        var updated = updater(_runtimeConfig);
-        // Update the model's internal config reference
-        _state.Model.UpdateConfig(updated);
+        WithModelGate(() =>
+        {
+            var updated = updater(_runtimeConfig);
+            // Update the model's internal config reference
+            _state.Model.UpdateConfig(updated);
+            return true;
+        });
     }
     
     public void EnsureHiddenSize(int targetSize)
     {
-        if (targetSize > _state.Model.HiddenSize)
-            _state.Model.EnsureHiddenSize(targetSize);
+        WithModelGate(() =>
+        {
+            if (targetSize > _state.Model.HiddenSize)
+                _state.Model.EnsureHiddenSize(targetSize);
+            return true;
+        });
     }
     
-    public int[] EncodeTokens(string text) => _state.Tokenizer.Encode(text);
-    public string DecodeTokens(IReadOnlyList<int> tokens) => _state.Tokenizer.Decode(tokens);
+    public int[] EncodeTokens(string text) => WithModelGate(() => _state.Tokenizer.Encode(text));
+    public string DecodeTokens(IReadOnlyList<int> tokens) => WithModelGate(() => _state.Tokenizer.Decode(tokens));
     public string TokenText(int tokenId)
     {
-        var vocab = _state.Tokenizer.Vocabulary;
-        return tokenId >= 0 && tokenId < vocab.Count
-            ? vocab[tokenId]
-            : $"<unk:{tokenId}>";
+        return WithModelGate(() =>
+        {
+            var vocab = _state.Tokenizer.Vocabulary;
+            return tokenId >= 0 && tokenId < vocab.Count
+                ? vocab[tokenId]
+                : $"<unk:{tokenId}>";
+        });
     }
 
     public PlatonicActivationView AnalyzePlatonicActivation(string input, int maxNodes = 24, int maxEdges = 40)
     {
-        var safeInput = input ?? string.Empty;
-        var tokenIds = _state.Tokenizer.Encode(safeInput);
-        var tokenTexts = tokenIds.Select(TokenText).ToArray();
-        var lexicalParts = System.Text.RegularExpressions.Regex
-            .Matches(safeInput.ToLowerInvariant(), @"-?\d+(?:\.\d+)?|[a-z]+|[+\-*/x]")
-            .Select(m => m.Value)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToArray();
-
-        var anchorSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var token in tokenTexts.Concat(lexicalParts))
+        return WithModelGate(() =>
         {
-            if (_state.Memory.ContainsConcept(token))
-                anchorSet.Add(token);
-        }
-
-        var anchors = anchorSet.OrderBy(a => a, StringComparer.OrdinalIgnoreCase).ToArray();
-        var snapshot = _state.Memory.ExportSnapshot();
-        var nodes = new List<PlatonicActivatedNode>(snapshot.Nodes.Length);
-        var anchorHash = new HashSet<string>(anchors, StringComparer.OrdinalIgnoreCase);
-
-        foreach (var node in snapshot.Nodes)
-        {
-            var isAnchor = anchorHash.Contains(node.Name);
-            var baseScore = isAnchor ? 1.0 : 0.0;
-            if (!isAnchor && anchors.Length > 0)
+            var safeInput = input ?? string.Empty;
+            var tokenIds = _state.Tokenizer.Encode(safeInput);
+            var tokenTexts = tokenIds.Select(id =>
             {
-                baseScore = anchors
-                    .Select(anchor => 1.0 - _state.Memory.GetContradiction(anchor, node.Name))
-                    .DefaultIfEmpty(0.0)
-                    .Max();
+                var vocab = _state.Tokenizer.Vocabulary;
+                return id >= 0 && id < vocab.Count ? vocab[id] : $"<unk:{id}>";
+            }).ToArray();
+            var lexicalParts = System.Text.RegularExpressions.Regex
+                .Matches(safeInput.ToLowerInvariant(), @"-?\d+(?:\.\d+)?|[a-z]+|[+\-*/x]")
+                .Select(m => m.Value)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+            var anchorSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var token in tokenTexts.Concat(lexicalParts))
+            {
+                if (_state.Memory.ContainsConcept(token))
+                    anchorSet.Add(token);
             }
 
-            var obsBoost = Math.Min(0.20, Math.Log10(Math.Max(1, node.ObservationCount)) / 10.0);
-            var score = Math.Max(0.0, Math.Min(1.0, baseScore + obsBoost));
-            nodes.Add(new PlatonicActivatedNode(node.Name, score, node.ObservationCount, isAnchor));
-        }
+            var anchors = anchorSet.OrderBy(a => a, StringComparer.OrdinalIgnoreCase).ToArray();
+            var snapshot = _state.Memory.ExportSnapshot();
+            var nodes = new List<PlatonicActivatedNode>(snapshot.Nodes.Length);
+            var anchorHash = new HashSet<string>(anchors, StringComparer.OrdinalIgnoreCase);
 
-        var selectedNodes = nodes
-            .OrderByDescending(n => n.IsAnchor)
-            .ThenByDescending(n => n.Score)
-            .ThenByDescending(n => n.ObservationCount)
-            .Take(Math.Max(4, maxNodes))
-            .ToArray();
-
-        var selectedSet = new HashSet<string>(selectedNodes.Select(n => n.Name), StringComparer.OrdinalIgnoreCase);
-        var edges = snapshot.Relations
-            .Where(r =>
-                (selectedSet.Contains(r.Left) && selectedSet.Contains(r.Right)) ||
-                anchorHash.Contains(r.Left) || anchorHash.Contains(r.Right))
-            .Select(r =>
+            foreach (var node in snapshot.Nodes)
             {
-                var confidence = 1.0 - r.SynthesisContradiction;
-                var obsBoost = Math.Min(0.15, Math.Log10(Math.Max(1, r.ObservationCount)) / 12.0);
-                var score = Math.Max(0.0, Math.Min(1.0, confidence + obsBoost));
-                return new PlatonicActivatedEdge(
-                    Left: r.Left,
-                    Right: r.Right,
-                    Score: score,
-                    Contradiction: r.SynthesisContradiction,
-                    ObservationCount: r.ObservationCount);
-            })
-            .OrderByDescending(e => e.Score)
-            .ThenByDescending(e => e.ObservationCount)
-            .Take(Math.Max(8, maxEdges))
-            .ToArray();
+                var isAnchor = anchorHash.Contains(node.Name);
+                var baseScore = isAnchor ? 1.0 : 0.0;
+                if (!isAnchor && anchors.Length > 0)
+                {
+                    baseScore = anchors
+                        .Select(anchor => 1.0 - _state.Memory.GetContradiction(anchor, node.Name))
+                        .DefaultIfEmpty(0.0)
+                        .Max();
+                }
 
-        return new PlatonicActivationView(
-            Input: safeInput,
-            InputTokens: tokenTexts,
-            Anchors: anchors,
-            Nodes: selectedNodes,
-            Edges: edges);
+                var obsBoost = Math.Min(0.20, Math.Log10(Math.Max(1, node.ObservationCount)) / 10.0);
+                var score = Math.Max(0.0, Math.Min(1.0, baseScore + obsBoost));
+                nodes.Add(new PlatonicActivatedNode(node.Name, score, node.ObservationCount, isAnchor));
+            }
+
+            var selectedNodes = nodes
+                .OrderByDescending(n => n.IsAnchor)
+                .ThenByDescending(n => n.Score)
+                .ThenByDescending(n => n.ObservationCount)
+                .Take(Math.Max(4, maxNodes))
+                .ToArray();
+
+            var selectedSet = new HashSet<string>(selectedNodes.Select(n => n.Name), StringComparer.OrdinalIgnoreCase);
+            var edges = snapshot.Relations
+                .Where(r =>
+                    (selectedSet.Contains(r.Left) && selectedSet.Contains(r.Right)) ||
+                    anchorHash.Contains(r.Left) || anchorHash.Contains(r.Right))
+                .Select(r =>
+                {
+                    var confidence = 1.0 - r.SynthesisContradiction;
+                    var obsBoost = Math.Min(0.15, Math.Log10(Math.Max(1, r.ObservationCount)) / 12.0);
+                    var score = Math.Max(0.0, Math.Min(1.0, confidence + obsBoost));
+                    return new PlatonicActivatedEdge(
+                        Left: r.Left,
+                        Right: r.Right,
+                        Score: score,
+                        Contradiction: r.SynthesisContradiction,
+                        ObservationCount: r.ObservationCount);
+                })
+                .OrderByDescending(e => e.Score)
+                .ThenByDescending(e => e.ObservationCount)
+                .Take(Math.Max(8, maxEdges))
+                .ToArray();
+
+            return new PlatonicActivationView(
+                Input: safeInput,
+                InputTokens: tokenTexts,
+                Anchors: anchors,
+                Nodes: selectedNodes,
+                Edges: edges);
+        });
     }
 
     private void TryBootstrapLatestState()
@@ -501,13 +572,40 @@ public sealed class GenesisEvalAppRuntime
         if (!GenesisLocalStateStore.TryResolveBootstrapCheckpoint(_runtimeConfig, out var path) || !File.Exists(path))
             return;
 
-        var loaded = GenesisCheckpointStore.LoadForRuntime(path, _runtimeConfig);
-        _state.Replace(loaded.Config, loaded.Tokenizer, loaded.Model, loaded.PlatonicSpace, loaded.Conversation);
-        _historyStore.Restore(loaded.AutonomousTraining);
+        LoadStateFromCheckpoint(path);
         GenesisLocalStateStore.AppendJournalEntry(
             _runtimeConfig,
             "bootstrap",
             detail: path);
+    }
+
+    private void RefreshLatestStateForReplPredict()
+    {
+        if (!GenesisLocalStateStore.TryResolveBootstrapCheckpoint(_runtimeConfig, out var path) || !File.Exists(path))
+            return;
+
+        var lastWriteUtc = File.GetLastWriteTimeUtc(path);
+        if (string.Equals(path, _loadedCheckpointPath, StringComparison.OrdinalIgnoreCase) &&
+            lastWriteUtc == _loadedCheckpointWriteUtc)
+            return;
+
+        LoadStateFromCheckpoint(path);
+    }
+
+    private void LoadStateFromCheckpoint(string path)
+    {
+        var loaded = GenesisCheckpointStore.LoadForRuntime(path, _runtimeConfig);
+        _state.Replace(loaded.Config, loaded.Tokenizer, loaded.Model, loaded.PlatonicSpace, loaded.Conversation, loaded.TrainerLearningStateJson);
+        _historyStore.Restore(loaded.AutonomousTraining);
+        TrackLoadedCheckpoint(path);
+    }
+
+    private void TrackLoadedCheckpoint(string path)
+    {
+        _loadedCheckpointPath = path;
+        _loadedCheckpointWriteUtc = File.Exists(path)
+            ? File.GetLastWriteTimeUtc(path)
+            : DateTime.MinValue;
     }
 
     private void EnsureConfiguredHiddenSize()
@@ -524,6 +622,28 @@ public sealed class GenesisEvalAppRuntime
             PipelineResult<T>.Failure f => throw new InvalidOperationException(f.Message ?? "Pipeline failed.", f.Exception),
             _ => throw new InvalidOperationException("Unsupported pipeline result.")
         };
+
+    private async Task<GenesisPredictTaskData> RunPredictCoreAsync(string input, int maxTokens)
+    {
+        RefreshLatestStateForReplPredict();
+        var result = await _predictPipeline.RunAsync(new GenesisPredictTaskData(
+            Input: input,
+            MaxNewTokens: maxTokens));
+        return ExtractData(result);
+    }
+
+    private T WithModelGate<T>(Func<T> action)
+    {
+        _modelOpsGate.Wait();
+        try
+        {
+            return action();
+        }
+        finally
+        {
+            _modelOpsGate.Release();
+        }
+    }
 
     private async Task<T> WithModelGateAsync<T>(Func<Task<T>> action, CancellationToken cancellationToken = default)
     {

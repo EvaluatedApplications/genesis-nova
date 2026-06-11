@@ -196,20 +196,23 @@ public class ConservationEnforcer
     }
     
     /// <summary>
-    /// Ensure a concept and its complement both have embeddings that satisfy conservation.
+    /// Enforce the hard G4 conservation law for a concept and its complement: embed(¬x) = −embed(x),
+    /// so embed(x) + embed(¬x) = 0 exactly. This is RE-PROJECTION (it rewrites the complement's
+    /// embedding to conserve), not mere validation — conforming to the canonical hard-negation rule
+    /// (EmbeddingSpace.NegateEmbedding) rather than the previous soft 0.95/0.05 coupling.
     /// </summary>
     public void EnforceForConcept(string concept)
     {
         var embedding = _getOrCreateEmbedding(concept);
         var complement = _complements.GetComplement(concept);
-        
-        // Create complement embedding as geometric negation
+
+        // Hard negation: re-project the complement onto −embed(x) so the pair sums to 0.
         using var complementEmbedding = -embedding;
         _registerEmbedding(complement, complementEmbedding);
     }
-    
+
     /// <summary>
-    /// Enforce conservation across all provided concepts.
+    /// Enforce conservation across all provided concepts (re-projecting each complement).
     /// </summary>
     public void EnforceForAll(IEnumerable<string> concepts)
     {
@@ -217,5 +220,25 @@ public class ConservationEnforcer
         {
             EnforceForConcept(concept);
         }
+    }
+
+    /// <summary>
+    /// Re-project a concept/complement pair to conserve charge when BOTH already carry signal.
+    /// Rather than blindly negating one side, it averages x and −(¬x) into a single canonical
+    /// positive face, then re-projects: embed(x) ← mean, embed(¬x) ← −mean. This keeps the pair
+    /// on the conservation manifold (x + ¬x = 0) while respecting evidence accumulated on both faces.
+    /// </summary>
+    public void ReprojectPair(string concept)
+    {
+        var complementName = _complements.GetComplement(concept);
+        var pos = _getOrCreateEmbedding(concept);
+        var neg = _getOrCreateEmbedding(complementName);
+
+        // Canonical positive face = mean(pos, −neg); negative face = −canonical.
+        using var negFlipped = -neg;
+        using var canonical = (pos + negFlipped) * 0.5;
+        using var canonicalNeg = -canonical;
+        _registerEmbedding(concept, canonical);
+        _registerEmbedding(complementName, canonicalNeg);
     }
 }

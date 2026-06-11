@@ -1,6 +1,8 @@
+using EvalApp.Consumer;
+
 namespace GenesisNova.Runtime;
 
-internal sealed class RunTrainingStep
+internal sealed class RunTrainingStep : IStep<GenesisTrainTaskData>
 {
     private readonly GenesisRuntimeState _state;
 
@@ -9,8 +11,9 @@ internal sealed class RunTrainingStep
         _state = state;
     }
 
-    public GenesisTrainTaskData Execute(GenesisTrainTaskData data)
+    public ValueTask<GenesisTrainTaskData> ExecuteAsync(GenesisTrainTaskData data, CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested();
         StreamWriter? writer = null;
         Action<string>? logger = null;
         if (!string.IsNullOrWhiteSpace(data.LogPath))
@@ -48,8 +51,9 @@ internal sealed class RunTrainingStep
             var report = _state.Orchestrator.Train(
                 data.Examples ?? [],
                 data.Epochs,
-                logger);
-            return data with { Report = report };
+                logger,
+                ct);
+            return ValueTask.FromResult(data with { Report = report });
         }
         finally
         {

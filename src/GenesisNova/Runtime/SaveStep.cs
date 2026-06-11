@@ -1,6 +1,8 @@
+using EvalApp.Consumer;
+
 namespace GenesisNova.Runtime;
 
-internal sealed class SaveStep
+internal sealed class SaveStep : IStep<GenesisSaveTaskData>
 {
     private readonly GenesisCheckpointPersister _persister;
 
@@ -9,9 +11,10 @@ internal sealed class SaveStep
         _persister = persister;
     }
 
-    public GenesisSaveTaskData Execute(GenesisSaveTaskData data)
+    public ValueTask<GenesisSaveTaskData> ExecuteAsync(GenesisSaveTaskData data, CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested();
         _persister.Persist(reason: "save", explicitPath: data.Path, detail: "manual");
-        return data with { Saved = true };
+        return ValueTask.FromResult(data with { Saved = true });
     }
 }

@@ -17,8 +17,16 @@ public class GenesisNeuralModel
     private TorchSharp.Modules.Parameter? _bOutT;
     private torch.optim.Optimizer? _optimizer;
 
-    private const int NumRoutes = 2;
-    private const double RouteLossWeight = 0.3;
+    // Route decision space (widened 2 -> 3 for the introspective controller):
+    //   0 = neural-only, 1 = platonic-direct, 2 = platonic-assisted reasoning.
+    // Old checkpoints carry a [hidden, 2] route head; those are treated as incompatible on
+    // Import (see HasUsableRouteHead) and reinitialized, so untrained 3-way heads degrade to
+    // neural-only rather than throwing.
+    public const int RouteCount = 3;
+    private const int NumRoutes = RouteCount;
+    private const double RouteLossWeight = 0.25;
+    private readonly object _routeClassBalanceLock = new();
+    private readonly long[] _routeClassCounts = { 1L, 1L, 1L };
     private TorchSharp.Modules.Parameter? _routeWT;
     private TorchSharp.Modules.Parameter? _routeB;
 
@@ -109,9 +117,10 @@ public class GenesisNeuralModel
         IReadOnlyList<int> inputTokens,
         IReadOnlyList<int> targetTokens,
         int bosTokenId,
-        double lossScale = 1.0)
+        double lossScale = 1.0,
+        int? routeLabel = null)
     {
-        return TrainExampleGpu(inputTokens, targetTokens, bosTokenId, lossScale);
+        return TrainExampleGpu(inputTokens, targetTokens, bosTokenId, lossScale, routeLabel);
     }
 
     public ModelSnapshot Export()
@@ -134,10 +143,10 @@ public class GenesisNeuralModel
         _embT = MatrixToParameter(snapshot.Embeddings);
         _wOutT = MatrixToParameter(snapshot.OutputWeights);
         _bOutT = VectorToParameter(snapshot.OutputBias);
-        if (snapshot.RouteWeights is not null && snapshot.RouteBias is not null)
+        if (HasUsableRouteHead(snapshot.RouteWeights, snapshot.RouteBias, _hiddenSize))
         {
-            _routeWT = MatrixToParameter(snapshot.RouteWeights);
-            _routeB = VectorToParameter(snapshot.RouteBias);
+            _routeWT = MatrixToParameter(snapshot.RouteWeights!);
+            _routeB = VectorToParameter(snapshot.RouteBias!);
         }
         RecreateOptimizer();
     }
@@ -192,9 +201,12 @@ public class GenesisNeuralModel
         IReadOnlyList<int> inputTokens,
         IReadOnlyList<int> targetTokens,
         int bosTokenId,
-        double lossScale)
+        double lossScale,
+        int? routeLabel)
     {
         EnsureModelInitialized();
+        if (routeLabel is >= 0 and < NumRoutes)
+            EnsureRouteHeadInitialized();
 
         double totalLoss = 0.0;
         var prev = bosTokenId;
@@ -206,6 +218,7 @@ public class GenesisNeuralModel
         torch.Tensor? accumulatedLoss = null;
         var forwardTensors = new List<torch.Tensor>();
         var stepLosses = new List<torch.Tensor>();
+        double routeLossValue = 0.0;
 
         try
         {
@@ -261,6 +274,34 @@ public class GenesisNeuralModel
                 accumulatedLoss = stepLosses[0];
             }
 
+            if (routeLabel is >= 0 and < NumRoutes)
+            {
+                var routeHidden = inputVec.tanh();
+                forwardTensors.Add(routeHidden);
+                var routeLogits = routeHidden.matmul(_routeWT!) + _routeB!;
+                forwardTensors.Add(routeLogits);
+                var routeBatchLogits = routeLogits.unsqueeze(0);
+                forwardTensors.Add(routeBatchLogits);
+                var routeTarget = tensor(new long[] { routeLabel.Value }, dtype: ScalarType.Int64, device: _trainingDevice);
+                var routeLoss = nn.functional.cross_entropy(routeBatchLogits, routeTarget);
+                routeTarget.Dispose();
+                forwardTensors.Add(routeLoss);
+                routeLossValue = routeLoss.ToDouble();
+
+                var classBalance = ObserveRouteClassWeight(routeLabel.Value);
+                var weightedRouteLoss = routeLoss * (RouteLossWeight * classBalance);
+                forwardTensors.Add(weightedRouteLoss);
+                if (accumulatedLoss is null)
+                {
+                    accumulatedLoss = weightedRouteLoss;
+                }
+                else
+                {
+                    accumulatedLoss = accumulatedLoss + weightedRouteLoss;
+                    forwardTensors.Add(accumulatedLoss);
+                }
+            }
+
             exStart.Stop();
             var backStart = System.Diagnostics.Stopwatch.StartNew();
             
@@ -304,7 +345,19 @@ public class GenesisNeuralModel
             try { accumulatedLoss?.Dispose(); } catch { }
         }
 
-        return new TrainingLoss(totalLoss / Math.Max(1, targetTokens.Count), RouteLoss: 0.0);
+        return new TrainingLoss(totalLoss / Math.Max(1, targetTokens.Count), RouteLoss: routeLossValue);
+    }
+
+    private double ObserveRouteClassWeight(int routeLabel)
+    {
+        lock (_routeClassBalanceLock)
+        {
+            _routeClassCounts[routeLabel]++;
+            var total = _routeClassCounts.Sum();
+            var classCount = Math.Max(1L, _routeClassCounts[routeLabel]);
+            var weight = total / (double)(NumRoutes * classCount);
+            return Math.Clamp(weight, 0.25, 4.0);
+        }
     }
     
     /// <summary>
@@ -537,9 +590,21 @@ public class GenesisNeuralModel
         using var logits = hidden.matmul(_routeWT!) + _routeB!;
         using var probs = nn.functional.softmax(logits, 0);
         var scores = probs.cpu().data<float>().ToArray();
-        var routeId = scores[1] > scores[0] ? 1 : 0;
-        var confidence = (double)(routeId == 1 ? scores[1] : scores[0]);
-        return (routeId, confidence);
+        if (scores.Length == 0)
+            return (0, 0.0);
+
+        // N-way argmax (N == route head width; tolerates an old [hidden,2] head that slipped
+        // through Import without throwing — it just can't select route 2).
+        var routeId = 0;
+        var best = scores[0];
+        for (var i = 1; i < scores.Length; i++)
+        {
+            if (scores[i] <= best)
+                continue;
+            best = scores[i];
+            routeId = i;
+        }
+        return (routeId, (double)best);
     }
 
     private void EnsureHiddenSizeGpu(int hiddenSize, int oldHidden, int vocab)
@@ -681,6 +746,19 @@ public class GenesisNeuralModel
     {
         var values = vector.Select(x => (float)x).ToArray();
         return new TorchSharp.Modules.Parameter(tensor(values, dtype: ScalarType.Float32, device: _trainingDevice), true);
+    }
+
+    private static bool HasUsableRouteHead(double[,]? routeWeights, double[]? routeBias, int hiddenSize)
+    {
+        if (routeWeights is null || routeBias is null)
+            return false;
+
+        var rows = routeWeights.GetLength(0);
+        var cols = routeWeights.GetLength(1);
+        // Require an exact NumRoutes-wide head. Old checkpoints store a [hidden, 2] head; those
+        // are rejected here and reinitialized as a fresh (untrained) NumRoutes-way head, so the
+        // controller degrades to neural-only behaviour instead of loading a mismatched-shape head.
+        return rows == hiddenSize && rows > 0 && cols == NumRoutes && routeBias.Length == cols;
     }
 }
 

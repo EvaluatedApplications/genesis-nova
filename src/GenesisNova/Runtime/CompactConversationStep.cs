@@ -1,6 +1,8 @@
+using EvalApp.Consumer;
+
 namespace GenesisNova.Runtime;
 
-internal sealed class CompactConversationStep
+internal sealed class CompactConversationStep : IStep<GenesisCompactConversationTaskData>
 {
     private readonly GenesisRuntimeState _state;
 
@@ -9,14 +11,15 @@ internal sealed class CompactConversationStep
         _state = state;
     }
 
-    public GenesisCompactConversationTaskData Execute(GenesisCompactConversationTaskData data)
+    public ValueTask<GenesisCompactConversationTaskData> ExecuteAsync(GenesisCompactConversationTaskData data, CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested();
         var compacted = _state.Conversation.Compact();
-        return data with
+        return ValueTask.FromResult(data with
         {
             Compacted = compacted,
             ContextBrief = _state.Conversation.BuildContextBrief(),
             RecentTurnCount = _state.Conversation.RecentTurns.Count
-        };
+        });
     }
 }

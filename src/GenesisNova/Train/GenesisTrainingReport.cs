@@ -44,5 +44,7 @@ public sealed record GenesisTrainingReport(
     int SkippedCorrectExampleCount = 0,
     int PromptAnswerExampleCount = 0,
     int WindowedTextExampleCount = 0,
+    double PromptAnswerAverageTokenLoss = 0.0,
+    double WindowedTextAverageTokenLoss = 0.0,
     IReadOnlyList<GenesisExampleProgress>? WeakExamples = null,
     IReadOnlyList<GenesisCreatorProgress>? CreatorProgress = null);

@@ -1,3 +1,4 @@
+using EvalApp.Consumer;
 using GenesisNova.Data;
 using GenesisNova.Train;
 using System.Collections.Generic;
@@ -5,16 +6,15 @@ using System.Linq;
 
 namespace GenesisNova.Runtime;
 
-internal sealed class BuildAutonomousTrainingBatchStep
+internal sealed class BuildAutonomousTrainingBatchStep : IStep<GenesisAutonomousTrainTaskData>
 {
-    public GenesisAutonomousTrainTaskData Execute(GenesisAutonomousTrainTaskData data)
+    public ValueTask<GenesisAutonomousTrainTaskData> ExecuteAsync(GenesisAutonomousTrainTaskData data, CancellationToken ct)
     {
         var plan = data.Plan ?? throw new InvalidOperationException("Autonomous plan is required.");
         var pools = data.CandidatePools ?? throw new InvalidOperationException("Candidate pools are required.");
-        data.CancellationToken.ThrowIfCancellationRequested();
+        ct.ThrowIfCancellationRequested();
         data.UiLogger?.Invoke($"[auto] round {plan.Round}: building mixed training batch...");
         var perCreator = new List<(string CreatorName, int Difficulty, int SampleCount, int Epochs, GenesisExample[] Examples)>(plan.CreatorPlans.Count);
-        var creatorByExampleKey = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var creatorPlan in plan.CreatorPlans)
         {
             if (!pools.TryGetValue(creatorPlan.CreatorName, out var pool))
@@ -24,8 +24,6 @@ internal sealed class BuildAutonomousTrainingBatchStep
             var shuffled = pool.ToArray();
             ShuffleInPlace(shuffled);
             var selected = shuffled.Take(trainCount).ToArray();
-            foreach (var example in selected)
-                creatorByExampleKey[ComposeExampleKey(example)] = creatorPlan.CreatorName;
 
             perCreator.Add((creatorPlan.CreatorName, creatorPlan.Difficulty, creatorPlan.SampleCount, creatorPlan.Epochs, selected));
         }
@@ -68,16 +66,12 @@ internal sealed class BuildAutonomousTrainingBatchStep
         data.UiLogger?.Invoke(
             $"[auto] round {plan.Round}: mixed batch ready (datasets={creatorRounds.Length}, trained={merged.Count})");
 
-        return data with
+        return ValueTask.FromResult(data with
         {
             TrainingExamples = merged,
-            ExampleCreatorMap = creatorByExampleKey,
             CreatorRounds = creatorRounds
-        };
+        });
     }
-
-    private static string ComposeExampleKey(GenesisExample example)
-        => $"{example.Input.Trim()} => {example.Output.Trim()}";
 
     private static void ShuffleInPlace<T>(T[] values)
     {

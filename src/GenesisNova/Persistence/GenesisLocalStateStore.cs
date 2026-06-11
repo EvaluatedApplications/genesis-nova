@@ -25,6 +25,12 @@ public static class GenesisLocalStateStore
     public static string ResolveCheckpointPath(GenesisNovaConfig config)
         => Path.Combine(ResolveStateDirectory(config), "genesis-nova.autosave.checkpoint.json");
 
+    public static string ResolveLastGoodCheckpointPath(GenesisNovaConfig config)
+        => Path.Combine(ResolveStateDirectory(config), "genesis-nova.autosave.lastgood.json");
+
+    public static string ResolveLastGoodProbeScorePath(GenesisNovaConfig config)
+        => Path.Combine(ResolveStateDirectory(config), "genesis-nova.autosave.lastgood.probe.json");
+
     public static string ResolveJournalPath(GenesisNovaConfig config)
         => Path.Combine(ResolveStateDirectory(config), "genesis-nova.journal.jsonl");
 

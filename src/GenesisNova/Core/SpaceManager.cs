@@ -8,7 +8,22 @@ public enum SpaceToolKind
     Stabilize = 2,
     Expand = 3,
     Rebalance = 4,
-    Reinforce = 5
+    Reinforce = 5,
+    DefaultAlgorithm = 6,
+    CreateConcept = 7,
+    EditConceptFace = 8,
+    EditRelationContradiction = 9,
+    CreateOrStrengthenRelation = 10,
+    WeakenOrDecayRelation = 11,
+    TriadConsistencyEdit = 12,
+    NeighborhoodRetype = 13,
+    CentroidPullPush = 14,
+    MergeConceptHint = 15,
+    PruneHint = 16,
+    AnchorBindingEdit = 17,
+    AttentionScopeSelect = 18,
+    CommitLevelSet = 19,
+    RewardTagEmit = 20
 }
 
 public sealed record SpaceManagerSettings(
@@ -73,10 +88,618 @@ public sealed class SpaceManager
             RecommendedTool: SpaceToolKind.Observe);
     }
 
+    public SpaceManagementResult ExecuteTool(
+        SpaceToolKind tool,
+        IReadOnlyCollection<string>? focusConcepts = null)
+    {
+        var assessmentBefore = Manage();
+        if (!_settings.Enabled || tool == SpaceToolKind.Observe)
+            return assessmentBefore with { RecommendedTool = tool };
+
+        var protectedConcepts = BuildProtectedConcepts(focusConcepts);
+        var relationsPruned = 0;
+        var nodesPruned = 0;
+        var nodesMerged = 0;
+        var linksAdded = 0;
+        var editsApplied = 0;
+
+        switch (tool)
+        {
+            case SpaceToolKind.DefaultAlgorithm:
+                ExecuteDefaultAlgorithm(
+                    assessmentBefore,
+                    protectedConcepts,
+                    ref relationsPruned,
+                    ref nodesPruned,
+                    ref nodesMerged,
+                    ref linksAdded);
+                break;
+            case SpaceToolKind.Stabilize:
+            {
+                var maintenance = _memory.ApplyMaintenance(new PlatonicSpaceMemory.SpaceMaintenanceRequest(
+                    MaxRelationPrunes: _settings.MaxRelationPrunesPerCycle,
+                    MaxNodePrunes: _settings.MaxNodePrunesPerCycle,
+                    MaxNodeMerges: _settings.MaxNodeMergesPerCycle,
+                    MaxRebalancePrunes: Math.Max(1, _settings.MaxRebalancePrunesPerCycle / 2),
+                    MaxRelationsPerNode: Math.Max(2, _settings.TargetRelationsPerNode + 2),
+                    TargetRelationCount: assessmentBefore.RelationBudget,
+                    MinRelationsToKeep: Math.Max(_settings.MinRelations, assessmentBefore.RelationBudget / 2),
+                    MinNodesToKeep: _settings.MinNodes,
+                    MaxSynthesisContradictionToKeep: 0.70,
+                    ProtectedConcepts: protectedConcepts));
+                relationsPruned = maintenance.RelationsPruned;
+                nodesPruned = maintenance.NodesPruned;
+                nodesMerged = maintenance.NodesMerged;
+                break;
+            }
+            case SpaceToolKind.Rebalance:
+            {
+                var maintenance = _memory.ApplyMaintenance(new PlatonicSpaceMemory.SpaceMaintenanceRequest(
+                    MaxRelationPrunes: Math.Max(1, _settings.MaxRelationPrunesPerCycle / 2),
+                    MaxNodePrunes: Math.Max(1, _settings.MaxNodePrunesPerCycle / 3),
+                    MaxNodeMerges: Math.Max(1, _settings.MaxNodeMergesPerCycle / 2),
+                    MaxRebalancePrunes: _settings.MaxRebalancePrunesPerCycle,
+                    MaxRelationsPerNode: Math.Max(1, _settings.TargetRelationsPerNode),
+                    TargetRelationCount: assessmentBefore.RelationBudget,
+                    MinRelationsToKeep: Math.Max(_settings.MinRelations, assessmentBefore.RelationBudget / 2),
+                    MinNodesToKeep: _settings.MinNodes,
+                    MaxSynthesisContradictionToKeep: 0.78,
+                    ProtectedConcepts: protectedConcepts));
+                relationsPruned = maintenance.RelationsPruned;
+                nodesPruned = maintenance.NodesPruned;
+                nodesMerged = maintenance.NodesMerged;
+                break;
+            }
+            case SpaceToolKind.Expand:
+                linksAdded = SeedExplorationLinks(protectedConcepts, Math.Max(8, _settings.MaxNodeMergesPerCycle * 2));
+                break;
+            case SpaceToolKind.Reinforce:
+                linksAdded = ReinforceFocusNeighborhood(protectedConcepts, Math.Max(8, _settings.MaxRelationPrunesPerCycle / 4));
+                break;
+            case SpaceToolKind.CreateConcept:
+                editsApplied = CreateConcepts(protectedConcepts, Math.Max(1, _settings.MaxNodeMergesPerCycle));
+                break;
+            case SpaceToolKind.EditConceptFace:
+                editsApplied = EditConceptFaces(protectedConcepts, Math.Max(1, _settings.MaxNodeMergesPerCycle));
+                break;
+            case SpaceToolKind.EditRelationContradiction:
+                editsApplied = EditRelationContradictions(protectedConcepts, Math.Max(2, _settings.MaxRelationPrunesPerCycle / 8));
+                break;
+            case SpaceToolKind.CreateOrStrengthenRelation:
+                linksAdded = CreateOrStrengthenRelations(protectedConcepts, Math.Max(2, _settings.MaxRelationPrunesPerCycle / 6));
+                break;
+            case SpaceToolKind.WeakenOrDecayRelation:
+                editsApplied = WeakenOrDecayRelations(protectedConcepts, Math.Max(2, _settings.MaxRelationPrunesPerCycle / 6));
+                break;
+            case SpaceToolKind.TriadConsistencyEdit:
+                editsApplied = TriadConsistencyEdit(protectedConcepts, Math.Max(2, _settings.MaxRelationPrunesPerCycle / 8));
+                break;
+            case SpaceToolKind.NeighborhoodRetype:
+                editsApplied = NeighborhoodRetype(protectedConcepts, Math.Max(2, _settings.MaxRelationPrunesPerCycle / 8));
+                break;
+            case SpaceToolKind.CentroidPullPush:
+                editsApplied = CentroidPullPush(protectedConcepts, Math.Max(1, _settings.MaxNodeMergesPerCycle / 2));
+                break;
+            case SpaceToolKind.MergeConceptHint:
+            {
+                var maintenance = _memory.ApplyMaintenance(new PlatonicSpaceMemory.SpaceMaintenanceRequest(
+                    MaxRelationPrunes: 0,
+                    MaxNodePrunes: 0,
+                    MaxNodeMerges: Math.Max(1, _settings.MaxNodeMergesPerCycle),
+                    MaxRebalancePrunes: 0,
+                    MaxRelationsPerNode: 0,
+                    TargetRelationCount: 0,
+                    MinRelationsToKeep: _settings.MinRelations,
+                    MinNodesToKeep: _settings.MinNodes,
+                    ProtectedConcepts: Array.Empty<string>()));
+                nodesMerged = maintenance.NodesMerged;
+                break;
+            }
+            case SpaceToolKind.PruneHint:
+            {
+                var maintenance = _memory.ApplyMaintenance(new PlatonicSpaceMemory.SpaceMaintenanceRequest(
+                    MaxRelationPrunes: Math.Max(1, _settings.MaxRelationPrunesPerCycle / 2),
+                    MaxNodePrunes: Math.Max(1, _settings.MaxNodePrunesPerCycle / 2),
+                    MaxNodeMerges: 0,
+                    MaxRebalancePrunes: Math.Max(1, _settings.MaxRebalancePrunesPerCycle / 3),
+                    MaxRelationsPerNode: Math.Max(2, _settings.TargetRelationsPerNode + 1),
+                    TargetRelationCount: assessmentBefore.RelationBudget,
+                    MinRelationsToKeep: Math.Max(_settings.MinRelations, assessmentBefore.RelationBudget / 2),
+                    MinNodesToKeep: _settings.MinNodes,
+                    MaxSynthesisContradictionToKeep: 0.74,
+                    ProtectedConcepts: protectedConcepts));
+                relationsPruned = maintenance.RelationsPruned;
+                nodesPruned = maintenance.NodesPruned;
+                break;
+            }
+            case SpaceToolKind.AnchorBindingEdit:
+                linksAdded = AnchorBindingEdit(protectedConcepts, Math.Max(2, _settings.MaxNodeMergesPerCycle));
+                break;
+            case SpaceToolKind.AttentionScopeSelect:
+                editsApplied = AttentionScopeSelect(protectedConcepts, Math.Max(2, _settings.MaxRelationPrunesPerCycle / 10));
+                break;
+            case SpaceToolKind.CommitLevelSet:
+            {
+                var maintenance = _memory.ApplyMaintenance(new PlatonicSpaceMemory.SpaceMaintenanceRequest(
+                    MaxRelationPrunes: Math.Max(1, _settings.MaxRelationPrunesPerCycle / 3),
+                    MaxNodePrunes: Math.Max(1, _settings.MaxNodePrunesPerCycle / 3),
+                    MaxNodeMerges: Math.Max(1, _settings.MaxNodeMergesPerCycle / 3),
+                    MaxRebalancePrunes: Math.Max(1, _settings.MaxRebalancePrunesPerCycle / 2),
+                    MaxRelationsPerNode: Math.Max(2, _settings.TargetRelationsPerNode),
+                    TargetRelationCount: assessmentBefore.RelationBudget,
+                    MinRelationsToKeep: Math.Max(_settings.MinRelations, assessmentBefore.RelationBudget / 2),
+                    MinNodesToKeep: _settings.MinNodes,
+                    MaxSynthesisContradictionToKeep: 0.72,
+                    ProtectedConcepts: protectedConcepts));
+                relationsPruned = maintenance.RelationsPruned;
+                nodesPruned = maintenance.NodesPruned;
+                nodesMerged = maintenance.NodesMerged;
+                break;
+            }
+            case SpaceToolKind.RewardTagEmit:
+                editsApplied = RewardTagEmit(protectedConcepts, Math.Max(2, _settings.MaxRelationPrunesPerCycle / 8));
+                break;
+        }
+
+        var assessmentAfter = Manage();
+        var changed = relationsPruned > 0 || nodesPruned > 0 || nodesMerged > 0 || linksAdded > 0 || editsApplied > 0;
+        return new SpaceManagementResult(
+            Compacted: changed,
+            NodesBefore: assessmentBefore.NodesAfter,
+            NodesAfter: assessmentAfter.NodesAfter,
+            RelationsBefore: assessmentBefore.RelationsAfter,
+            RelationsAfter: assessmentAfter.RelationsAfter,
+            NodesPruned: nodesPruned,
+            RelationsPruned: relationsPruned,
+            NoiseRatio: assessmentAfter.NoiseRatio,
+            RelationBudget: assessmentAfter.RelationBudget,
+            RecommendedTool: tool);
+    }
+
+    private void ExecuteDefaultAlgorithm(
+        SpaceManagementResult assessmentBefore,
+        IReadOnlyCollection<string> protectedConcepts,
+        ref int relationsPruned,
+        ref int nodesPruned,
+        ref int nodesMerged,
+        ref int linksAdded)
+    {
+        var baselineTool = SelectBaselineTool(assessmentBefore);
+        switch (baselineTool)
+        {
+            case SpaceToolKind.Stabilize:
+            {
+                var maintenance = _memory.ApplyMaintenance(new PlatonicSpaceMemory.SpaceMaintenanceRequest(
+                    MaxRelationPrunes: _settings.MaxRelationPrunesPerCycle,
+                    MaxNodePrunes: _settings.MaxNodePrunesPerCycle,
+                    MaxNodeMerges: _settings.MaxNodeMergesPerCycle,
+                    MaxRebalancePrunes: Math.Max(1, _settings.MaxRebalancePrunesPerCycle / 2),
+                    MaxRelationsPerNode: Math.Max(2, _settings.TargetRelationsPerNode + 2),
+                    TargetRelationCount: assessmentBefore.RelationBudget,
+                    MinRelationsToKeep: Math.Max(_settings.MinRelations, assessmentBefore.RelationBudget / 2),
+                    MinNodesToKeep: _settings.MinNodes,
+                    MaxSynthesisContradictionToKeep: 0.70,
+                    ProtectedConcepts: protectedConcepts));
+                relationsPruned += maintenance.RelationsPruned;
+                nodesPruned += maintenance.NodesPruned;
+                nodesMerged += maintenance.NodesMerged;
+                break;
+            }
+            case SpaceToolKind.Rebalance:
+            {
+                var maintenance = _memory.ApplyMaintenance(new PlatonicSpaceMemory.SpaceMaintenanceRequest(
+                    MaxRelationPrunes: Math.Max(1, _settings.MaxRelationPrunesPerCycle / 2),
+                    MaxNodePrunes: Math.Max(1, _settings.MaxNodePrunesPerCycle / 3),
+                    MaxNodeMerges: Math.Max(1, _settings.MaxNodeMergesPerCycle / 2),
+                    MaxRebalancePrunes: _settings.MaxRebalancePrunesPerCycle,
+                    MaxRelationsPerNode: Math.Max(1, _settings.TargetRelationsPerNode),
+                    TargetRelationCount: assessmentBefore.RelationBudget,
+                    MinRelationsToKeep: Math.Max(_settings.MinRelations, assessmentBefore.RelationBudget / 2),
+                    MinNodesToKeep: _settings.MinNodes,
+                    MaxSynthesisContradictionToKeep: 0.78,
+                    ProtectedConcepts: protectedConcepts));
+                relationsPruned += maintenance.RelationsPruned;
+                nodesPruned += maintenance.NodesPruned;
+                nodesMerged += maintenance.NodesMerged;
+                break;
+            }
+            case SpaceToolKind.Expand:
+                linksAdded += SeedExplorationLinks(protectedConcepts, Math.Max(8, _settings.MaxNodeMergesPerCycle * 2));
+                break;
+            case SpaceToolKind.Reinforce:
+                linksAdded += ReinforceFocusNeighborhood(protectedConcepts, Math.Max(8, _settings.MaxRelationPrunesPerCycle / 4));
+                break;
+            case SpaceToolKind.Observe:
+            default:
+                break;
+        }
+    }
+
+    private SpaceToolKind SelectBaselineTool(SpaceManagementResult assessment)
+    {
+        var relationPressure = assessment.RelationBudget > 0
+            ? (double)assessment.RelationsAfter / assessment.RelationBudget
+            : 0.0;
+
+        if (assessment.NoiseRatio >= Math.Max(0.55, _settings.NoiseThreshold * 0.9))
+            return SpaceToolKind.Stabilize;
+
+        if (relationPressure >= 1.12)
+            return SpaceToolKind.Rebalance;
+
+        if (relationPressure <= 0.70 && assessment.NoiseRatio <= 0.42)
+            return SpaceToolKind.Expand;
+
+        if (assessment.NoiseRatio <= 0.50)
+            return SpaceToolKind.Reinforce;
+
+        return SpaceToolKind.Observe;
+    }
+
     private int ComputeTargetRelationBudget(int nodes)
     {
         var dynamicBudget = (nodes * Math.Max(1, _settings.TargetRelationsPerNode)) + Math.Max(0, _settings.NodeBuffer);
         return Math.Clamp(dynamicBudget, _settings.MinRelations, _settings.MaxRelations);
+    }
+
+    private static IReadOnlyCollection<string> BuildProtectedConcepts(IReadOnlyCollection<string>? focusConcepts)
+    {
+        if (focusConcepts is null || focusConcepts.Count == 0)
+            return Array.Empty<string>();
+
+        return focusConcepts
+            .Where(c => !string.IsNullOrWhiteSpace(c))
+            .Select(c => c.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private int SeedExplorationLinks(IReadOnlyCollection<string> concepts, int maxLinks)
+    {
+        var conceptList = concepts
+            .Where(c => !string.IsNullOrWhiteSpace(c))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (conceptList.Length < 2)
+            return 0;
+
+        var budget = Math.Max(1, maxLinks);
+        var links = 0;
+        for (var i = 0; i < conceptList.Length - 1 && links < budget; i++)
+        {
+            if (TryObserveLink(conceptList[i], conceptList[i + 1], 0.38))
+                links++;
+        }
+
+        if (links < budget && conceptList.Length >= 3)
+        {
+            if (TryObserveLink(conceptList[^1], conceptList[0], 0.42))
+                links++;
+        }
+
+        return links;
+    }
+
+    private int ReinforceFocusNeighborhood(IReadOnlyCollection<string> concepts, int maxUpdates)
+    {
+        var conceptList = concepts
+            .Where(c => !string.IsNullOrWhiteSpace(c))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (conceptList.Length == 0)
+            return 0;
+
+        var budget = Math.Max(1, maxUpdates);
+        var updates = 0;
+        foreach (var concept in conceptList)
+        {
+            if (updates >= budget)
+                break;
+
+            var neighbors = _memory.GetNeighbors(
+                concept,
+                PlatonicNeighborhoodType.Any,
+                maxNeighbors: Math.Max(2, Math.Min(6, budget - updates)),
+                minConfidence: 0.10);
+            foreach (var neighbor in neighbors)
+            {
+                if (updates >= budget)
+                    break;
+                var contradiction = _memory.GetContradiction(concept, neighbor.Concept);
+                var reinforced = Math.Max(0.0, contradiction * 0.92);
+                if (TryObserveLink(concept, neighbor.Concept, reinforced))
+                    updates++;
+            }
+        }
+
+        if (updates == 0 && conceptList.Length >= 2)
+            updates += SeedExplorationLinks(conceptList, Math.Min(2, budget));
+
+        return updates;
+    }
+
+    private int CreateConcepts(IReadOnlyCollection<string> concepts, int maxCreates)
+    {
+        var conceptList = concepts
+            .Where(c => !string.IsNullOrWhiteSpace(c))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(Math.Max(1, maxCreates))
+            .ToArray();
+        var created = 0;
+        foreach (var concept in conceptList)
+        {
+            _memory.FineEditFromExample(new[] { concept }, new[] { concept }, isNegativeExample: false);
+            created++;
+        }
+
+        return created;
+    }
+
+    private int EditConceptFaces(IReadOnlyCollection<string> concepts, int maxEdits)
+    {
+        var conceptList = concepts
+            .Where(c => !string.IsNullOrWhiteSpace(c))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (conceptList.Length == 0)
+            return 0;
+
+        var edits = 0;
+        foreach (var concept in conceptList)
+        {
+            if (edits >= maxEdits)
+                break;
+
+            var neighbors = _memory.GetNeighbors(concept, PlatonicNeighborhoodType.Any, maxNeighbors: 4, minConfidence: 0.05);
+            if (neighbors.Count == 0)
+            {
+                _memory.FineEditFromExample(new[] { concept }, new[] { concept }, isNegativeExample: false);
+                edits++;
+                continue;
+            }
+
+            foreach (var neighbor in neighbors)
+            {
+                if (edits >= maxEdits)
+                    break;
+                _memory.FineEditFromExample(new[] { concept }, new[] { neighbor.Concept }, isNegativeExample: false);
+                edits++;
+            }
+        }
+
+        return edits;
+    }
+
+    private int EditRelationContradictions(IReadOnlyCollection<string> concepts, int maxEdits)
+    {
+        var edits = 0;
+        foreach (var concept in concepts)
+        {
+            if (edits >= maxEdits)
+                break;
+            var neighbors = _memory.GetNeighbors(concept, PlatonicNeighborhoodType.Any, maxNeighbors: 4, minConfidence: 0.0);
+            foreach (var neighbor in neighbors)
+            {
+                if (edits >= maxEdits)
+                    break;
+                var contradiction = _memory.GetContradiction(concept, neighbor.Concept);
+                var adjusted = Math.Clamp((contradiction * 0.85) + 0.075, 0.0, 1.0);
+                if (TryObserveLink(concept, neighbor.Concept, adjusted))
+                    edits++;
+            }
+        }
+
+        return edits;
+    }
+
+    private int CreateOrStrengthenRelations(IReadOnlyCollection<string> concepts, int maxLinks)
+    {
+        var conceptList = concepts
+            .Where(c => !string.IsNullOrWhiteSpace(c))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (conceptList.Length < 2)
+            return 0;
+
+        var links = SeedExplorationLinks(conceptList, maxLinks);
+        if (links >= maxLinks)
+            return links;
+
+        return links + ReinforceFocusNeighborhood(conceptList, maxLinks - links);
+    }
+
+    private int WeakenOrDecayRelations(IReadOnlyCollection<string> concepts, int maxEdits)
+    {
+        var edits = 0;
+        foreach (var concept in concepts)
+        {
+            if (edits >= maxEdits)
+                break;
+            var neighbors = _memory.GetNeighbors(concept, PlatonicNeighborhoodType.Any, maxNeighbors: 4, minConfidence: 0.0);
+            foreach (var neighbor in neighbors)
+            {
+                if (edits >= maxEdits)
+                    break;
+                var contradiction = _memory.GetContradiction(concept, neighbor.Concept);
+                var decayed = Math.Clamp((contradiction * 0.92) + 0.08, 0.0, 1.0);
+                if (TryObserveLink(concept, neighbor.Concept, decayed))
+                    edits++;
+            }
+        }
+
+        return edits;
+    }
+
+    private int TriadConsistencyEdit(IReadOnlyCollection<string> concepts, int maxEdits)
+    {
+        var conceptList = concepts
+            .Where(c => !string.IsNullOrWhiteSpace(c))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (conceptList.Length < 2)
+            return 0;
+
+        var edits = 0;
+        for (var i = 0; i < conceptList.Length && edits < maxEdits; i++)
+        {
+            var left = conceptList[i];
+            var neighbors = _memory.GetNeighbors(left, PlatonicNeighborhoodType.Any, maxNeighbors: 3, minConfidence: 0.0);
+            foreach (var a in neighbors)
+            {
+                if (edits >= maxEdits)
+                    break;
+                foreach (var b in neighbors)
+                {
+                    if (edits >= maxEdits)
+                        break;
+                    if (a.Concept.Equals(b.Concept, StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    var leftA = _memory.GetContradiction(left, a.Concept);
+                    var leftB = _memory.GetContradiction(left, b.Concept);
+                    var predicted = Math.Clamp(0.5 + (0.5 * Math.Abs(leftA - leftB)), 0.0, 1.0);
+                    var current = _memory.GetContradiction(a.Concept, b.Concept);
+                    var target = Math.Clamp((current * 0.7) + (predicted * 0.3), 0.0, 1.0);
+                    if (TryObserveLink(a.Concept, b.Concept, target))
+                        edits++;
+                }
+            }
+        }
+
+        return edits;
+    }
+
+    private int NeighborhoodRetype(IReadOnlyCollection<string> concepts, int maxEdits)
+    {
+        var edits = 0;
+        foreach (var concept in concepts)
+        {
+            if (edits >= maxEdits)
+                break;
+
+            var semantic = _memory.GetNeighbors(concept, PlatonicNeighborhoodType.Semantic, maxNeighbors: 3, minConfidence: 0.0);
+            foreach (var neighbor in semantic)
+            {
+                if (edits >= maxEdits)
+                    break;
+                var contradiction = _memory.GetContradiction(concept, neighbor.Concept);
+                if (TryObserveLink(concept, neighbor.Concept, Math.Clamp(contradiction * 0.9, 0.0, 1.0)))
+                    edits++;
+            }
+
+            var numeric = _memory.GetNeighbors(concept, PlatonicNeighborhoodType.Numeric, maxNeighbors: 2, minConfidence: 0.0);
+            foreach (var neighbor in numeric)
+            {
+                if (edits >= maxEdits)
+                    break;
+                var contradiction = _memory.GetContradiction(concept, neighbor.Concept);
+                if (TryObserveLink(concept, neighbor.Concept, Math.Clamp((contradiction * 0.9) + 0.07, 0.0, 1.0)))
+                    edits++;
+            }
+        }
+
+        return edits;
+    }
+
+    private int CentroidPullPush(IReadOnlyCollection<string> concepts, int maxEdits)
+    {
+        var conceptList = concepts
+            .Where(c => !string.IsNullOrWhiteSpace(c))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (conceptList.Length < 2)
+            return 0;
+
+        var anchor = conceptList[0];
+        var edits = 0;
+        foreach (var concept in conceptList.Skip(1))
+        {
+            if (edits >= maxEdits)
+                break;
+            var contradiction = _memory.GetContradiction(anchor, concept);
+            _memory.FineEditFromExample(
+                new[] { anchor },
+                new[] { concept },
+                isNegativeExample: contradiction >= 0.55);
+            edits++;
+        }
+
+        return edits;
+    }
+
+    private int AnchorBindingEdit(IReadOnlyCollection<string> concepts, int maxLinks)
+    {
+        var conceptList = concepts
+            .Where(c => !string.IsNullOrWhiteSpace(c))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (conceptList.Length < 2)
+            return 0;
+
+        var anchor = conceptList[0];
+        var links = 0;
+        foreach (var concept in conceptList.Skip(1))
+        {
+            if (links >= maxLinks)
+                break;
+            if (TryObserveLink(anchor, concept, 0.28))
+                links++;
+        }
+
+        return links;
+    }
+
+    private int AttentionScopeSelect(IReadOnlyCollection<string> concepts, int maxEdits)
+    {
+        var edits = 0;
+        foreach (var concept in concepts)
+        {
+            if (edits >= maxEdits)
+                break;
+
+            var neighbors = _memory.GetNeighbors(concept, PlatonicNeighborhoodType.Any, maxNeighbors: 3, minConfidence: 0.08);
+            foreach (var neighbor in neighbors)
+            {
+                if (edits >= maxEdits)
+                    break;
+                var contradiction = _memory.GetContradiction(concept, neighbor.Concept);
+                var focused = Math.Clamp(contradiction * 0.9, 0.0, 1.0);
+                if (TryObserveLink(concept, neighbor.Concept, focused))
+                    edits++;
+            }
+        }
+
+        return edits;
+    }
+
+    private int RewardTagEmit(IReadOnlyCollection<string> concepts, int maxEdits)
+    {
+        var conceptList = concepts
+            .Where(c => !string.IsNullOrWhiteSpace(c))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (conceptList.Length < 2)
+            return 0;
+
+        var edits = 0;
+        for (var i = 0; i < conceptList.Length - 1 && edits < maxEdits; i++)
+        {
+            var contradiction = _memory.GetContradiction(conceptList[i], conceptList[i + 1]);
+            var rewarded = Math.Clamp(contradiction * 0.85, 0.0, 1.0);
+            if (TryObserveLink(conceptList[i], conceptList[i + 1], rewarded))
+                edits++;
+        }
+
+        return edits;
+    }
+
+    private bool TryObserveLink(string left, string right, double contradiction)
+    {
+        if (string.IsNullOrWhiteSpace(left) || string.IsNullOrWhiteSpace(right))
+            return false;
+        if (left.Equals(right, StringComparison.OrdinalIgnoreCase))
+            return false;
+        _memory.ObserveContradiction(left, right, contradiction);
+        return true;
     }
 
 }

@@ -120,13 +120,13 @@ public static class GpuCapacityPlanner
     public static int ResolveTrainingHiddenCap(int vramMb)
     {
         if (vramMb <= 4096)
-            return 2048;
+            return 512;
         if (vramMb <= 6144)
-            return 3072;
+            return 512;
         if (vramMb <= 8192)
-            return 4096;
+            return 768;
 
-        return 6144;
+        return 1024;
     }
 
     public static int EstimateTrainingBatchSize(

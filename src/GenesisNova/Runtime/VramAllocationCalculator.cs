@@ -36,10 +36,10 @@ public static class VramAllocationCalculator
     {
         return vramMb switch
         {
-            <= 4096 => 2048,
-            <= 6144 => 3072,
-            <= 8192 => 4096,
-            _ => 6144
+            <= 4096 => 512,
+            <= 6144 => 512,
+            <= 8192 => 768,
+            _ => 1024
         };
     }
 
@@ -56,7 +56,7 @@ public static class VramAllocationCalculator
     public static VramAllocation GetOptimal6GbAllocation()
     {
         const int totalVramMb = 6144;
-        const int modelTargetMb = 3072;    // 3GB for model
+        const int modelTargetMb = 512;    // 0.5GB aggressive model target
         const int trainingOverheadMb = 1536;  // 1.5GB for gradients + optimizer + batch
         const int systemReserveMb = 1536;     // 1.5GB system reserve
         

@@ -32,13 +32,12 @@ public sealed class GenesisAutonomousTrainingPlanner
         GenesisAutonomousTrainingRequest request,
         IReadOnlyList<GenesisAutonomousTrainingRound> history)
     {
-        if (_creators.Count == 0)
-            throw new InvalidOperationException("No example creators are registered.");
+        var activeCreators = ResolveActiveCreators(request);
 
         var round = history.Count;
-        var signals = BuildSignals(request, history);
+        var signals = BuildSignals(request, history, activeCreators);
 
-        var creator = ChooseCreator(request, signals, history);
+        var creator = ChooseCreator(request, signals, history, activeCreators);
         var creatorHistory = history
             .Where(h => h.CreatorName.Equals(creator.Name, StringComparison.OrdinalIgnoreCase))
             .ToArray();
@@ -65,13 +64,12 @@ public sealed class GenesisAutonomousTrainingPlanner
         IReadOnlyList<GenesisAutonomousTrainingRound> history,
         int roundIndex)
     {
-        if (_creators.Count == 0)
-            throw new InvalidOperationException("No example creators are registered.");
+        var activeCreators = ResolveActiveCreators(request);
 
-        var signals = BuildSignals(request, history)
+        var signals = BuildSignals(request, history, activeCreators)
             .ToDictionary(s => s.CreatorName, StringComparer.OrdinalIgnoreCase);
-        var plans = new List<GenesisAutonomousCreatorPlan>(_creators.Count);
-        foreach (var creator in _creators)
+        var plans = new List<GenesisAutonomousCreatorPlan>(activeCreators.Count);
+        foreach (var creator in activeCreators)
         {
             var creatorHistory = history
                 .Where(h => h.CreatorName.Equals(creator.Name, StringComparison.OrdinalIgnoreCase))
@@ -271,18 +269,19 @@ public sealed class GenesisAutonomousTrainingPlanner
     private IExampleCreator ChooseCreator(
         GenesisAutonomousTrainingRequest request,
         IReadOnlyList<CreatorSignal> signals,
-        IReadOnlyList<GenesisAutonomousTrainingRound> history)
+        IReadOnlyList<GenesisAutonomousTrainingRound> history,
+        IReadOnlyList<IExampleCreator> activeCreators)
     {
         if (!string.IsNullOrWhiteSpace(request.PreferredCreator))
         {
-            var preferred = _creators.FirstOrDefault(c =>
+            var preferred = activeCreators.FirstOrDefault(c =>
                 c.Name.Equals(request.PreferredCreator, StringComparison.OrdinalIgnoreCase));
             if (preferred is not null)
                 return preferred;
         }
 
         if (signals.Count == 0)
-            return _creators[0];
+            return activeCreators[0];
 
         var candidateSignals = signals.Where(s => !s.Mastered).ToArray();
         if (candidateSignals.Length == 0)
@@ -291,7 +290,7 @@ public sealed class GenesisAutonomousTrainingPlanner
         var chosen = candidateSignals
             .OrderByDescending(s => s.Priority)
             .ThenBy(s => s.Attempts)
-            .ThenBy(s => FindCreatorIndex(s.CreatorName))
+            .ThenBy(s => FindCreatorIndex(activeCreators, s.CreatorName))
             .First();
 
         if (history.Count >= 2)
@@ -314,7 +313,7 @@ public sealed class GenesisAutonomousTrainingPlanner
             }
         }
 
-        return _creators[FindCreatorIndex(chosen.CreatorName)];
+        return activeCreators[FindCreatorIndex(activeCreators, chosen.CreatorName)];
     }
 
     private int ChooseDifficulty(
@@ -460,9 +459,10 @@ public sealed class GenesisAutonomousTrainingPlanner
 
     private IReadOnlyList<CreatorSignal> BuildSignals(
         GenesisAutonomousTrainingRequest request,
-        IReadOnlyList<GenesisAutonomousTrainingRound> history)
+        IReadOnlyList<GenesisAutonomousTrainingRound> history,
+        IReadOnlyList<IExampleCreator> activeCreators)
     {
-        var list = new List<CreatorSignal>(_creators.Count);
+        var list = new List<CreatorSignal>(activeCreators.Count);
         var signalWindow = Math.Max(1, request.SignalWindow);
         var recentCreators = history
             .TakeLast(signalWindow)
@@ -482,7 +482,7 @@ public sealed class GenesisAutonomousTrainingPlanner
             }
         }
 
-        foreach (var creator in _creators)
+        foreach (var creator in activeCreators)
         {
             var creatorRounds = history
                 .Where(h => h.CreatorName.Equals(creator.Name, StringComparison.OrdinalIgnoreCase))
@@ -557,14 +557,34 @@ public sealed class GenesisAutonomousTrainingPlanner
     private static double GetEffectiveCreatorSuccess(GenesisAutonomousTrainingRound round)
         => round.CreatorProgress?.SuccessRate ?? round.Report.ExampleSuccessRate;
 
-    private int FindCreatorIndex(string creatorName)
+    private int FindCreatorIndex(IReadOnlyList<IExampleCreator> creators, string creatorName)
     {
-        for (var i = 0; i < _creators.Count; i++)
+        for (var i = 0; i < creators.Count; i++)
         {
-            if (_creators[i].Name.Equals(creatorName, StringComparison.OrdinalIgnoreCase))
+            if (creators[i].Name.Equals(creatorName, StringComparison.OrdinalIgnoreCase))
                 return i;
         }
 
         return -1;
+    }
+
+    private IReadOnlyList<IExampleCreator> ResolveActiveCreators(GenesisAutonomousTrainingRequest request)
+    {
+        if (_creators.Count == 0)
+            throw new InvalidOperationException("No example creators are registered.");
+
+        if (request.EnabledCreators is not { Count: > 0 })
+            return _creators;
+
+        var enabled = request.EnabledCreators
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var active = _creators
+            .Where(c => enabled.Contains(c.Name))
+            .ToArray();
+        if (active.Length == 0)
+            throw new InvalidOperationException("No selected autonomous datasets matched registered creators.");
+
+        return active;
     }
 }

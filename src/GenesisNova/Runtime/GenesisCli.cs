@@ -54,7 +54,7 @@ public static class GenesisCli
         var maxExactDrop = ParseDouble(args, "--max-exact-drop", fallback: 0.01);
         var effectiveThreads = deterministic ? 1 : (threads ?? 0);
 
-        var resolvedHidden = hiddenSize ?? 6144;
+        var resolvedHidden = hiddenSize ?? 512;
         if (autoScaleVram && backend == ComputeBackend.Gpu)
         {
             var examples = await GenesisTrainingDataLoader.LoadFromFileAsync(file);

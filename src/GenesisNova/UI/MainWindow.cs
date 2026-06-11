@@ -38,7 +38,7 @@ public class MainWindow : Form
         _runtime = new GenesisEvalAppRuntime(new GenesisNovaConfig
         {
             Backend = ComputeBackend.Gpu,
-            HiddenSize = 256,  // Conservative initial size; will be updated based on GPU VRAM after loading data
+            HiddenSize = 512,  // Aggressive low-size default; autoscale can still raise it when explicitly enabled
             AutoPersist = true,
             AutoResume = true,
             LocalStateDirectory = reliableStateDir,
@@ -690,6 +690,65 @@ public class MainWindow : Form
             Font = new Font("Segoe UI", 8),
             ForeColor = Color.DimGray
         });
+        layout.Controls.Add(new Label { Height = 6 });
+        layout.Controls.Add(new Label { Text = "Datasets for this run", Height = 24, Font = new Font("Segoe UI", 10, FontStyle.Bold) });
+        layout.Controls.Add(new Label
+        {
+            Text = "Toggle each dataset on/off. Only checked datasets are used in this run (and live updates apply next round).",
+            Width = 300,
+            Height = 34,
+            Font = new Font("Segoe UI", 8),
+            ForeColor = Color.DimGray
+        });
+        var creatorSelection = new CheckedListBox
+        {
+            Width = 300,
+            Height = 168,
+            CheckOnClick = true,
+            BorderStyle = BorderStyle.FixedSingle,
+            Name = "AutoCreatorSelectionList"
+        };
+        var creatorItems = ExampleCreatorRegistry.All
+            .OrderBy(c => c.EstimatedComplexity)
+            .ThenBy(c => c.Name, StringComparer.OrdinalIgnoreCase)
+            .Select(c => c.Name)
+            .ToArray();
+        creatorSelection.Items.AddRange(creatorItems);
+        for (var i = 0; i < creatorSelection.Items.Count; i++)
+            creatorSelection.SetItemChecked(i, true);
+        layout.Controls.Add(creatorSelection);
+        var creatorToggleButtons = new FlowLayoutPanel
+        {
+            Width = 300,
+            Height = 34,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false
+        };
+        var checkAllBtn = new Button
+        {
+            Text = "Check all",
+            Width = 146,
+            Height = 28
+        };
+        checkAllBtn.Click += (_, _) =>
+        {
+            for (var i = 0; i < creatorSelection.Items.Count; i++)
+                creatorSelection.SetItemChecked(i, true);
+        };
+        var uncheckAllBtn = new Button
+        {
+            Text = "Uncheck all",
+            Width = 146,
+            Height = 28
+        };
+        uncheckAllBtn.Click += (_, _) =>
+        {
+            for (var i = 0; i < creatorSelection.Items.Count; i++)
+                creatorSelection.SetItemChecked(i, false);
+        };
+        creatorToggleButtons.Controls.Add(checkAllBtn);
+        creatorToggleButtons.Controls.Add(uncheckAllBtn);
+        layout.Controls.Add(creatorToggleButtons);
 
         layout.Controls.Add(new Label { Text = "Seed values (mostly first-round only)", Height = 24, Font = new Font("Segoe UI", 10, FontStyle.Bold) });
         layout.Controls.Add(new Label { Text = "Initial Sample Count:", Height = 20, Font = new Font("Segoe UI", 9) });
@@ -1114,6 +1173,24 @@ public class MainWindow : Form
         var maxDifficulty = GetControl<NumericUpDown>("AutoMaxDifficultyInput");
         var roundBudget = GetControl<NumericUpDown>("AutoRoundTrainBudgetInput");
         var generationConcurrency = GetControl<NumericUpDown>("AutoGenerationConcurrencyInput");
+        var creatorSelection = GetControl<CheckedListBox>("AutoCreatorSelectionList");
+        var enabledCreators = creatorSelection is null
+            ? ExampleCreatorRegistry.All.Select(c => c.Name).ToArray()
+            : creatorSelection.CheckedItems
+                .Cast<object>()
+                .Select(item => item?.ToString())
+                .Where(name => !string.IsNullOrWhiteSpace(name))
+                .Select(name => name!)
+                .ToArray();
+        if (enabledCreators.Length == 0)
+        {
+            MessageBox.Show(
+                "Select at least one dataset in the autonomous dataset checklist before starting.",
+                "Autonomous Training",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+            return null;
+        }
 
         return new GenesisAutonomousTrainingRequest(
             MaxRounds: (int)(maxRounds?.Value ?? 0),
@@ -1128,7 +1205,8 @@ public class MainWindow : Form
             MaxTrainCount: (int)(maxTrain?.Value ?? defaults.MaxTrainCount),
             MaxDifficulty: (int)(maxDifficulty?.Value ?? defaults.MaxDifficulty),
             RoundTrainBudget: (int)(roundBudget?.Value ?? defaults.RoundBudget),
-            MaxGenerationConcurrency: (int)(generationConcurrency?.Value ?? defaults.GenerationConcurrency));
+            MaxGenerationConcurrency: (int)(generationConcurrency?.Value ?? defaults.GenerationConcurrency),
+            EnabledCreators: enabledCreators);
     }
 
     private async Task StartAutonomousTraining()
@@ -1151,6 +1229,7 @@ public class MainWindow : Form
         {
             var roundsLabel = request.MaxRounds <= 0 ? "∞" : request.MaxRounds.ToString();
             AppendAutonomousOutput($"[auto] starting: rounds={roundsLabel} sample={request.InitialSampleCount} train={request.InitialTrainCount} difficulty={request.InitialDifficulty}");
+            AppendAutonomousOutput($"[auto] datasets enabled: {string.Join(", ", request.EnabledCreators ?? [])}");
             AppendAutonomousOutput("[auto] device policy: CUDA training when available with CPU fallback, GPU inference (device 0, A3000 preferred)");
             
             // Estimate and display GPU sizing for this training session using live VRAM.
@@ -1324,7 +1403,8 @@ public class MainWindow : Form
             MaxTrainCount = live.MaxTrainCount,
             MaxDifficulty = live.MaxDifficulty,
             RoundTrainBudget = live.RoundTrainBudget,
-            MaxGenerationConcurrency = live.MaxGenerationConcurrency
+            MaxGenerationConcurrency = live.MaxGenerationConcurrency,
+            EnabledCreators = live.EnabledCreators
         };
     }
 

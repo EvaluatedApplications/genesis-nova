@@ -243,15 +243,18 @@ public sealed class GenesisEvalAppRuntime
                             CreatorSummary: BuildCreatorSummary(report)));
 
                         var currentLoss = report.AverageLoss.TokenLoss;
-                        if (currentLoss < _lossTracker.BestLoss)
-                        {
+                        var improved = currentLoss < _lossTracker.BestLoss;
+                        if (improved)
                             _lossTracker.BestLoss = currentLoss;
-                            _persister.Persist(
-                                reason: "auto-train-improved",
-                                detail: $"datasets={plan.CreatorPlans.Count} trained={examples.Count} epochs={plan.Epochs} loss={currentLoss:F4}",
-                                exampleCount: examples.Count,
-                                loss: currentLoss);
-                        }
+                        
+                        // CRITICAL: Always persist after each autonomous round, not just on improvement
+                        // This ensures model state is saved after every round regardless of loss trajectory
+                        var reason = improved ? "auto-train-improved" : "auto-train-completed";
+                        _persister.Persist(
+                            reason: reason,
+                            detail: $"datasets={plan.CreatorPlans.Count} trained={examples.Count} epochs={plan.Epochs} loss={currentLoss:F4} improved={improved}",
+                            exampleCount: examples.Count,
+                            loss: currentLoss);
 
                         var avgDifficulty = plan.CreatorPlans.Count == 0
                             ? 0

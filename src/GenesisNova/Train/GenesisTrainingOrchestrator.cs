@@ -140,6 +140,11 @@ public sealed class GenesisTrainingOrchestrator
 
         var totalSteps = 0;
         var sumToken = 0.0;
+        var sumRoute = 0.0;
+        var sumConsistency = 0.0;
+        var sumConservation = 0.0;
+        var sumMemory = 0.0;
+        var sumTotal = 0.0;
         var spaceManagementCycles = 0;
         var totalNodesPruned = 0;
         var totalRelationsPruned = 0;
@@ -229,6 +234,11 @@ public sealed class GenesisTrainingOrchestrator
                     totalSteps++;
                     batchCount++;
                     sumToken += loss.TokenLoss;
+                    sumRoute += loss.RouteLoss;
+                    sumConsistency += loss.ConsistencyLoss;
+                    sumConservation += loss.ConservationLoss;
+                    sumMemory += loss.MemoryLoss;
+                    sumTotal += loss.TotalLoss;
                     epochSum += loss.TotalLoss * batch.Count;
                     foreach (var update in batchResult.ExampleLosses)
                     {
@@ -334,6 +344,11 @@ public sealed class GenesisTrainingOrchestrator
 
         overallStart.Stop();
         var avgTokenLoss = sumToken / Math.Max(1, totalSteps);
+        var avgRouteLoss = sumRoute / Math.Max(1, totalSteps);
+        var avgConsistencyLoss = sumConsistency / Math.Max(1, totalSteps);
+        var avgConservationLoss = sumConservation / Math.Max(1, totalSteps);
+        var avgMemoryLoss = sumMemory / Math.Max(1, totalSteps);
+        var avgTotalLoss = sumTotal / Math.Max(1, totalSteps);
         var contradictionRate = EstimateContradictionRate(examples);
         var trackedExamples = perExampleProgress.Values.ToArray();
         var correctCount = trackedExamples.Count(x => x.SuccessRate >= 0.5);
@@ -403,11 +418,11 @@ public sealed class GenesisTrainingOrchestrator
             ExampleCount: examples.Count,
             AverageLoss: new GenesisStepLoss(
                 TokenLoss: avgTokenLoss,
-                RouteLoss: 0.0,
-                ConsistencyLoss: 0.0,
-                ConservationLoss: 0.0,
-                MemoryLoss: 0.0,
-                TotalLoss: avgTokenLoss),
+                RouteLoss: avgRouteLoss,
+                ConsistencyLoss: avgConsistencyLoss,
+                ConservationLoss: avgConservationLoss,
+                MemoryLoss: avgMemoryLoss,
+                TotalLoss: avgTotalLoss),
             ContradictionRate: contradictionRate,
             ConservationDrift: 0.0,
             MemoryOverwriteRate: totalRelationsPruned / (double)Math.Max(1, examples.Count),

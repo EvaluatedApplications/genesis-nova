@@ -9,6 +9,11 @@ namespace GenesisNova.Infer;
 public sealed class GenesisInferenceEngine
 {
     private const double DefaultNeuralBiasScale = 1.4;
+    private const double MinAdaptiveBiasScale = 0.8;
+    private const double MaxAdaptiveBiasScale = 2.0;
+    private const double TelemetryEmaAlpha = 0.15;
+    private const double CheckpointDisableThreshold = 0.30;
+    private const double CheckpointEnableThreshold = 0.52;
 
     private readonly IGenesisTokenizer _tokenizer;
     private readonly GenesisNeuralModel _model;
@@ -21,6 +26,12 @@ public sealed class GenesisInferenceEngine
     private string? _cachedPlatonicFilePath;
     private DateTime _cachedPlatonicFileWriteUtc;
     private IReadOnlyCollection<string>? _cachedPlatonicFileConcepts;
+    private readonly object _telemetryLock = new();
+    private double _adaptiveBiasScale = DefaultNeuralBiasScale;
+    private double _telemetrySuccessEma = 0.5;
+    private double _checkpointConceptEfficacyEma = 0.5;
+    private bool _checkpointContextConceptsEnabled = true;
+    private InferenceTelemetryHint _trainerHint = InferenceTelemetryHint.Default;
 
     public GenesisInferenceEngine(
         IGenesisTokenizer tokenizer,
@@ -42,6 +53,46 @@ public sealed class GenesisInferenceEngine
 
     public GenerationResult Generate(GenerationRequest request)
         => GenerateSingle(request);
+
+    public void ReportTelemetryOutcome(bool isSuccessful, GenerationResult result)
+    {
+        lock (_telemetryLock)
+        {
+            _telemetrySuccessEma = BlendEma(_telemetrySuccessEma, isSuccessful ? 1.0 : 0.0, TelemetryEmaAlpha);
+
+            var confidenceSignal = Math.Clamp(result.PlatonicConfidence, 0.0, 1.0);
+            var fallbackSignal = result.UsedNeuralFallback ? 0.0 : 1.0;
+            var biasSignal = result.AppliedBiasCount > 0
+                ? Math.Clamp(result.AverageBiasMagnitude / 0.9, 0.0, 1.0)
+                : 0.5;
+            var routeSignal = result.UsedPlatonicQuery ? confidenceSignal : 0.5;
+            var efficacySignal = Math.Clamp(
+                (_telemetrySuccessEma * 0.60) +
+                (fallbackSignal * 0.20) +
+                (routeSignal * 0.10) +
+                (biasSignal * 0.10),
+                0.0,
+                1.0);
+
+            _checkpointConceptEfficacyEma = BlendEma(_checkpointConceptEfficacyEma, efficacySignal, TelemetryEmaAlpha);
+
+            var scaleTarget = DefaultNeuralBiasScale * (0.75 + (0.55 * _checkpointConceptEfficacyEma));
+            _adaptiveBiasScale = Math.Clamp(scaleTarget, MinAdaptiveBiasScale, MaxAdaptiveBiasScale);
+
+            if (_checkpointContextConceptsEnabled && _checkpointConceptEfficacyEma < CheckpointDisableThreshold)
+                _checkpointContextConceptsEnabled = false;
+            else if (!_checkpointContextConceptsEnabled && _checkpointConceptEfficacyEma > CheckpointEnableThreshold)
+                _checkpointContextConceptsEnabled = true;
+        }
+    }
+
+    public void ApplyTelemetryHint(InferenceTelemetryHint hint)
+    {
+        lock (_telemetryLock)
+            _trainerHint = new InferenceTelemetryHint(
+                BiasScale: Math.Clamp(hint.BiasScale, 0.7, 1.4),
+                EnableContextBias: hint.EnableContextBias);
+    }
 
     private GenerationResult GenerateSingle(GenerationRequest request)
     {
@@ -158,7 +209,10 @@ public sealed class GenesisInferenceEngine
         IReadOnlyList<int> inputTokens,
         bool neuralFallback)
     {
-        var checkpointContextConcepts = LoadCheckpointContextConcepts();
+        var (adaptiveBiasScale, checkpointContextEnabled) = GetAdaptiveTelemetryState();
+        var checkpointContextConcepts = checkpointContextEnabled
+            ? LoadCheckpointContextConcepts()
+            : Array.Empty<string>();
         var generated = new List<int>(Math.Max(1, request.MaxNewTokens));
         var totalBiasCount = 0;
         var biasMagnitudeSum = 0.0;
@@ -168,9 +222,9 @@ public sealed class GenesisInferenceEngine
             double biasMagnitude;
             IReadOnlyDictionary<int, double>? biases;
             if (checkpointContextConcepts.Count > 0)
-                biases = BuildTokenBiases(inputTokens, generated, DefaultNeuralBiasScale, checkpointContextConcepts, out biasMagnitude);
+                biases = BuildTokenBiases(inputTokens, generated, adaptiveBiasScale, checkpointContextConcepts, out biasMagnitude);
             else
-                biases = BuildTokenBiases(inputTokens, generated, DefaultNeuralBiasScale, out biasMagnitude);
+                biases = BuildTokenBiases(inputTokens, generated, adaptiveBiasScale, out biasMagnitude);
 
             var next = _model.PredictNextToken(
                 inputTokens,
@@ -715,6 +769,19 @@ public sealed class GenesisInferenceEngine
             output.Add(fragment.ToLowerInvariant());
         }
     }
+
+    private (double BiasScale, bool CheckpointContextEnabled) GetAdaptiveTelemetryState()
+    {
+        lock (_telemetryLock)
+        {
+            var biasScale = Math.Clamp(_adaptiveBiasScale * _trainerHint.BiasScale, MinAdaptiveBiasScale, MaxAdaptiveBiasScale);
+            var checkpointEnabled = _checkpointContextConceptsEnabled && _trainerHint.EnableContextBias;
+            return (biasScale, checkpointEnabled);
+        }
+    }
+
+    private static double BlendEma(double current, double sample, double alpha)
+        => (current * (1.0 - alpha)) + (sample * alpha);
 
     private enum ArithmeticOperation
     {

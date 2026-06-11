@@ -1,3 +1,5 @@
+using System.Collections.Generic;
+
 namespace GenesisNova.Train;
 
 public sealed record GenesisAutonomousTrainingRequest(
@@ -38,4 +40,5 @@ public sealed record GenesisAutonomousTrainingRequest(
     double ConsecutivePenalty = 1.4,
     int RoundTrainBudget = 16,
     int MaxGenerationConcurrency = 4,
-    string? PreferredCreator = null);
+    string? PreferredCreator = null,
+    IReadOnlyList<string>? EnabledCreators = null);

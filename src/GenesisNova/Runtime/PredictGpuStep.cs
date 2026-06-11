@@ -16,7 +16,7 @@ internal sealed class PredictGpuStep
         var result = _state.Inference.Generate(new GenerationRequest(
             Input: data.Input,
             MaxNewTokens: data.MaxNewTokens));
-        _state.Trainer.ObserveInferenceResult(data.Input, result.Output);
+        _state.Trainer.ObserveInferenceResult(data.Input, result.Output, result);
         return data with { Result = result };
     }
 }

@@ -1,7 +1,7 @@
 namespace GenesisNova.Core;
 
 public sealed record GenesisNovaConfig(
-    int HiddenSize = 6144,
+    int HiddenSize = 512,
     int RouteCount = 8,
     double LearningRate = 0.1,
     int Seed = 42,

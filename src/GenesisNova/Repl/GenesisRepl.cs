@@ -14,7 +14,7 @@ public sealed class GenesisRepl
         _runtime = runtime ?? new GenesisEvalAppRuntime(new GenesisNovaConfig
         {
             Backend = ComputeBackend.Gpu,
-            HiddenSize = 1024,
+            HiddenSize = 512,
             AutoScaleVram = true
         });
     }

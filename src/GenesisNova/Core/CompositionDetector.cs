@@ -9,6 +9,17 @@ namespace GenesisNova.Core;
 /// </summary>
 public class CompositionDetector
 {
+    // Strict numeric classification: only a plain signed decimal counts as a number when
+    // deciding whether an extracted arg / an example's output is numeric. NumberStyles.Any
+    // would accept trailing-sign garbage like "5-"/"0+" (parses as 5/0), miscounting malformed
+    // tokens as linear-fit data and skewing the Sum/Difference symmetry test. Stays aligned with
+    // PlatonicSpaceMemory.TryParseNumber.
+    private const System.Globalization.NumberStyles NumericStyle =
+        System.Globalization.NumberStyles.AllowLeadingSign
+        | System.Globalization.NumberStyles.AllowDecimalPoint
+        | System.Globalization.NumberStyles.AllowLeadingWhite
+        | System.Globalization.NumberStyles.AllowTrailingWhite;
+
     /// <summary>
     /// Composition mode for multi-argument operations.
     /// </summary>
@@ -31,7 +42,7 @@ public class CompositionDetector
             return null;
 
         // Extract numeric pairs
-        var nfi = System.Globalization.NumberStyles.Any;
+        var nfi = NumericStyle;
         var inv = System.Globalization.CultureInfo.InvariantCulture;
 
         double sumResidual = 0, diffResidual = 0;
@@ -80,9 +91,9 @@ public class CompositionDetector
     /// </summary>
     private static double[] ExtractNumericArgs(string input)
     {
-        var nfi = System.Globalization.NumberStyles.Any;
+        var nfi = NumericStyle;
         var inv = System.Globalization.CultureInfo.InvariantCulture;
-        
+
         var args = new List<double>();
         var current = string.Empty;
 

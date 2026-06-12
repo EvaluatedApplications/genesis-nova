@@ -15,11 +15,33 @@ public record LogLinearFit(
     int VerifiedPairs);
 
 /// <summary>
+/// JSON-serializable snapshot of a <see cref="FoldPathDiscovery"/> for checkpoint persistence.
+/// Captures the discovered fold paths, log-linear fits, and per-operation composition modes
+/// (the data that drives <c>HasOperation</c>/<c>TryPredict</c>/<c>GetComposition</c>).
+/// The raw <c>_operationExamples</c> string ring is intentionally omitted — it re-accumulates on the
+/// next training pass and is large. All members are System.Text.Json-friendly: the value records
+/// (<see cref="FoldPathDiscovery.FoldPath"/>, <see cref="LogLinearFit"/>) are plain primitive records,
+/// and <see cref="CompositionMode"/> is an enum.
+/// </summary>
+public sealed record FoldPathDiscoverySnapshot(
+    Dictionary<string, FoldPathDiscovery.FoldPath> FoldPaths,
+    Dictionary<string, LogLinearFit> LogLinearFits,
+    Dictionary<string, CompositionMode> Compositions);
+
+/// <summary>
 /// Discovers compositional fold paths and log-linear relationships.
 /// Ported from genesis-engine FoldPathDiscovery.
 /// </summary>
 public class FoldPathDiscovery
 {
+    // Strict numeric classification: only a plain signed decimal counts as a numeric arg.
+    // The candidate substring is already restricted to digit/'.'/'-' chars, but NumberStyles.Any
+    // would still accept a trailing sign (e.g. "3-" → 3), letting malformed runs be extracted as
+    // numbers. Stays aligned with PlatonicSpaceMemory.TryParseNumber.
+    private const NumberStyles NumericStyle =
+        NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint
+        | NumberStyles.AllowLeadingWhite | NumberStyles.AllowTrailingWhite;
+
     /// <summary>
     /// A discovered fold: targetOp(a,b) ≈ fold(baseOp, step=a, count=b)
     /// </summary>
@@ -97,6 +119,62 @@ public class FoldPathDiscovery
         return _foldPaths.ContainsKey(operation) 
             || _logLinearFits.ContainsKey(operation)
             || _operationExamples.ContainsKey(operation);
+    }
+
+    /// <summary>
+    /// Export a JSON-serializable snapshot of the discovered fold paths, log-linear fits, and
+    /// composition modes for checkpoint persistence. The raw per-operation example rings are omitted
+    /// (re-accumulated on the next training pass). Fresh dictionary copies are taken so the snapshot
+    /// is independent of later mutation.
+    /// </summary>
+    public FoldPathDiscoverySnapshot ExportSnapshot()
+    {
+        return new FoldPathDiscoverySnapshot(
+            new Dictionary<string, FoldPath>(_foldPaths),
+            new Dictionary<string, LogLinearFit>(_logLinearFits),
+            new Dictionary<string, CompositionMode>(_compositions));
+    }
+
+    /// <summary>
+    /// Rebuild the discovered fold paths, log-linear fits, and composition modes from a checkpoint
+    /// snapshot. Clears the existing three dictionaries first. The example rings are not restored
+    /// (they re-accumulate on the next training pass).
+    /// </summary>
+    public void ImportSnapshot(FoldPathDiscoverySnapshot snapshot)
+    {
+        if (snapshot is null)
+            return;
+
+        _foldPaths.Clear();
+        _logLinearFits.Clear();
+        _compositions.Clear();
+
+        if (snapshot.FoldPaths is not null)
+        {
+            foreach (var pair in snapshot.FoldPaths)
+            {
+                if (!string.IsNullOrEmpty(pair.Key) && pair.Value is not null)
+                    _foldPaths[pair.Key] = pair.Value;
+            }
+        }
+
+        if (snapshot.LogLinearFits is not null)
+        {
+            foreach (var pair in snapshot.LogLinearFits)
+            {
+                if (!string.IsNullOrEmpty(pair.Key) && pair.Value is not null)
+                    _logLinearFits[pair.Key] = pair.Value;
+            }
+        }
+
+        if (snapshot.Compositions is not null)
+        {
+            foreach (var pair in snapshot.Compositions)
+            {
+                if (!string.IsNullOrEmpty(pair.Key))
+                    _compositions[pair.Key] = pair.Value;
+            }
+        }
     }
 
     /// <summary>
@@ -379,7 +457,7 @@ public class FoldPathDiscovery
     /// </summary>
     private static double[] ExtractNumericArgs(string input)
     {
-        var nfi = NumberStyles.Any;
+        var nfi = NumericStyle;
         var inv = CultureInfo.InvariantCulture;
         
         var args = new List<double>();

@@ -124,13 +124,16 @@ public sealed class GenesisEvalAppRuntime
                         // Replaces the former raw Parallel.ForEach so per-creator generation
                         // participates in the shared CPU gate + adaptive tuner. Parallelism
                         // bounds are derived from measured VRAM headroom (see GpuResourceGatePlanner).
+                        // NOTE: the per-item body is NOT re-gated on Cpu. Nesting the SAME resource
+                        // gate inside the outer Cpu gate self-deadlocks at 0% CPU — the parent holds
+                        // the Cpu budget the children wait for. The outer gate plus the bounded
+                        // ForEach parallelism already throttle per-creator generation.
                         .ForEach(
                             GenerateAutonomousCandidatePoolsStep.SelectWorkItems,
                             GenerateAutonomousCandidatePoolsStep.MergePools,
                             "CandidatePools",
                             poolPrepParallelism,
-                            sub => sub.Gate(ResourceKind.Cpu, null, gg =>
-                                gg.AddStep("GeneratePool", generateCandidatePoolItemStep)))
+                            sub => sub.AddStep("GeneratePool", generateCandidatePoolItemStep))
                         .AddStep("BuildBatch", buildAutonomousBatchStep)
                         .AddStep("RunTraining", runAutonomousRoundStep))
                     .Run(out autonomousRound)

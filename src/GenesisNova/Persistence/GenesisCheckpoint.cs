@@ -16,9 +16,18 @@ public sealed record GenesisCheckpoint(
     MatrixSnapshot? RouteWeights = null,
     double[]? RouteBias = null,
     string? TrainerLearningStateJson = null,
+    // Edit-head + shared GRU gate weights. Optional/null on pre-GRU checkpoints (the model
+    // reinitialises them on load). Without these, the trained GRU — which EVERY head reads via
+    // hInput — was silently dropped on save, so a loaded model behaved like an untrained one.
+    MatrixSnapshot? EditWeights = null,
+    double[]? EditBias = null,
+    MatrixSnapshot? GruWih = null,
+    MatrixSnapshot? GruWhh = null,
+    double[]? GruBih = null,
+    double[]? GruBhh = null,
     int Version = 0)
 {
-    public const int CurrentVersion = 2;
+    public const int CurrentVersion = 3;
 }
 
 public sealed record MatrixSnapshot(int Rows, int Cols, double[] Values)

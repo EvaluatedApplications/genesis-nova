@@ -1,3 +1,5 @@
+using GenesisNova.Core;
+
 namespace GenesisNova.Train;
 
 public sealed record GenesisTrainerLearningState(
@@ -9,7 +11,11 @@ public sealed record GenesisTrainerLearningState(
     GenesisTrainerTelemetryState? Telemetry,
     int SpacePolicyStepCounter,
     int PriorSpaceActionId,
-    IReadOnlyList<ConceptPlanDecisionJournalEntry>? ConceptPlanDecisionJournalEntries);
+    IReadOnlyList<ConceptPlanDecisionJournalEntry>? ConceptPlanDecisionJournalEntries,
+    // Appended (optional) checkpoint-persistence fields. Old JSON without these deserializes to null,
+    // and existing positional construction remains valid by passing these last by name.
+    TransformAccumulatorSnapshot? TransformAccumulator = null,
+    FoldPathDiscoverySnapshot? FoldPaths = null);
 
 public sealed record MasteredRehearsalExample(
     string Input,

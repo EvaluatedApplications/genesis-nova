@@ -18,8 +18,22 @@ public sealed class PlatonicSpaceMemory
 {
     private const int MaxPlatonicNodes = 12_000;
     private const int MaxPlatonicRelations = 48_000;
-    private const int MaxTriadicConceptsPerObservation = 6;
     private const double GeometryLearningRate = 0.04;
+
+    // Contrastive repulsion — ported from the genesis source of truth (GraphAligner.NudgeGraphAlignment,
+    // which "push[es] away from sampled non-neighbours ... maintain[s] discriminability between unrelated
+    // elements"). Nova previously ONLY attracted observed pairs, so unrelated/fringe concepts drifted
+    // together. This throttled batch pass pushes each concept away from a few sampled UNRELATED concepts
+    // so proximity must be EARNED by confirmed relations. Runs every RepulsionInterval observations.
+    // Strength is genesis-faithful: repulsion is a GENTLE discriminability pressure (~0.1x attraction),
+    // not a strong separator. A stronger setting separates unrelated concepts more but overpowers weak
+    // genuine attractions (e.g. text→frozen-number equivalence), so we keep the source-of-truth scale.
+    private const int RepulsionInterval = 16;
+    private const int RepulsionSamples = 5;
+    private const double RepulsionRate = 0.02;
+    private const double RepulsionRatio = 0.1; // repulsion strength relative to RepulsionRate floor
+    private int _observationsSinceRepulsion;
+    private int _repulsionPassCount;
 
     public sealed record SpaceMaintenanceRequest(
         int MaxRelationPrunes = 64,
@@ -44,12 +58,15 @@ public sealed class PlatonicSpaceMemory
     private readonly int _faceDimension;
     private readonly Dictionary<string, ConceptNode> _nodes = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, ConceptRelation> _relations = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<string, LatticeNeighborhood> _latticeByConcept = new(StringComparer.OrdinalIgnoreCase);
+    private readonly PlatonicLattice _lattice;
     private long _utilityStep;
 
     public PlatonicSpaceMemory(int faceDimension, int seed = 42)
     {
         _faceDimension = Math.Max(4, faceDimension);
+        _lattice = new PlatonicLattice(
+            nodeNames: () => _nodes.Keys,
+            nodeFaces: () => _nodes.Values.Select(n => (n.Name, n.PositiveFace)));
     }
 
     public int NodeCount => _nodes.Count;
@@ -97,40 +114,36 @@ public sealed class PlatonicSpaceMemory
         int maxCandidates = 96)
     {
         var limit = Math.Clamp(maxNeighbors, 1, 32);
-        var budget = Math.Clamp(maxCandidates, 8, 512);
         if (!TryGetConceptFace(concept, out var conceptFace) || conceptFace.Length == 0)
             return Array.Empty<(string Symbol, double Distance)>();
 
-        IEnumerable<string> source = candidates is { Count: > 0 }
-            ? candidates
-            : _nodes.Keys;
+        var conceptKey = Normalize(concept);
 
-        var scored = new List<(string Symbol, double Distance)>(Math.Min(budget, limit * 4));
-        var seen = 0;
-        foreach (var candidate in source)
+        // Bounded candidate set: score those directly to keep per-turn work bounded.
+        if (candidates is { Count: > 0 })
         {
-            if (seen >= budget)
-                break;
-
-            var normalized = Normalize(candidate);
-            if (normalized.Equals(Normalize(concept), StringComparison.OrdinalIgnoreCase))
-                continue;
-
-            if (!_nodes.TryGetValue(normalized, out var node))
-                continue;
-
-            var distance = EuclideanDistance(conceptFace, node.PositiveFace);
-            scored.Add((normalized, distance));
-            seen++;
+            var budget = Math.Clamp(maxCandidates, 8, 512);
+            var scored = new List<(string Symbol, double Distance)>(Math.Min(budget, limit * 4));
+            var seen = 0;
+            foreach (var candidate in candidates)
+            {
+                if (seen >= budget)
+                    break;
+                var normalized = Normalize(candidate);
+                if (normalized.Equals(conceptKey, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                if (!_nodes.TryGetValue(normalized, out var node))
+                    continue;
+                scored.Add((normalized, EuclideanDistance(conceptFace, node.PositiveFace)));
+                seen++;
+            }
+            return scored.Count == 0
+                ? Array.Empty<(string Symbol, double Distance)>()
+                : scored.OrderBy(x => x.Distance).Take(limit).ToArray();
         }
 
-        if (scored.Count == 0)
-            return Array.Empty<(string Symbol, double Distance)>();
-
-        return scored
-            .OrderBy(x => x.Distance)
-            .Take(limit)
-            .ToArray();
+        // Global nearest: O(log N) VP-Tree over the whole space (replaces the brute-force O(N) scan).
+        return _lattice.GetSemanticNeighbors(conceptFace, limit, conceptKey);
     }
 
     public int NumericDimensions => Math.Min(_faceDimension / 2, 21);
@@ -173,8 +186,16 @@ public sealed class PlatonicSpaceMemory
             : (0.85 * relation.SynthesisContradiction) + (0.15 * relation.LastObservedContradiction);
         relation.ObservationCount++;
 
+        // Academic update: mutate ONLY the directly-observed pair. No triadic synthesis — pulling
+        // unrelated third concepts toward this pair is cross-contamination, not signal.
         UpdateConceptGeometry(a, b, relation.SynthesisContradiction, 1.0);
-        ApplyTriadicSynthesis(a.Name, b.Name);
+
+        // Periodic contrastive repulsion keeps unrelated concepts discriminable (genesis parity).
+        if (++_observationsSinceRepulsion >= RepulsionInterval)
+        {
+            _observationsSinceRepulsion = 0;
+            ApplyContrastiveRepulsionPass();
+        }
     }
 
     public double GetContradiction(string left, string right)
@@ -342,37 +363,76 @@ public sealed class PlatonicSpaceMemory
             return Array.Empty<PlatonicNeighbor>();
 
         var key = Normalize(concept);
-        if (!_latticeByConcept.TryGetValue(key, out var neighborhood))
-            return Array.Empty<PlatonicNeighbor>();
-
-        var selectedNeighbors = neighborhood.GetNeighbors(type);
-        if (selectedNeighbors.Count == 0)
-            return Array.Empty<PlatonicNeighbor>();
-
         var capped = Math.Clamp(maxNeighbors, 1, 256);
         var threshold = Clamp01(minConfidence);
-        var top = new List<PlatonicNeighbor>(capped);
+        var collected = new Dictionary<string, PlatonicNeighbor>(StringComparer.OrdinalIgnoreCase);
 
-        foreach (var neighbor in selectedNeighbors)
+        void Consider(PlatonicNeighbor candidate)
         {
-            if (!neighborhood.RelationsByNeighbor.TryGetValue(neighbor, out var relation))
-                continue;
-
-            var confidence = 1.0 - relation.SynthesisContradiction;
-            if (confidence < threshold)
-                continue;
-
-            var neighborType = ClassifyConceptType(neighbor);
-            var candidate = new PlatonicNeighbor(
-                Concept: neighbor,
-                Confidence: confidence,
-                Type: neighborType,
-                ObservationCount: relation.ObservationCount);
-            InsertTopNeighbor(top, candidate, capped);
+            if (candidate.Confidence < threshold)
+                return;
+            if (string.Equals(candidate.Concept, key, StringComparison.OrdinalIgnoreCase))
+                return;
+            if (!collected.TryGetValue(candidate.Concept, out var existing) || candidate.Confidence > existing.Confidence)
+                collected[candidate.Concept] = candidate;
         }
 
-        return top;
+        var wantRelational = type is PlatonicNeighborhoodType.Any or PlatonicNeighborhoodType.Relational;
+        var wantNumeric = type is PlatonicNeighborhoodType.Any or PlatonicNeighborhoodType.Numeric;
+        var wantSemantic = type is PlatonicNeighborhoodType.Any or PlatonicNeighborhoodType.Semantic;
+
+        // Relational tier: explicit relation edges; confidence from the learned contradiction.
+        if (wantRelational)
+        {
+            foreach (var neighbor in _lattice.GetRelationalNeighbors(key))
+            {
+                if (!_relations.TryGetValue(RelationKey(key, neighbor), out var relation))
+                    continue;
+                Consider(new PlatonicNeighbor(
+                    Concept: neighbor,
+                    Confidence: 1.0 - relation.SynthesisContradiction,
+                    Type: ClassifyConceptType(neighbor),
+                    ObservationCount: relation.ObservationCount));
+            }
+        }
+
+        // Numeric tier: value-proximity neighbours ("position IS address"); confidence from distance.
+        if (wantNumeric && TryParseNumber(key, out var numericValue))
+        {
+            foreach (var (name, distance) in _lattice.GetNumericNeighbors(numericValue, range: capped, k: capped))
+                Consider(new PlatonicNeighbor(
+                    Concept: name,
+                    Confidence: DistanceConfidence(distance),
+                    Type: PlatonicNeighborhoodType.Numeric,
+                    ObservationCount: NodeObservation(name)));
+        }
+
+        // Semantic tier: embedding KNN via VP-Tree; confidence from face distance.
+        if (wantSemantic && TryGetConceptFace(key, out var face) && face.Length > 0)
+        {
+            foreach (var (name, distance) in _lattice.GetSemanticNeighbors(face, capped, key))
+                Consider(new PlatonicNeighbor(
+                    Concept: name,
+                    Confidence: DistanceConfidence(distance),
+                    Type: PlatonicNeighborhoodType.Semantic,
+                    ObservationCount: NodeObservation(name)));
+        }
+
+        if (collected.Count == 0)
+            return Array.Empty<PlatonicNeighbor>();
+
+        return collected.Values
+            .OrderByDescending(n => n.Confidence)
+            .ThenBy(n => n.Concept, StringComparer.OrdinalIgnoreCase)
+            .Take(capped)
+            .ToArray();
     }
+
+    // Map a non-negative face/value distance to a confidence in (0, 1]; nearer ⇒ more confident.
+    private static double DistanceConfidence(double distance) => 1.0 / (1.0 + Math.Max(0.0, distance));
+
+    private int NodeObservation(string concept)
+        => _nodes.TryGetValue(Normalize(concept), out var node) ? node.ObservationCount : 0;
 
     public IReadOnlyList<string> GetAdjacentConcepts(
         string concept,
@@ -428,7 +488,7 @@ public sealed class PlatonicSpaceMemory
     {
         _nodes.Clear();
         _relations.Clear();
-        _latticeByConcept.Clear();
+        _lattice.Clear();
 
         foreach (var node in snapshot.Nodes)
         {
@@ -442,9 +502,8 @@ public sealed class PlatonicSpaceMemory
             }
             else
             {
-                var orig = (double[])positiveFace.ToArray();
-                NormaliseInPlace(positiveFace);
-                RestoreFrozenIdentity(positiveFace, orig, normalized);
+                // Re-normalize the free region; the char-face fingerprint stays as loaded.
+                NormaliseFreeRegion(positiveFace, normalized);
             }
             // Hard G4 conservation: embed(¬x) = −embed(x).
             var negativeFace = new double[_faceDimension];
@@ -459,6 +518,7 @@ public sealed class PlatonicSpaceMemory
                 successCount: Math.Max(0, node.SuccessCount),
                 failureCount: Math.Max(0, node.FailureCount),
                 lastUsedStep: Math.Max(0, node.LastUsedStep));
+            _lattice.RegisterNode(normalized);
         }
 
         foreach (var relation in snapshot.Relations)
@@ -763,93 +823,10 @@ public sealed class PlatonicSpaceMemory
             NodesMerged: nodesMerged);
     }
 
+    // Adjacency is owned by the lattice (Layer 1 topology). The relation payload
+    // (contradiction, observation counts) stays in _relations, keyed by RelationKey.
     private void IndexRelation(ConceptRelation relation)
-    {
-        var left = GetOrCreateNeighborhood(relation.Left);
-        left.UpsertNeighbor(relation.Right, relation);
-
-        var right = GetOrCreateNeighborhood(relation.Right);
-        right.UpsertNeighbor(relation.Left, relation);
-    }
-
-    private LatticeNeighborhood GetOrCreateNeighborhood(string concept)
-    {
-        if (_latticeByConcept.TryGetValue(concept, out var neighborhood))
-            return neighborhood;
-
-        neighborhood = new LatticeNeighborhood();
-        _latticeByConcept[concept] = neighborhood;
-        return neighborhood;
-    }
-
-    private static void InsertTopNeighbor(List<PlatonicNeighbor> top, PlatonicNeighbor candidate, int maxNeighbors)
-    {
-        if (maxNeighbors <= 0)
-            return;
-
-        var inserted = false;
-        for (var i = 0; i < top.Count; i++)
-        {
-            if (candidate.Confidence <= top[i].Confidence)
-                continue;
-            top.Insert(i, candidate);
-            inserted = true;
-            break;
-        }
-
-        if (!inserted && top.Count < maxNeighbors)
-            top.Add(candidate);
-
-        if (top.Count > maxNeighbors)
-            top.RemoveAt(top.Count - 1);
-    }
-
-    private void ApplyTriadicSynthesis(string left, string right)
-    {
-        var leftKey = Normalize(left);
-        var rightKey = Normalize(right);
-        var pairKey = RelationKey(leftKey, rightKey);
-        if (!_relations.TryGetValue(pairKey, out var relation))
-            return;
-
-        var triadicConcepts = _nodes.Keys
-            .Where(other =>
-                !other.Equals(leftKey, StringComparison.OrdinalIgnoreCase) &&
-                !other.Equals(rightKey, StringComparison.OrdinalIgnoreCase))
-            .Select(other => (Concept: other, Score: TriadicRelevance(leftKey, rightKey, other)))
-            .Where(x => x.Score > 0.0)
-            .OrderByDescending(x => x.Score)
-            .ThenBy(x => x.Concept, StringComparer.OrdinalIgnoreCase)
-            .Take(MaxTriadicConceptsPerObservation)
-            .Select(x => x.Concept)
-            .ToArray();
-        if (triadicConcepts.Length == 0)
-            return;
-
-        var geometryBudget = 1.0 / triadicConcepts.Length;
-        foreach (var other in triadicConcepts)
-        {
-            var l = GetContradiction(leftKey, other);
-            var r = GetContradiction(rightKey, other);
-            var predicted = Clamp01(0.5 + 0.5 * Math.Abs(l - r));
-
-            relation.SynthesisContradiction = (0.9 * relation.SynthesisContradiction) + (0.1 * predicted);
-            UpdateConceptGeometry(GetOrCreate(leftKey), GetOrCreate(rightKey), relation.SynthesisContradiction, geometryBudget);
-        }
-    }
-
-    private double TriadicRelevance(string leftKey, string rightKey, string other)
-    {
-        var score = 0.0;
-        if (_relations.TryGetValue(RelationKey(leftKey, other), out var leftRelation))
-            score += RelationRelevance(leftRelation);
-        if (_relations.TryGetValue(RelationKey(rightKey, other), out var rightRelation))
-            score += RelationRelevance(rightRelation);
-        return score;
-    }
-
-    private static double RelationRelevance(ConceptRelation relation)
-        => Math.Max(0.0, (1.0 - relation.SynthesisContradiction) * (1.0 + Math.Log(1.0 + relation.ObservationCount)));
+        => _lattice.AddEdge(relation.Left, relation.Right);
 
     /// <summary>
     /// Canonical embedding message-passing update (conforms to GraphAligner / EmbeddingSpace.UpdateEmbedding
@@ -863,8 +840,7 @@ public sealed class PlatonicSpaceMemory
     ///
     /// The contradiction signal selects pull (low contradiction = agree → pull together) vs. push
     /// (high contradiction = disagree → push apart), preserving the external behavior callers rely on
-    /// (ObserveContradiction / ReinforceEvidence / ApplyTriadicSynthesis), while routing all value
-    /// updates through the canonical rule.
+    /// (ObserveContradiction / ReinforceEvidence), while routing all value updates through the canonical rule.
     /// </summary>
     private void UpdateConceptGeometry(ConceptNode a, ConceptNode b, double targetContradiction, double rateScale)
     {
@@ -890,6 +866,11 @@ public sealed class PlatonicSpaceMemory
     /// </summary>
     private void MessagePassUpdate(ConceptNode node, double[] neighbourFace, double alpha, double affinity)
     {
+        // Numeric concepts are ground truth — never mutated (matches the source vocabulary skip);
+        // their canonical poly/log faces are recomputed on demand.
+        if (IsFrozenConcept(node.Name))
+            return;
+
         var dim = _faceDimension;
         var original = (double[])node.PositiveFace.ToArray();
         var updated = node.PositiveFace;
@@ -908,15 +889,90 @@ public sealed class PlatonicSpaceMemory
                 updated[i] += repulsion * (updated[i] - node.NegativeFace[i]);
         }
 
-        // (3) Restore frozen identity dims so the arithmetic homomorphism never drifts
-        // (canonical EmbeddingSpace.RestoreFrozenIdentity), then (4) unit-normalize.
+        // (3) Restore frozen identity dims (arithmetic/lexical identity never drifts), then
+        // (4) unit-normalize ONLY the free region so learned wiggle magnitude survives.
         RestoreFrozenIdentity(updated, original, node.Name);
-        NormaliseInPlace(updated);
-        RestoreFrozenIdentity(updated, original, node.Name);
+        NormaliseFreeRegion(updated, node.Name);
 
         // (5) Hard G4 conservation: embed(¬x) = −embed(x).
         for (var i = 0; i < dim; i++)
             node.NegativeFace[i] = -node.PositiveFace[i];
+
+        _lattice.MarkEmbeddingsDirty();
+    }
+
+    /// <summary>
+    /// Contrastive repulsion pass — the genesis <c>NudgeGraphAlignment</c> repulsion half, ported.
+    /// For each mutable concept, push its face AWAY from a few sampled UNRELATED concepts (those with
+    /// no relation edge), so unrelated/fringe things stay far apart and proximity is earned only by
+    /// confirmed attraction. Frozen identity dims are restored and the free region re-normalised, so
+    /// the homomorphism and lexical fingerprints never drift. Deterministic (seeded per node+pass).
+    /// </summary>
+    private void ApplyContrastiveRepulsionPass()
+    {
+        var n = _nodes.Count;
+        if (n < 3)
+            return;
+
+        var snapshot = _nodes.Values.ToArray();
+        var dim = _faceDimension;
+        _repulsionPassCount++;
+
+        foreach (var node in snapshot)
+        {
+            if (IsFrozenConcept(node.Name)) // ground-truth numerics never move
+                continue;
+
+            var original = (double[])node.PositiveFace.Clone();
+            var updated = node.PositiveFace;
+            var rng = new Random(unchecked(StableHash(node.Name) + _repulsionPassCount));
+
+            var samples = Math.Min(RepulsionSamples, n - 1);
+            for (var s = 0; s < samples; s++)
+            {
+                var other = snapshot[rng.Next(snapshot.Length)];
+                if (ReferenceEquals(other, node))
+                    continue;
+                // Repulsion is ONLY for unrelated pairs — a confirmed relation is exempt (it is what
+                // earns proximity). This is the contrastive half: attract related, repel everything else.
+                if (_relations.ContainsKey(RelationKey(node.Name, other.Name)))
+                    continue;
+
+                var of = other.PositiveFace;
+                var dist2 = 0.0;
+                for (var d = 0; d < dim && d < of.Length; d++)
+                {
+                    var dx = updated[d] - of[d];
+                    dist2 += dx * dx;
+                }
+                if (dist2 < 1e-12)
+                    continue;
+
+                // Repulsive force inversely proportional to distance (genesis: alpha/ max(dist,0.01)).
+                var force = (RepulsionRate * RepulsionRatio) / Math.Max(Math.Sqrt(dist2), 0.01);
+                for (var d = 0; d < dim && d < of.Length; d++)
+                    updated[d] += force * (updated[d] - of[d]);
+            }
+
+            // Identity never drifts; free region re-normalised; hard G4 complement re-enforced.
+            RestoreFrozenIdentity(updated, original, node.Name);
+            NormaliseFreeRegion(updated, node.Name);
+            for (var d = 0; d < dim; d++)
+                node.NegativeFace[d] = -updated[d];
+        }
+
+        _lattice.MarkEmbeddingsDirty();
+    }
+
+    private static int StableHash(string value)
+    {
+        var hash = 2166136261u;
+        foreach (var c in value)
+        {
+            hash ^= c;
+            hash *= 16777619u;
+        }
+        return unchecked((int)hash);
     }
 
     private ConceptNode GetOrCreate(string concept, IReadOnlyCollection<string>? protectedConcepts = null)
@@ -941,6 +997,7 @@ public sealed class PlatonicSpaceMemory
             failureCount: 0,
             lastUsedStep: 0);
         _nodes[key] = node;
+        _lattice.RegisterNode(key);
         return node;
     }
 
@@ -952,18 +1009,9 @@ public sealed class PlatonicSpaceMemory
             return true;
         }
 
-        if (IsAddOperator(concept))
-        {
-            face = CreateOperatorFace(preferPoly: true);
-            return true;
-        }
-
-        if (IsMultiplyOperator(concept))
-        {
-            face = CreateOperatorFace(preferPoly: false);
-            return true;
-        }
-
+        // Operator words are no longer special-cased: the operation is determined by parsing the
+        // operator symbol (and by the learned transforms), so "plus"/"times"/etc. are ordinary
+        // learnable text concepts composed on the canonical face geometry like any other word.
         face = Array.Empty<double>();
         return false;
     }
@@ -988,43 +1036,11 @@ public sealed class PlatonicSpaceMemory
         return face;
     }
 
-    private double[] CreateOperatorFace(bool preferPoly)
-    {
-        var face = new double[_faceDimension];
-        var numericDims = Math.Min(_faceDimension / 2, 21);
-        var logStart = numericDims;
-        var logDims = Math.Min(numericDims, _faceDimension - logStart);
-
-        if (preferPoly)
-        {
-            for (var i = 0; i < numericDims; i++)
-                face[i] = 0.08 * Math.Pow(10, -(i + 1));
-            for (var i = 0; i < logDims; i++)
-                face[logStart + i] = 0.0;
-        }
-        else
-        {
-            for (var i = 0; i < numericDims; i++)
-                face[i] = 0.0;
-            for (var i = 0; i < logDims; i++)
-                face[logStart + i] = 0.08 * Math.Pow(10, -(i + 1));
-        }
-
-        return face;
-    }
-
+    // Text concepts are composed on the canonical face geometry (clean char slots / word face +
+    // seeded free dims) so a stored concept face and its input embedding are directly comparable.
+    // Numeric concepts never reach here — they are seeded via TryCreateSeededFace.
     private double[] CreateFace(string concept)
-    {
-        var face = new double[_faceDimension];
-        var hash = StableHash(concept);
-        for (var i = 0; i < face.Length; i++)
-        {
-            hash = NextHash(hash, i);
-            var unit = (hash & 0xFFFF) / 65535.0;
-            face[i] = ((unit * 2.0) - 1.0) * 0.08;
-        }
-        return face;
-    }
+        => Core.PlatonicFaceComposer.Compose(concept, _faceDimension);
 
     private double[] ComputeCentroid(IReadOnlyList<ConceptNode> nodes)
     {
@@ -1046,6 +1062,10 @@ public sealed class PlatonicSpaceMemory
 
     private void ApplyCentroidNudge(ConceptNode node, IReadOnlyList<double> centroid, double sign, double rate)
     {
+        // Numeric concepts are ground truth — never nudged.
+        if (IsFrozenConcept(node.Name))
+            return;
+
         var effectiveRate = rate * NodePlasticity(node);
         var original = (double[])node.PositiveFace.ToArray();
         for (var i = 0; i < _faceDimension; i++)
@@ -1054,12 +1074,13 @@ public sealed class PlatonicSpaceMemory
             node.PositiveFace[i] += sign * effectiveRate * delta;
         }
 
-        // Canonical: restore frozen identity dims, unit-normalize, then enforce hard complement (G4).
+        // Restore identity dims, then unit-normalize ONLY the free region (preserve wiggle magnitude).
         RestoreFrozenIdentity(node.PositiveFace, original, node.Name);
-        NormaliseInPlace(node.PositiveFace);
-        RestoreFrozenIdentity(node.PositiveFace, original, node.Name);
+        NormaliseFreeRegion(node.PositiveFace, node.Name);
         for (var i = 0; i < _faceDimension; i++)
             node.NegativeFace[i] = -node.PositiveFace[i];
+
+        _lattice.MarkEmbeddingsDirty();
     }
 
     private double NodePlasticity(ConceptNode node)
@@ -1070,9 +1091,7 @@ public sealed class PlatonicSpaceMemory
     }
 
     private int GetRelationDegree(string concept)
-        => _latticeByConcept.TryGetValue(Normalize(concept), out var neighborhood)
-            ? neighborhood.RelationsByNeighbor.Count
-            : 0;
+        => _lattice.Degree(Normalize(concept));
 
     private void TouchNode(string concept, bool success, long step)
     {
@@ -1119,16 +1138,59 @@ public sealed class PlatonicSpaceMemory
         return Math.Clamp((0.55 * successRatio) + (0.25 * useSignal) + (0.20 * recency) - failurePenalty, 0.0, 1.0);
     }
 
+    // Only numbers are frozen ground truth: their poly/log faces are the homomorphic basis and
+    // must never drift. Everything else (including operator words) is learnable.
+    private static bool IsFrozenConcept(string concept) => TryParseNumber(concept, out _);
+
     /// <summary>
-    /// Canonical unit normalization (EmbeddingSpace.Normalise): scale the face to ||e|| = 1.
-    /// In-place variant. No-op for (near) zero vectors. Replaces the old norm-clamp-to-3.0,
-    /// keeping the space on the unit sphere so distances/cosines are scale-invariant.
+    /// The frozen identity region of a concept's face — the dims that carry its exact, canonical
+    /// signature and must never drift. Everything OUTSIDE this range is free to "wiggle" (learnable).
+    /// <list type="bullet">
+    ///   <item>Numbers: the arithmetic face [0 .. 2*NumericDimensions) (poly + log) —
+    ///   the homomorphic basis (value*10^-i, ln|value|*10^-i).</item>
+    ///   <item>Text concepts: the character-slot face [CharFaceStart .. WordFaceStart) — the
+    ///   lexical fingerprint. The word face and all other dims stay learnable.</item>
+    /// </list>
     /// </summary>
-    private static void NormaliseInPlace(double[] face)
+    private (int Start, int End) IdentityRange(string concept)
     {
+        if (IsFrozenConcept(concept))
+            return (0, Math.Min(2 * NumericDimensions, _faceDimension));
+
+        var charStart = Core.FaceLayout.CharFaceStart(_faceDimension);
+        var charEnd = Core.FaceLayout.WordFaceStart(_faceDimension);
+        return charEnd > charStart && charEnd <= _faceDimension ? (charStart, charEnd) : (0, 0);
+    }
+
+    /// <summary>
+    /// Restore the frozen identity dims after an embedding update so the concept's exact signature
+    /// (arithmetic homomorphism for numbers, lexical fingerprint for text) never drifts. Conforms to
+    /// EmbeddingSpace.RestoreFrozenIdentity, generalised per-region by concept type. Guarantees
+    /// embed(a+b)=embed(a)+embed(b) and ln(a*b)=ln a + ln b survive message passing.
+    /// </summary>
+    private void RestoreFrozenIdentity(double[] updated, double[] original, string concept)
+    {
+        var (start, end) = IdentityRange(concept);
+        for (var i = start; i < end && i < updated.Length; i++)
+            updated[i] = original[i];
+    }
+
+    /// <summary>
+    /// Unit-normalize ONLY the free (non-identity) region of a face, leaving the frozen identity dims
+    /// exactly as-is. Fixes the prior whole-vector normalization, which renormalized every dim each
+    /// tick and so erased the learned MAGNITUDE of the free "wiggle" dims (only direction survived).
+    /// Per-region normalization keeps the free dims at a stable, non-vanishing scale while the identity
+    /// dims stay exact.
+    /// </summary>
+    private void NormaliseFreeRegion(double[] face, string concept)
+    {
+        var (idStart, idEnd) = IdentityRange(concept);
         var sum = 0.0;
         for (var i = 0; i < face.Length; i++)
+        {
+            if (i >= idStart && i < idEnd) continue;
             sum += face[i] * face[i];
+        }
 
         var norm = Math.Sqrt(sum);
         if (norm < 1e-15)
@@ -1136,34 +1198,10 @@ public sealed class PlatonicSpaceMemory
 
         var inv = 1.0 / norm;
         for (var i = 0; i < face.Length; i++)
+        {
+            if (i >= idStart && i < idEnd) continue;
             face[i] *= inv;
-    }
-
-    /// <summary>
-    /// Restore frozen identity dimensions after an embedding update — conforms to
-    /// EmbeddingSpace.RestoreFrozenIdentity. For numeric concepts and seeded operators, the
-    /// arithmetic face [0 .. 2*NumericDimensions) (polynomial + log sub-faces) carries the
-    /// homomorphic seeds (value*10^-i, ln|value|*10^-i) and MUST never drift — those dims are
-    /// copied back verbatim from <paramref name="original"/>. This guarantees
-    /// embed(a+b)=embed(a)+embed(b) and ln(a*b)=ln a + ln b survive normalization and message passing.
-    /// </summary>
-    private void RestoreFrozenIdentity(double[] updated, double[] original, string concept)
-    {
-        var arithmeticBoundary = 2 * NumericDimensions;
-        if (arithmeticBoundary <= 0 || arithmeticBoundary > _faceDimension)
-            return;
-
-        // Freeze for numeric tokens and the seeded arithmetic operators (add/mul) whose
-        // poly/log faces are the homomorphic basis. Trained semantic concepts stay learnable.
-        var isFrozen = TryParseNumber(concept, out _)
-                    || IsAddOperator(concept)
-                    || IsMultiplyOperator(concept);
-        if (!isFrozen)
-            return;
-
-        var end = Math.Min(arithmeticBoundary, _faceDimension);
-        for (var i = 0; i < end; i++)
-            updated[i] = original[i];
+        }
     }
 
     /// <summary>
@@ -1234,16 +1272,13 @@ public sealed class PlatonicSpaceMemory
             RemoveRelation(relation);
 
         _nodes.Remove(key);
-        _latticeByConcept.Remove(key);
+        _lattice.UnregisterNode(key);
     }
 
     private void RemoveRelation(ConceptRelation relation)
     {
         _relations.Remove(RelationKey(relation.Left, relation.Right));
-        if (_latticeByConcept.TryGetValue(relation.Left, out var left))
-            left.RemoveNeighbor(relation.Right);
-        if (_latticeByConcept.TryGetValue(relation.Right, out var right))
-            right.RemoveNeighbor(relation.Left);
+        _lattice.RemoveEdge(relation.Left, relation.Right);
     }
 
     private static IReadOnlyList<string> NormalizeConcepts(IReadOnlyList<string> concepts)
@@ -1267,47 +1302,22 @@ public sealed class PlatonicSpaceMemory
         => value.Trim().ToLowerInvariant();
 
     private static PlatonicNeighborhoodType ClassifyConceptType(string token)
-    {
-        if (TryParseNumber(token, out _))
-            return PlatonicNeighborhoodType.Numeric;
-        if (IsAddOperator(token) || IsMultiplyOperator(token))
-            return PlatonicNeighborhoodType.Relational;
-        return PlatonicNeighborhoodType.Semantic;
-    }
+        => TryParseNumber(token, out _)
+            ? PlatonicNeighborhoodType.Numeric
+            : PlatonicNeighborhoodType.Semantic;
+
+    // Strict numeric definition: leading sign + digits + optional decimal point only. NumberStyles.Any
+    // additionally accepts a TRAILING sign (and thousands/exponent/currency/parens), which let malformed
+    // concept-planner tokens like "0+" or "5-" parse as a value (0, 5) and become FROZEN "value-0/5"
+    // garbage concepts that contaminate the numeric relation graph. A number is a number — nothing glued.
+    private const System.Globalization.NumberStyles NumberParseStyle =
+        System.Globalization.NumberStyles.AllowLeadingSign
+        | System.Globalization.NumberStyles.AllowDecimalPoint
+        | System.Globalization.NumberStyles.AllowLeadingWhite
+        | System.Globalization.NumberStyles.AllowTrailingWhite;
 
     private static bool TryParseNumber(string token, out double value)
-        => double.TryParse(token, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out value);
-
-    private static bool IsAddOperator(string token)
-        => token is "+" or "plus" or "add" or "sum";
-
-    private static bool IsMultiplyOperator(string token)
-        => token is "*" or "x" or "times" or "multiply" or "product";
-
-    private static uint StableHash(string value)
-    {
-        uint h = 2166136261;
-        foreach (var c in value)
-        {
-            h ^= c;
-            h *= 16777619;
-        }
-
-        return h;
-    }
-
-    private static uint NextHash(uint hash, int salt)
-    {
-        unchecked
-        {
-            hash ^= (uint)(salt * 16777619);
-            hash *= 2246822519u;
-            hash ^= hash >> 13;
-            hash *= 3266489917u;
-            hash ^= hash >> 16;
-            return hash;
-        }
-    }
+        => double.TryParse(token, NumberParseStyle, System.Globalization.CultureInfo.InvariantCulture, out value);
 
     private static double[] Resize(double[] source, int size)
     {
@@ -1414,54 +1424,6 @@ public sealed class PlatonicSpaceMemory
         }
 
         nodes.Remove(duplicate.Name);
-    }
-
-    private sealed class LatticeNeighborhood
-    {
-        public Dictionary<string, ConceptRelation> RelationsByNeighbor { get; } = new(StringComparer.OrdinalIgnoreCase);
-        private HashSet<string> NumericNeighbors { get; } = new(StringComparer.OrdinalIgnoreCase);
-        private HashSet<string> RelationalNeighbors { get; } = new(StringComparer.OrdinalIgnoreCase);
-        private HashSet<string> SemanticNeighbors { get; } = new(StringComparer.OrdinalIgnoreCase);
-
-        public void UpsertNeighbor(string neighbor, ConceptRelation relation)
-        {
-            RelationsByNeighbor[neighbor] = relation;
-            NumericNeighbors.Remove(neighbor);
-            RelationalNeighbors.Remove(neighbor);
-            SemanticNeighbors.Remove(neighbor);
-
-            switch (ClassifyConceptType(neighbor))
-            {
-                case PlatonicNeighborhoodType.Numeric:
-                    NumericNeighbors.Add(neighbor);
-                    break;
-                case PlatonicNeighborhoodType.Relational:
-                    RelationalNeighbors.Add(neighbor);
-                    break;
-                default:
-                    SemanticNeighbors.Add(neighbor);
-                    break;
-            }
-        }
-
-        public void RemoveNeighbor(string neighbor)
-        {
-            RelationsByNeighbor.Remove(neighbor);
-            NumericNeighbors.Remove(neighbor);
-            RelationalNeighbors.Remove(neighbor);
-            SemanticNeighbors.Remove(neighbor);
-        }
-
-        public IReadOnlyCollection<string> GetNeighbors(PlatonicNeighborhoodType type)
-        {
-            return type switch
-            {
-                PlatonicNeighborhoodType.Numeric => NumericNeighbors,
-                PlatonicNeighborhoodType.Relational => RelationalNeighbors,
-                PlatonicNeighborhoodType.Semantic => SemanticNeighbors,
-                _ => RelationsByNeighbor.Keys
-            };
-        }
     }
 
     private sealed class ConceptNode

@@ -43,6 +43,31 @@ public record Transform(
     IReadOnlyList<double[]>? OutputSamples = null);
 
 /// <summary>
+/// JSON-serializable snapshot of a single learned <see cref="Transform"/> for checkpoint persistence.
+/// Omits the audit sample rings (<see cref="Transform.InputSamples"/>/<see cref="Transform.OutputSamples"/>),
+/// which are re-warmed on the next training pass; only the durable learned vector + audit scores survive.
+/// All fields are System.Text.Json-friendly (primitives, double[], enum).
+/// </summary>
+public sealed record TransformEntrySnapshot(
+    string FunctionName,
+    double[] Vector,
+    int ObservationCount,
+    double Confidence,
+    TransformState State,
+    double RoundTripScore,
+    double NeighborhoodScore,
+    double PolarityCoherenceScore,
+    double SelfConsistencyScore,
+    int AuditPassCount);
+
+/// <summary>
+/// JSON-serializable snapshot of an entire <see cref="TransformAccumulator"/> for checkpoint persistence.
+/// </summary>
+public sealed record TransformAccumulatorSnapshot(
+    int EmbeddingDim,
+    IReadOnlyList<TransformEntrySnapshot> Transforms);
+
+/// <summary>
 /// Accumulates and manages learned transforms.
 /// 
 /// This is the heart of the Genesis Engine approach:
@@ -209,6 +234,71 @@ public class TransformAccumulator
         return (best.FunctionName, similarity);
     }
     
+    /// <summary>
+    /// Export a JSON-serializable snapshot of all learned transforms for checkpoint persistence.
+    /// The audit sample rings are intentionally omitted (re-warm on next training); only the learned
+    /// vector and audit scores/lifecycle are captured. Defensive copies of vectors are taken.
+    /// </summary>
+    public TransformAccumulatorSnapshot ExportSnapshot()
+    {
+        var entries = new List<TransformEntrySnapshot>(_transforms.Count);
+        foreach (var t in _transforms.Values)
+        {
+            entries.Add(new TransformEntrySnapshot(
+                t.FunctionName,
+                (double[])t.Vector.Clone(),
+                t.ObservationCount,
+                t.Confidence,
+                t.State,
+                t.RoundTripScore,
+                t.NeighborhoodScore,
+                t.PolarityCoherenceScore,
+                t.SelfConsistencyScore,
+                t.AuditPassCount));
+        }
+        return new TransformAccumulatorSnapshot(_embeddingDim, entries);
+    }
+
+    /// <summary>
+    /// Rebuild the learned transform table from a checkpoint snapshot. Clears any existing transforms.
+    /// If the snapshot's embedding dimension does not match this accumulator's, the import is skipped
+    /// (the table is left empty) rather than producing dimension-mismatched vectors — graceful degradation.
+    /// Restored transforms start with empty audit sample rings (re-warmed on next training).
+    /// </summary>
+    public void ImportSnapshot(TransformAccumulatorSnapshot snapshot)
+    {
+        if (snapshot is null)
+            return;
+
+        _transforms.Clear();
+
+        // Graceful skip: a checkpoint trained at a different embedding dim cannot be reused.
+        if (snapshot.EmbeddingDim != _embeddingDim)
+            return;
+
+        foreach (var entry in snapshot.Transforms ?? Array.Empty<TransformEntrySnapshot>())
+        {
+            if (entry is null || string.IsNullOrEmpty(entry.FunctionName))
+                continue;
+            if (entry.Vector is null || entry.Vector.Length != _embeddingDim)
+                continue;
+
+            _transforms[entry.FunctionName] = new Transform(
+                entry.FunctionName,
+                (double[])entry.Vector.Clone(),
+                entry.ObservationCount,
+                Confidence: entry.Confidence,
+                State: entry.State,
+                AuditPassCount: entry.AuditPassCount,
+                RoundTripScore: entry.RoundTripScore,
+                NeighborhoodScore: entry.NeighborhoodScore,
+                PolarityCoherenceScore: entry.PolarityCoherenceScore,
+                SelfConsistencyScore: entry.SelfConsistencyScore,
+                InputSamples: null,
+                OutputSamples: null);
+        }
+    }
+
     private static double EuclideanDistance(double[] a, double[] b)
     {
         double sum = 0.0;

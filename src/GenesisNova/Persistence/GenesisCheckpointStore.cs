@@ -38,6 +38,14 @@ public static class GenesisCheckpointStore
             RouteWeights: snapshot.RouteWeights is not null ? MatrixSnapshot.From(snapshot.RouteWeights) : null,
             RouteBias: snapshot.RouteBias,
             TrainerLearningStateJson: trainerLearningStateJson,
+            // Persist the edit head + shared GRU so a loaded model is the SAME trained model. Without
+            // these the GRU (read by every head) reinitialised untrained on load.
+            EditWeights: snapshot.EditWeights is not null ? MatrixSnapshot.From(snapshot.EditWeights) : null,
+            EditBias: snapshot.EditBias,
+            GruWih: snapshot.GruWih is not null ? MatrixSnapshot.From(snapshot.GruWih) : null,
+            GruWhh: snapshot.GruWhh is not null ? MatrixSnapshot.From(snapshot.GruWhh) : null,
+            GruBih: snapshot.GruBih,
+            GruBhh: snapshot.GruBhh,
             Version: GenesisCheckpoint.CurrentVersion);
 
         var json = JsonSerializer.Serialize(payload, JsonOptions);
@@ -160,8 +168,18 @@ public static class GenesisCheckpointStore
             payload.OutputWeights.ToMatrix(),
             payload.OutputBias,
             routeWeights,
-            routeBias);
+            routeBias,
+            // Restore the edit head + shared GRU. Import validates shapes (HasUsableEditHead /
+            // HasUsableGru) and reinitialises gracefully if a pre-GRU checkpoint omitted them.
+            EditWeights: payload.EditWeights?.ToMatrix(),
+            EditBias: payload.EditBias,
+            GruWih: payload.GruWih?.ToMatrix(),
+            GruWhh: payload.GruWhh?.ToMatrix(),
+            GruBih: payload.GruBih,
+            GruBhh: payload.GruBhh);
 
+        // Hidden-size growth can't reshape the GRU/edit head — Import rejects the mismatch and
+        // reinitialises them; the embeddings/output/route heads still expand.
         if (effectiveConfig.HiddenSize > payload.Config.HiddenSize)
             snapshot = ExpandSnapshot(snapshot, effectiveConfig.HiddenSize);
 

@@ -28,6 +28,15 @@ internal sealed class PlatonicLattice
 {
     private const int SemanticRebuildThreshold = 48;
 
+    // Strict numeric classification: a genuine concept token is a plain signed decimal.
+    // NumberStyles.Any would accept trailing-sign garbage like "0+"/"5-" (parses as 0/5),
+    // plus thousands/exponent/currency/parens — none of which a real concept token has.
+    // This must stay aligned with PlatonicSpaceMemory.TryParseNumber so malformed tokens are
+    // never indexed as numeric.
+    private const NumberStyles NumericStyle =
+        NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint
+        | NumberStyles.AllowLeadingWhite | NumberStyles.AllowTrailingWhite;
+
     private readonly Func<IEnumerable<string>> _nodeNames;
     private readonly Func<IEnumerable<(string Name, double[] Face)>> _nodeFaces;
 
@@ -37,12 +46,16 @@ internal sealed class PlatonicLattice
     // ── Layer 2: numeric + char (lazy, rebuilt on node-set change) ──
     private readonly SortedList<double, string> _numericLattice = new();
     private readonly Dictionary<char, string> _charLattice = new();
-    private bool _topologyDirty = true;
+    // Throttle: a full index rebuild is O(N); doing one on EVERY node change makes per-example
+    // neighbour queries O(N^2) (it looked like a training hang). Rebuild only after this many
+    // node-set changes accumulate, or on first use.
+    private const int TopologyRebuildThreshold = 64;
+    private int _topologyChanges;
+    private bool _numericBuilt;
 
     // ── Layer 2: semantic VP-Tree (lazy, drift-throttled) ──
     private VPTree? _semanticTree;
     private bool _semanticDirty = true;
-    private bool _topologyChangedSinceBuild = true;
     private int _mutationsSinceBuild;
 
     public PlatonicLattice(
@@ -60,8 +73,8 @@ internal sealed class PlatonicLattice
     /// <summary>A node was created. Invalidates the numeric/char indices and the semantic tree.</summary>
     public void RegisterNode(string name)
     {
-        _topologyDirty = true;
-        _topologyChangedSinceBuild = true;
+        _topologyChanges++;
+        _mutationsSinceBuild++;
         _semanticDirty = true;
     }
 
@@ -75,8 +88,8 @@ internal sealed class PlatonicLattice
                     reverse.Remove(name);
             _adjacency.Remove(name);
         }
-        _topologyDirty = true;
-        _topologyChangedSinceBuild = true;
+        _topologyChanges++;
+        _mutationsSinceBuild++;
         _semanticDirty = true;
     }
 
@@ -107,8 +120,8 @@ internal sealed class PlatonicLattice
         _numericLattice.Clear();
         _charLattice.Clear();
         _semanticTree = null;
-        _topologyDirty = true;
-        _topologyChangedSinceBuild = true;
+        _topologyChanges = 0;
+        _numericBuilt = false;
         _semanticDirty = true;
         _mutationsSinceBuild = 0;
     }
@@ -164,7 +177,7 @@ internal sealed class PlatonicLattice
                 results.Add((values[i], dist));
         }
 
-        results.Sort((a, b) => a.Distance.CompareTo(b.Distance));
+        results.Sort((a, b) => a.Item2.CompareTo(b.Item2));
         return results.Count > k ? results.GetRange(0, k) : results;
     }
 
@@ -197,7 +210,10 @@ internal sealed class PlatonicLattice
 
     private void EnsureTopology()
     {
-        if (!_topologyDirty)
+        // Throttle: rebuild the numeric/char indices only on first use or after enough node-set
+        // changes accumulate — NOT on every new concept (which made per-example queries O(N^2)).
+        // A very recently added node may briefly be missing; acceptable for heuristic neighbour reads.
+        if (_numericBuilt && _topologyChanges < TopologyRebuildThreshold)
             return;
 
         _numericLattice.Clear();
@@ -205,7 +221,7 @@ internal sealed class PlatonicLattice
 
         foreach (var name in _nodeNames())
         {
-            if (double.TryParse(name, NumberStyles.Any, CultureInfo.InvariantCulture, out var numeric))
+            if (double.TryParse(name, NumericStyle, CultureInfo.InvariantCulture, out var numeric))
             {
                 // Duplicate numeric values get a smallest-possible offset so the sorted lattice stays total.
                 while (_numericLattice.ContainsKey(numeric))
@@ -218,13 +234,13 @@ internal sealed class PlatonicLattice
             }
         }
 
-        _topologyDirty = false;
+        _numericBuilt = true;
+        _topologyChanges = 0;
     }
 
     private void EnsureSemantic()
     {
         var needRebuild = _semanticTree is null
-            || _topologyChangedSinceBuild
             || (_semanticDirty && _mutationsSinceBuild >= SemanticRebuildThreshold);
         if (!needRebuild)
             return;
@@ -240,7 +256,6 @@ internal sealed class PlatonicLattice
 
         _semanticTree = new VPTree(names.ToArray(), faces.ToArray());
         _semanticDirty = false;
-        _topologyChangedSinceBuild = false;
         _mutationsSinceBuild = 0;
     }
 

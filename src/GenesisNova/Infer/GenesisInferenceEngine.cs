@@ -45,7 +45,7 @@ public sealed class GenesisInferenceEngine
         FoldPathDiscovery? foldPathDiscovery = null,
         TransformLibrary? transformLibrary = null,
         TransformAccumulator? transformAccumulator = null,
-        bool enableDiagnosticFaceArithmeticShortcut = false,
+        bool enableDiagnosticFaceArithmeticShortcut = true,
         int maxPlatonicAssistInvocations = 3)
     {
         _tokenizer = tokenizer;
@@ -60,6 +60,15 @@ public sealed class GenesisInferenceEngine
     }
 
     public bool DiagnosticFaceArithmeticShortcutEnabled => _enableDiagnosticFaceArithmeticShortcut;
+
+    /// <summary>
+    /// When false (the default), inference performs NO writes to any learned store — the transform
+    /// accumulator is left untouched. The shared, persistent learned state is mutated ONLY by the
+    /// training loop, which scopes this true around its own training-context generations. This keeps
+    /// REPL/inference queries from drifting the store that every future training session loads (and
+    /// from learning transforms off the model's own, possibly-wrong, output).
+    /// </summary>
+    public bool LearningEnabled { get; set; }
 
     public IReadOnlyList<RouteDecisionTelemetry> LastRouteDecisions
     {
@@ -598,13 +607,18 @@ public sealed class GenesisInferenceEngine
         _transformLibrary?.RecordSuccess(operationName);
         UpdateAccumulatorFromInference(operationName, request.Input, response);
 
+        // Confidence from decode self-consistency of the learned transform's PREDICTED embedding
+        // (TransformAccumulator.Apply yields input+transform; the canonical codec decodes it and
+        // scores how well the predicted face matches the value it claims) — not a hardcoded floor.
+        var confidence = DecodeTransformConfidence(operationName, request.Input, operation, prediction);
+
         result = new GenerationResult(
             Output: _tokenizer.Decode(tokens),
             GeneratedTokens: tokens,
             UsedPlatonicQuery: true,
             UsedNeuralFallback: false,
             DecisionPath: "platonic-discovered-transform",
-            PlatonicConfidence: 0.92,
+            PlatonicConfidence: confidence,
             AppliedBiasCount: 0,
             AverageBiasMagnitude: 0.0,
             ChunksGenerated: 1,
@@ -677,8 +691,13 @@ public sealed class GenesisInferenceEngine
             return false;
         if (likelyContextWrapped)
             return false;
-        if (!_enableDiagnosticFaceArithmeticShortcut)
-            return false;
+
+        // The exact direct face-arithmetic path is available by default in production: when the
+        // 3-mode router selects platonic-direct (route 1) and the input is a compact arithmetic
+        // expression, we resolve it exactly here rather than silently falling through to neural.
+        // (_enableDiagnosticFaceArithmeticShortcut is retained for telemetry/diagnostics but no
+        // longer gates this production route — it defaults true and the gate is removed so a
+        // disabled flag can never drop a platonic-direct answer to neural.)
 
         var additiveFace = op is ArithmeticOperation.Add or ArithmeticOperation.Subtract;
         var rightFaceSign = op is ArithmeticOperation.Subtract or ArithmeticOperation.Divide ? -1.0 : 1.0;
@@ -732,6 +751,34 @@ public sealed class GenesisInferenceEngine
         if (likelyContextWrapped)
             return false;
 
+        // Relational token canonicalization (NOTHING hardcoded): before the compact regex, rewrite
+        // each whitespace-delimited NON-numeric operand token into the digit of its strongest numeric
+        // relational neighbour, learned from the platonic relation graph (e.g. "one" -> "1"). Operators
+        // and unresolvable tokens (e.g. "zarp") are left verbatim, so the EXISTING compact regex below
+        // is the sole arithmetic grammar — words with no learned numeric relation simply never resolve.
+        var tokens = normalized.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        if (tokens.Length > 1)
+        {
+            var rewritten = false;
+            for (var i = 0; i < tokens.Length; i++)
+            {
+                // Only WORD-LIKE tokens (containing a letter) are candidates for number-word resolution.
+                // Operator symbols (+, -, *, /) have no letters, so they pass through untouched — without
+                // this guard an operator that co-occurs with numbers in training would itself resolve to a
+                // digit and corrupt the expression ("1 + 1" -> "1 5 1"). Not an operator table: just "only
+                // resolve words, not symbols".
+                if (!tokens[i].Any(char.IsLetter))
+                    continue;
+                if (TryResolveTokenToNumber(tokens[i], out var digit) && !string.Equals(digit, tokens[i], StringComparison.Ordinal))
+                {
+                    tokens[i] = digit;
+                    rewritten = true;
+                }
+            }
+            if (rewritten)
+                normalized = string.Join(" ", tokens);
+        }
+
         // Only handle compact symbol-based expressions: "4+5", "3*2", "10-1", "8/2", "6x3"
         var compact = System.Text.RegularExpressions.Regex.Match(
             normalized,
@@ -765,6 +812,54 @@ public sealed class GenesisInferenceEngine
 
         return true;
     }
+
+    // Resolves a single token to a digit string using ONLY the learned relation graph — no hardcoded
+    // word→number table. A token that already strict-parses as a number is returned unchanged. Otherwise
+    // the strongest NUMERIC relational neighbour (highest ObservationCount, tiebreak higher Confidence)
+    // is used. Returns false when no numeric relation exists, so unlearned words stay verbatim.
+    private bool TryResolveTokenToNumber(string token, out string digit)
+    {
+        digit = token;
+        if (string.IsNullOrEmpty(token))
+            return false;
+
+        // Strict numeric parse: deliberately NOT NumberStyles.Any (which would accept noise like "0+").
+        const System.Globalization.NumberStyles strictStyles =
+            System.Globalization.NumberStyles.AllowLeadingSign |
+            System.Globalization.NumberStyles.AllowDecimalPoint |
+            System.Globalization.NumberStyles.AllowLeadingWhite |
+            System.Globalization.NumberStyles.AllowTrailingWhite;
+
+        if (double.TryParse(token, strictStyles, System.Globalization.CultureInfo.InvariantCulture, out _))
+            return true; // already a number — leave unchanged
+
+        string? bestConcept = null;
+        var bestObs = int.MinValue;
+        var bestConf = double.MinValue;
+        foreach (var neighbor in _memory.GetNeighbors(
+                     token,
+                     GenesisNova.Cognition.PlatonicNeighborhoodType.Relational,
+                     maxNeighbors: 16,
+                     minConfidence: 0.4))
+        {
+            if (!double.TryParse(neighbor.Concept, strictStyles, System.Globalization.CultureInfo.InvariantCulture, out _))
+                continue; // only numeric relational neighbours qualify
+            if (neighbor.ObservationCount > bestObs ||
+                (neighbor.ObservationCount == bestObs && neighbor.Confidence > bestConf))
+            {
+                bestObs = neighbor.ObservationCount;
+                bestConf = neighbor.Confidence;
+                bestConcept = neighbor.Concept;
+            }
+        }
+
+        if (bestConcept is null)
+            return false;
+
+        digit = bestConcept;
+        return true;
+    }
+
     private static string ToOperationName(ArithmeticOperation operation)
         => operation switch
         {
@@ -780,7 +875,8 @@ public sealed class GenesisInferenceEngine
 
     private void UpdateAccumulatorFromInference(string operation, string input, string output)
     {
-        if (_transformAccumulator is null)
+        // Training-only: inference must not mutate the shared persistent transform store.
+        if (_transformAccumulator is null || !LearningEnabled)
             return;
 
         var dim = _transformAccumulator.EmbeddingDimension;
@@ -791,17 +887,65 @@ public sealed class GenesisInferenceEngine
     }
 
     /// <summary>
-    /// Performs arithmetic in face embedding space.
-    /// Add/sub: sum poly sub-faces → decode result = blended[0] * 10.
-    /// Mul/div: sum log sub-faces → decode result = sign * exp(blended[logStart] * 10).
-    /// This diagnostic shortcut is opt-in because it is not a learned behaviour.
+    /// Derives a principled confidence for a discovered-transform answer by decoding the learned
+    /// transform's PREDICTED embedding through the canonical codec. Composes the input embedding the
+    /// same way <see cref="UpdateAccumulatorFromInference"/> does, applies the accumulated transform
+    /// (predicted = input + transform vector), then decodes that predicted face with the operation's
+    /// preferred face (1=poly for add/sub, 2=log for mul/div). The decode Quality measures how
+    /// self-consistent the predicted face is; we additionally require the decoded value to agree with
+    /// the discovered prediction, otherwise the transform face and the fold route disagree and the
+    /// answer is less trustworthy. Falls back to a moderate confidence when no transform is available
+    /// to decode (e.g. answer came purely from the fold/log-linear route before any accumulation).
+    /// </summary>
+    private double DecodeTransformConfidence(
+        string operationName,
+        string input,
+        ArithmeticOperation operation,
+        double prediction)
+    {
+        const double NoDecodeFallbackConfidence = 0.75;
+        if (_transformAccumulator is null)
+            return NoDecodeFallbackConfidence;
+
+        var dim = _transformAccumulator.EmbeddingDimension;
+        var mode = _foldPathDiscovery?.GetComposition(operationName) ?? CompositionMode.Sum;
+        var inputEmbedding = InputEmbeddingComposer.ComposeInput(input, mode, dim);
+        var predicted = _transformAccumulator.Apply(operationName, inputEmbedding);
+        if (predicted is null)
+            return NoDecodeFallbackConfidence;
+
+        var preferFace = operation is ArithmeticOperation.Multiply or ArithmeticOperation.Divide ? 2 : 1;
+        var (decodedValue, quality, face) = PlatonicFaceDecoder.DecodeNumericFromPrediction(predicted, dim, preferFace);
+        if (face == "none" || quality <= 0.0)
+            return NoDecodeFallbackConfidence;
+
+        // The log face decodes a positive magnitude; compare on magnitude so a sign mismatch from the
+        // unsigned log face does not spuriously deflate agreement.
+        var agreementBase = Math.Max(1.0, Math.Abs(prediction));
+        var disagreement = face == "log"
+            ? Math.Abs(Math.Abs(decodedValue) - Math.Abs(prediction)) / agreementBase
+            : Math.Abs(decodedValue - prediction) / agreementBase;
+        var agreement = Math.Clamp(1.0 - disagreement, 0.0, 1.0);
+
+        return Math.Clamp(quality * agreement, 0.0, 1.0);
+    }
+
+    /// <summary>
+    /// Performs arithmetic in face embedding space by BLENDING the operand faces (preserving the
+    /// homomorphism poly(a)±poly(b)=poly(a±b), log(a)±log(b)=log(a*b or a/b)) and then decoding the
+    /// resulting predicted embedding through the source-of-truth
+    /// <see cref="PlatonicFaceDecoder.DecodeNumericFromPrediction"/> — the exact algebraic inverse of
+    /// the composer. The decode formula AND the self-consistency quality come from the decoder, so
+    /// they match the canonical genesis-engine codec rather than an ad-hoc CV metric.
+    /// <para>
+    /// preferFace hint: 1=poly for add/sub, 2=log for mul/div. The log face decodes positive, so the
+    /// operand sign is reapplied here (sign lives in the poly face / operands, not the log magnitude).
+    /// </para>
     /// </summary>
     private bool TryFaceArithmetic(double left, double right, bool additiveFace, double rightFaceSign, out double result, out double quality)
     {
         result = 0;
         quality = 0;
-        var numericDims = _memory.NumericDimensions;
-        var logStart = _memory.LogFaceStart;
 
         var leftKey = FormatNumber(left);
         var rightKey = FormatNumber(right);
@@ -810,60 +954,42 @@ public sealed class GenesisInferenceEngine
             !_memory.TryGetConceptFace(rightKey, out var faceB))
             return false;
 
-        if (additiveFace)
+        var dim = _memory.FaceDimension;
+        if (faceA.Length < dim || faceB.Length < dim)
+            return false;
+
+        if (!additiveFace)
         {
-            if (faceA.Length < numericDims || faceB.Length < numericDims)
-                return false;
-            var reconstructed = new List<double>(numericDims);
-            for (var i = 0; i < numericDims; i++)
-            {
-                var blended = faceA[i] + rightFaceSign * faceB[i];
-                reconstructed.Add(blended * Math.Pow(10, i + 1));
-            }
-            result = reconstructed[0];
-            quality = ComputeFaceDecodeQuality(reconstructed);
-        }
-        else
-        {
-            if (faceA.Length <= logStart || faceB.Length <= logStart)
-                return false;
-            // Zero is outside log-space; preserve exact arithmetic behavior for zero cases.
+            // Zero is outside log-space; preserve exact arithmetic behavior for zero cases
+            // (mul by zero = 0; div of zero by nonzero = 0). Both faces would otherwise be NaN/Inf.
             if (Math.Abs(left) < 1e-12 || (rightFaceSign > 0.0 && Math.Abs(right) < 1e-12))
             {
                 result = 0;
                 quality = 1.0;
                 return true;
             }
-
-            var logDims = Math.Min(numericDims, Math.Min(faceA.Length - logStart, faceB.Length - logStart));
-            if (logDims <= 0)
-                return false;
-
-            var magnitudes = new List<double>(logDims);
-            for (var i = 0; i < logDims; i++)
-            {
-                var blendedLog = (faceA[logStart + i] + rightFaceSign * faceB[logStart + i]) * Math.Pow(10, i + 1);
-                magnitudes.Add(Math.Exp(blendedLog));
-            }
-
-            var sign = Math.Sign(left) * Math.Sign(right);
-            result = sign * magnitudes[0];
-            quality = ComputeFaceDecodeQuality(magnitudes);
         }
 
-        return !double.IsNaN(result) && !double.IsInfinity(result) && !double.IsNaN(quality) && !double.IsInfinity(quality);
-    }
+        // Blend the operand faces element-wise. The poly block [0..numericDims) carries the additive
+        // homomorphism and the log block [logStart..) carries the multiplicative one, so a single
+        // signed sum yields the predicted embedding for the result on BOTH faces simultaneously.
+        var blended = new double[dim];
+        for (var i = 0; i < dim; i++)
+            blended[i] = faceA[i] + rightFaceSign * faceB[i];
 
-    private static double ComputeFaceDecodeQuality(IReadOnlyList<double> values)
-    {
-        if (values.Count <= 1)
-            return 1.0;
-        var mean = values.Average();
-        var meanAbs = Math.Max(Math.Abs(mean), 1e-12);
-        var variance = values.Sum(v => Math.Pow(v - mean, 2)) / values.Count;
-        var std = Math.Sqrt(variance);
-        var cv = std / meanAbs;
-        return Math.Clamp(1.0 - cv, 0.0, 1.0);
+        // Decode via the canonical codec, hinting the face the operation actually evaluates on.
+        var preferFace = additiveFace ? 1 : 2; // 1=poly (add/sub), 2=log (mul/div)
+        var (value, decodeQuality, face) = PlatonicFaceDecoder.DecodeNumericFromPrediction(blended, dim, preferFace);
+        if (face == "none")
+            return false;
+
+        // The log face always decodes a positive magnitude; reapply the operand sign for mul/div.
+        if (!additiveFace && face == "log")
+            value *= Math.Sign(left) * Math.Sign(right);
+
+        result = value;
+        quality = decodeQuality;
+        return !double.IsNaN(result) && !double.IsInfinity(result) && !double.IsNaN(quality) && !double.IsInfinity(quality);
     }
 
     private static int ResolveMaxPlatonicHops(int anchorCount)

@@ -37,7 +37,16 @@ public sealed class GenesisTrainer
     private int _priorSpaceActionId;
     private int _tickPatternPromotions;
     private int _trainStepCount;
+    // Model-driven edit-head wiring: ObservePlatonicSpace stashes the (explored) magnitude it
+    // requested from _model.PredictEditMagnitude (plus the tokens it conditioned on); the surrounding
+    // train step then rewards the head via _model.ReinforceEditHead with a CAUSAL, space-state-
+    // dependent outcome (does the platonic space now retrieve the correct output for this input?).
+    private IReadOnlyList<int>? _pendingEditTokens;
+    private double _pendingEditMagnitude;
     private double _cachedConservationLoss;
+    // Per-example baseline of the EDIT-HEAD OUTCOME metric (space-retrieval quality, not token loss),
+    // used as the REINFORCE baseline so reward = outcome − last-seen-outcome (first sighting → 0).
+    private readonly Dictionary<string, double> _exampleOutcomeBaseline = new(StringComparer.Ordinal);
     private readonly Dictionary<string, int> _conceptCoverageCounts = new(StringComparer.OrdinalIgnoreCase);
     private readonly SpaceDecisionJournal _spaceDecisionJournal = new(MaxSpaceDecisionJournalEntries);
     private readonly Queue<MasteredRehearsalExample> _masteredRehearsalRing = new();
@@ -67,12 +76,9 @@ public sealed class GenesisTrainer
         SpaceToolKind.RewardTagEmit,
         SpaceToolKind.DiscoverAbstractions
     ];
-    private const double SpacePolicyExplorationRate = 0.10;
-    private const int SpacePolicyRewardHorizon = 4;
     private const int MaxSpacePolicyTrajectory = 16;
     private const int MaxConceptCount = 24;
     private const double MinConceptMirrorCoverage = 0.35;
-    private const double ConceptPlanRewardBaseline = 0.55;
     private const int MaxSpaceDecisionJournalEntries = 256;
     private const int MaxMasteredRehearsalEntries = 64;
     private const int MasteredRehearsalInterval = 25;
@@ -248,7 +254,9 @@ public sealed class GenesisTrainer
                 _conceptPlanRetrospectiveCreditCount),
             SpacePolicyStepCounter: _spacePolicyStepCounter,
             PriorSpaceActionId: _priorSpaceActionId,
-            ConceptPlanDecisionJournalEntries: _conceptPlanDecisionJournal.ToArray());
+            ConceptPlanDecisionJournalEntries: _conceptPlanDecisionJournal.ToArray(),
+            TransformAccumulator: _transformAccumulator.ExportSnapshot(),
+            FoldPaths: _foldPathDiscovery.ExportSnapshot());
 
     public void ImportLearningState(GenesisTrainerLearningState? state)
     {
@@ -326,8 +334,17 @@ public sealed class GenesisTrainer
             if (!string.IsNullOrWhiteSpace(entry.Prompt) && entry.SelectedLatentConcepts.Count > 0)
                 _conceptPlanDecisionJournal.Enqueue(entry);
         }
+
+        // Restore the learned discovered-transform inference path (lost on reload before this).
+        // The runtime constructs the Trainer (fresh empty accumulator/foldpath) THEN calls
+        // ImportLearningState THEN wires the inference engine to these same instances, so restoring
+        // into the existing instances is correct. Null-guarded so old checkpoints (no snapshot) no-op.
+        if (state.TransformAccumulator is not null)
+            _transformAccumulator.ImportSnapshot(state.TransformAccumulator);
+        if (state.FoldPaths is not null)
+            _foldPathDiscovery.ImportSnapshot(state.FoldPaths);
     }
-    
+
     public void SetInferencePolicy(GenesisInferenceEngine inferencePolicy)
         => _inferencePolicy = inferencePolicy ?? throw new ArgumentNullException(nameof(inferencePolicy));
 
@@ -351,7 +368,8 @@ public sealed class GenesisTrainer
         _model.CloneParametersToBreakGraph();
 
         var concepts = ObserveLearningSignals(example);
-        
+        RewardEditHead(example, baseLoss.TokenLoss);
+
         var consistencyLoss = EstimatePlatonicConsistency(concepts, IsNegativeText(outputText));
         var conservationLoss = EstimateConservationDrift(inputTokens);
         var memoryLoss = EstimateMemoryLoad();
@@ -393,7 +411,8 @@ public sealed class GenesisTrainer
         _model.CloneParametersToBreakGraph();
 
         var concepts = ObserveLearningSignals(example);
-        
+        RewardEditHead(example, baseLoss.TokenLoss);
+
         var consistencyLoss = EstimatePlatonicConsistency(concepts, IsNegativeText(example.Output));
         var conservationLoss = EstimateConservationDrift(inputTokens);
         var memoryLoss = EstimateMemoryLoad();
@@ -440,13 +459,26 @@ public sealed class GenesisTrainer
     {
         try
         {
-            var result = _inferencePolicy.Generate(request);
-            
+            // Training-context generation: enable learned-store writes ONLY for the duration of this
+            // Generate call. The engine instance is shared with the REPL, which must stay read-only.
+            var previousLearning = _inferencePolicy.LearningEnabled;
+            _inferencePolicy.LearningEnabled = true;
+            GenerationResult result;
+            try
+            {
+                result = _inferencePolicy.Generate(request);
+            }
+            finally
+            {
+                _inferencePolicy.LearningEnabled = previousLearning;
+            }
+
             var outcome = expectedCorrect.HasValue
                 ? (expectedCorrect.Value ? InferenceOutcome.Success : InferenceOutcome.Failure)
                 : DeriveHeuristicOutcome(result);
-            ObserveKnownInferenceOutcome(outcome, result);
-            
+            // Training-context preview generation: space mutation is allowed (this is the training loop).
+            ObserveKnownInferenceOutcome(outcome, result, allowSpaceMutation: true);
+
             return result;
         }
         catch (Exception ex)
@@ -554,6 +586,7 @@ public sealed class GenesisTrainer
                   
           _trainStepCount++;
           MaybeInterleaveMasteredRehearsal();
+          RewardEditHead(example, loss.TokenLoss);
 
           var consistencyLoss = EstimatePlatonicConsistency(concepts, IsNegativeText(example.Output));
           var conservationLoss = EstimateConservationDrift(inputTokens);
@@ -615,6 +648,12 @@ public sealed class GenesisTrainer
            perExample);
     }
 
+    // Generation headroom for correctness checks. We generate a few tokens BEYOND the answer length so
+    // a model that emits the right answer but then fails to STOP (no EOS) is caught here — exactly as it
+    // manifests in the REPL, which generates open-ended. Capping generation at the answer length only
+    // validated the prefix and let rambling models score as "trained-correct" while failing in the REPL.
+    private const int CorrectnessStopProbeTokens = 4;
+
     private bool ShouldSkipTrainingExample(GenesisExample example, IReadOnlyList<int> targetTokens)
     {
         var expected = targetTokens
@@ -622,15 +661,18 @@ public sealed class GenesisTrainer
            .ToArray();
         if (expected.Length == 0)
            return false;
-  
+
+        // Same engine instance the REPL uses (see SetInferencePolicy); the only thing that previously
+        // differed was the token budget. Give it headroom so the model must stop at the right place,
+        // then require an EXACT full match — identical to how the REPL output is judged correct/incorrect.
         var preview = GenerateAndObserveInference(
-            new GenerationRequest(example.Input, Math.Max(1, expected.Length)),
+            new GenerationRequest(example.Input, expected.Length + CorrectnessStopProbeTokens),
             contextLabel: "skip-decision");
         var predicted = preview.GeneratedTokens
            .Where(t => t != _tokenizer.BosTokenId && t != _tokenizer.EosTokenId && t != _tokenizer.PadTokenId)
            .ToArray();
         var isCorrect = predicted.Length == expected.Length && predicted.SequenceEqual(expected);
-         
+
         return isCorrect;
     }
 
@@ -650,7 +692,7 @@ public sealed class GenesisTrainer
        try
        {
            var preview = GenerateAndObserveInference(
-               new GenerationRequest(example.Input, Math.Max(1, expected.Length)),
+               new GenerationRequest(example.Input, expected.Length + CorrectnessStopProbeTokens),
                contextLabel: "unified-path-mismatch",
                expectedCorrect: null);  // Let heuristic determine correctness
            var mismatch = ComputeNormalizedTokenDistance(preview.GeneratedTokens, expected);
@@ -740,12 +782,12 @@ public sealed class GenesisTrainer
     }
 
     private IReadOnlyList<string> ResolveConceptsReadOnly(GenesisExample example)
-        => ResolveConcepts(example.Input, example.Output, trainConceptPlanPolicy: false);
+        => ResolveConcepts(example.Input, example.Output);
 
-    private IReadOnlyList<string> ResolveConcepts(GenesisExample example, bool trainConceptPlanPolicy = false)
-        => ResolveConcepts(example.Input, example.Output, trainConceptPlanPolicy);
+    private IReadOnlyList<string> ResolveConcepts(GenesisExample example)
+        => ResolveConcepts(example.Input, example.Output);
 
-    private IReadOnlyList<string> ResolveConcepts(string input, string output, bool trainConceptPlanPolicy = false)
+    private IReadOnlyList<string> ResolveConcepts(string input, string output)
     {
         var mirror = ExtractMirrorConcepts(input, output);
         var prompt = BuildConceptPlanPrompt(input, output, mirror);
@@ -806,13 +848,15 @@ public sealed class GenesisTrainer
             SelectedConcepts: selected,
             Mode: mode,
             MirrorCoverage: Math.Clamp(mirrorCoverage, 0.0, 1.0),
-            NoveltyRatio: Math.Clamp(noveltyRatio, 0.0, 1.0)),
-            trainConceptPlanPolicy);
-         
+            NoveltyRatio: Math.Clamp(noveltyRatio, 0.0, 1.0)));
+
         return selected;
     }
 
-    private void ObserveConceptPlanTelemetry(ConceptPlanTelemetry telemetry, bool trainConceptPlanPolicy)
+    // Records concept-plan resolution telemetry only. The former policy-gradient training that
+    // taught the answer token-LM to emit concept-plan tokens (which corrupted the answer weights)
+    // has been removed; concept RESOLUTION itself (mirror/planned selection above) is unchanged.
+    private void ObserveConceptPlanTelemetry(ConceptPlanTelemetry telemetry)
     {
         _conceptPlanCalls++;
         _conceptPlanCoverageSum += telemetry.MirrorCoverage;
@@ -829,29 +873,6 @@ public sealed class GenesisTrainer
                 _conceptPlanFallbackCount++;
                 break;
         }
-
-        var structuralReward = telemetry.MirrorCoverage * 0.70;
-        var noveltyReward = telemetry.NoveltyRatio * 0.20;
-        var sizeReward = telemetry.SelectedConcepts.Count >= 2 ? 0.10 : 0.0;
-        var modePenalty = telemetry.Mode switch
-        {
-            ConceptPlanSelectionMode.MirrorFallback => 0.12,
-            ConceptPlanSelectionMode.Merged => 0.04,
-            _ => 0.0
-        };
-        var reward = (structuralReward + noveltyReward + sizeReward) - modePenalty;
-        var centeredReward = reward - ConceptPlanRewardBaseline;
-        var scale = centeredReward >= 0
-            ? Math.Clamp(1.0 + (centeredReward * 2.8), 1.0, 2.4)
-            : Math.Clamp(0.9 + (centeredReward * 1.8), 0.3, 0.9);
-        if (!trainConceptPlanPolicy)
-            return;
-
-        var target = string.Join(' ', telemetry.SelectedConcepts.Take(MaxConceptCount));
-        if (string.IsNullOrWhiteSpace(target))
-            return;
-        JournalConceptPlanDecision(telemetry.Prompt, target, telemetry.SelectedConcepts);
-        TrainConceptPlanPolicy(telemetry.Prompt, target, scale);
     }
 
     private static string BuildConceptPlanPrompt(
@@ -902,39 +923,118 @@ public sealed class GenesisTrainer
 
     /// <summary>
     /// Resolves the route-classification supervision label for an example. Honors an explicit
-    /// <see cref="GenesisExample.RouteLabel"/> when present; otherwise derives one heuristically so
-    /// the widened 3-way route head (0 = neural-only, 1 = platonic-direct, 2 = platonic-assisted)
-    /// gets a training signal without requiring new labeled data:
-    ///   - Input is a bare compact arithmetic expression AND output is a single number  -> 1 (direct).
-    ///   - Input/output otherwise CONTAINS an arithmetic sub-expression alongside words  -> 2 (assisted).
-    ///   - Everything else                                                               -> null (no
-    ///     route supervision; leaves the head free to learn neural-only from token loss alone).
-    /// Additive and backward-compatible: returns the existing label untouched when one is supplied.
+    /// <see cref="GenesisExample.RouteLabel"/> when present; otherwise derives one from CORRECTNESS
+    /// (not surface form): the PLATONIC route is supervised only when the platonic path actually
+    /// reproduces the target — generalized across ALL modalities, not just arithmetic.
+    /// 0 = neural-only, 1 = platonic-direct, 2 = platonic-assisted.
+    ///   - Arithmetic whose computed result matches the target, bare-number output  -> 1 (direct).
+    ///   - Arithmetic whose computed result matches the target, worded output       -> 2 (assisted).
+    ///   - Arithmetic present but the computed result is WRONG for this example     -> 0 (neural).
+    ///   - Non-arithmetic, platonic RETRIEVAL reproduces the target verbatim/near   -> 1 (direct).
+    ///   - Non-arithmetic, platonic retrieves the target concept (top-K / chain)    -> 2 (assisted).
+    ///   - Non-arithmetic, platonic path does NOT reproduce the target              -> 0 (neural).
+    ///   - Undeterminable                                                           -> null.
+    /// Bounded/deterministic and cheap: it only queries the space (GetNearestConcepts /
+    /// QueryConceptChain), it does NOT run heavy generation. Additive and backward-compatible:
+    /// returns the existing label untouched when one is supplied.
     /// </summary>
-    private static int? ResolveRouteLabel(GenesisExample example)
+    private int? ResolveRouteLabel(GenesisExample example)
     {
         if (example.RouteLabel is >= 0 and < GenesisNova.Model.GenesisNeuralModel.RouteCount)
             return example.RouteLabel;
         if (example.RouteLabel.HasValue)
             return null; // out-of-range stored label — ignore rather than mislabel.
 
+        // Arithmetic modality: only supervise a platonic route when the computation reproduces the target.
+        if (TryExtractArithmeticObservation(example, out var arithmetic))
+        {
+            if (arithmetic.AbsoluteError > 1e-6)
+                return null; // malformed/noisy example — don't supervise the router toward anything.
+
+            // Correct: direct when the answer is a bare number, assisted when embedded in a worded answer.
+            var arithmeticOutput = example.Output ?? string.Empty;
+            var bareNumberOut = System.Text.RegularExpressions.Regex.IsMatch(
+                arithmeticOutput, @"^\s*-?\d+(?:\.\d+)?\s*$");
+            return bareNumberOut ? 1 : 2;
+        }
+
+        // General (non-arithmetic) modality: the universal platonic op is RETRIEVAL. Label the
+        // platonic route whenever the space reproduces the target for this input — relational,
+        // functional, lookup, etc. Cheap deterministic space queries only (no generation).
         var input = example.Input ?? string.Empty;
         var output = example.Output ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(input) || string.IsNullOrWhiteSpace(output))
+            return null; // undeterminable
 
-        var bareExpr = System.Text.RegularExpressions.Regex.IsMatch(
-            input, @"^\s*-?\d+(?:\.\d+)?\s*[+\-*/x]\s*-?\d+(?:\.\d+)?\s*$");
-        var bareNumberOut = System.Text.RegularExpressions.Regex.IsMatch(
-            output, @"^\s*-?\d+(?:\.\d+)?\s*$");
-        if (bareExpr && bareNumberOut)
-            return 1; // platonic-direct: pure arithmetic in, pure number out.
+        var inputConcepts = ExtractMirrorConcepts(input, string.Empty);
+        var outputConcepts = ExtractMirrorConcepts(output, string.Empty);
+        if (inputConcepts.Count == 0 || outputConcepts.Count == 0)
+            return null; // undeterminable
 
-        var hasSubExpr = System.Text.RegularExpressions.Regex.IsMatch(
-            input + " " + output, @"-?\d+(?:\.\d+)?\s*[+\-*/x]\s*-?\d+(?:\.\d+)?");
-        var hasWords = System.Text.RegularExpressions.Regex.IsMatch(output, @"[A-Za-z]{2,}");
-        if (hasSubExpr && hasWords)
-            return 2; // platonic-assisted: computation embedded in a natural-language answer.
+        var outputTokens = TokenizeForRouteMatch(output);
+        if (outputTokens.Count == 0)
+            return null;
 
+        // (a) Concept-chain retrieval: does the lattice walk from the input anchors reproduce the
+        // target text? Exact/near-exact reproduction is a DIRECT platonic answer (route 1) when the
+        // target is a single token, ASSISTED (route 2) when it is a worded multi-token reconstruction.
+        var chain = _platonicSpace.QueryConceptChain(inputConcepts, maxHops: 2, beamWidth: 2);
+        var chainTokens = TokenizeForRouteMatch(chain.Text);
+        if (chainTokens.Count > 0)
+        {
+            var chainCoverage = TokenCoverage(outputTokens, chainTokens);
+            if (chainCoverage >= 0.999)
+                return outputTokens.Count <= 1 ? 1 : 2;
+            if (chainCoverage >= 0.5)
+                return 2; // partial relational reconstruction → assisted.
+        }
+
+        // (b) Nearest-concept retrieval: is the target's concept the nearest neighbour of the
+        // primary input concept (graded by rank)? Nearest-as-single-hop is DIRECT (route 1); present
+        // in the top-K but not the single nearest is ASSISTED (route 2).
+        var primaryInput = inputConcepts[0];
+        var nearest = _platonicSpace.GetNearestConcepts(
+            primaryInput,
+            candidates: null,
+            maxNeighbors: 8);
+        if (nearest.Count > 0)
+        {
+            var outputConceptSet = new HashSet<string>(
+                outputConcepts.Select(c => c.ToLowerInvariant()),
+                StringComparer.OrdinalIgnoreCase);
+            for (var rank = 0; rank < nearest.Count; rank++)
+            {
+                if (outputConceptSet.Contains(nearest[rank].Symbol))
+                    return rank == 0 ? 1 : 2;
+            }
+        }
+
+        // Platonic path did not reproduce the target — most often because the space simply isn't
+        // populated yet. Do NOT label this neural: that poisons the router into an always-neural
+        // attractor (empty space → "neural" labels → router never tries platonic → space never gets
+        // exercised → stays empty). Leave it UNSUPERVISED. Positive platonic labels accrue as the
+        // space learns to reproduce these inputs, and platonic routes already fall back to neural
+        // gracefully when a tool yields nothing — so under-labelling platonic costs nothing.
         return null;
+    }
+
+    private static IReadOnlyList<string> TokenizeForRouteMatch(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return Array.Empty<string>();
+        return text
+            .ToLowerInvariant()
+            .Split(new[] { ' ', '\t', '\r', '\n', ',', ';', '.', ':', '|', '/', '\\', '(', ')', '[', ']' },
+                StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+    }
+
+    private static double TokenCoverage(IReadOnlyList<string> targetTokens, IReadOnlyList<string> candidateTokens)
+    {
+        if (targetTokens.Count == 0)
+            return 0.0;
+        var candidateSet = new HashSet<string>(candidateTokens, StringComparer.OrdinalIgnoreCase);
+        var hits = targetTokens.Count(t => candidateSet.Contains(t));
+        return hits / (double)targetTokens.Count;
     }
 
     private double ComputeTrainingWeight(GenesisExample example)
@@ -1056,14 +1156,16 @@ public sealed class GenesisTrainer
 
         var example = new GenesisExample(input ?? string.Empty, output ?? string.Empty);
         var outcome = ResolveInferenceOutcome(example, telemetry, isCorrect);
-        if (outcome == InferenceOutcome.Success)
-        {
-            _ = ObserveLearningSignals(example, trackCoverage: false, trainConceptPlanPolicy: false);
-        }
-        else if (outcome == InferenceOutcome.Unknown)
-        {
+
+        // Inference is READ-ONLY on the platonic space. The space is a SHARED, PERSISTENT store that
+        // every future training session loads, so it is mutated ONLY by the training loop
+        // (ObserveLearningSignals). Drifting it from REPL/inference queries — especially with the
+        // edit-head's exploration noise, and from the model's own (possibly wrong) outputs — would
+        // contaminate the shared store across all sessions. Here we only record telemetry (the
+        // inference engine's own adaptive bias) and, for an undeterminable outcome, queue the example
+        // for the TRAINING loop to learn from later.
+        if (outcome == InferenceOutcome.Unknown)
             EnqueuePendingInferenceIntrospection(example);
-        }
 
         if (telemetry is not null)
             ObserveInferenceTelemetry(telemetry, outcome);
@@ -1071,7 +1173,9 @@ public sealed class GenesisTrainer
 
     private void ObserveInferenceTelemetry(GenerationResult telemetry, InferenceOutcome outcome)
     {
-        ObserveKnownInferenceOutcome(outcome, telemetry);
+        // allowSpaceMutation: false — REPL/inference telemetry adapts the inference bias but must NOT
+        // write to the shared, persistent platonic space (that is training-only).
+        ObserveKnownInferenceOutcome(outcome, telemetry, allowSpaceMutation: false);
     }
 
     private InferenceOutcome ResolveInferenceOutcome(GenesisExample example, GenerationResult? telemetry, bool? isCorrect)
@@ -1088,7 +1192,9 @@ public sealed class GenesisTrainer
             : DeriveHeuristicOutcome(telemetry);
     }
 
-    private void ObserveKnownInferenceOutcome(InferenceOutcome outcome, GenerationResult telemetry)
+    // allowSpaceMutation defaults to FALSE — the safe option. Only the training loop opts in (true),
+    // so the shared persistent platonic space can never be written from an inference/REPL caller.
+    private void ObserveKnownInferenceOutcome(InferenceOutcome outcome, GenerationResult telemetry, bool allowSpaceMutation = false)
     {
         if (outcome == InferenceOutcome.Unknown)
             return;
@@ -1132,7 +1238,10 @@ public sealed class GenesisTrainer
                 _fallbackCorrectCount++;
         }
 
-        ObserveRetrospectiveEvidenceCredit(telemetry, resolvedCorrectness);
+        // The only platonic-space WRITE in this method — gated to training. Inference must not mutate
+        // the shared, persistent store.
+        if (allowSpaceMutation)
+            ObserveRetrospectiveEvidenceCredit(telemetry, resolvedCorrectness);
 
         _inferenceTelemetryHint = ComputeInferenceTelemetryHint();
         _inferencePolicy.ApplyTelemetryHint(_inferenceTelemetryHint);
@@ -1193,26 +1302,15 @@ public sealed class GenesisTrainer
     private IReadOnlyList<string> ObserveLearningSignals(
         GenesisExample example,
         bool trackCoverage = true,
-        bool allowTransformDiscovery = true,
-        bool allowSpaceToolLoop = true,
-        bool trainConceptPlanPolicy = true)
+        bool allowTransformDiscovery = true)
     {
-        var concepts = ResolveConcepts(example, trainConceptPlanPolicy);
+        var concepts = ResolveConcepts(example);
         ObservePlatonicSpace(example, concepts);
         if (allowTransformDiscovery)
             UpdateTransformDiscovery(example);
-        var hasArithmetic = TryExtractArithmeticObservation(example, out _);
-        var baseTicks = Math.Max(1, _trainingTickMultiplier / 2);
-        var conceptBoost = Math.Clamp((concepts.Count - 1) / 3, 0, 2);
-        var structuralBoost = Math.Clamp((concepts.Count - 2) / 4, 0, 3);
-        var arithmeticBoost = hasArithmetic ? Math.Max(1, _trainingTickMultiplier / 2) : 0;
-        var tickIterations = concepts.Count <= 1 && !hasArithmetic
-            ? 1
-            : Math.Clamp(baseTicks + conceptBoost + structuralBoost + arithmeticBoost, 1, 24);
-        for (var i = 0; i < tickIterations; i++)
-            RunTickPatternLoop(example, concepts);
-        if (allowSpaceToolLoop)
-            RunSpaceToolLoop(concepts);
+        // Academic cadence: a single principled pass per example (conforms to the source's
+        // once-per-tick frontier update), not a 1–24x storm that amplifies noise and contamination.
+        RunTickPatternLoop(example, concepts);
 
         if (trackCoverage)
         {
@@ -1244,81 +1342,9 @@ public sealed class GenesisTrainer
         return concepts;
     }
 
-    private void RunSpaceToolLoop(IReadOnlyList<string> concepts)
-    {
-        if (concepts.Count == 0)
-            return;
-
-        var assessment = _spaceManager.Manage();
-        var averageBridge = concepts.Count == 0
-            ? 0.5
-            : concepts.Select(GetBridgeConfidenceForConcept).DefaultIfEmpty(0.5).Average();
-        var relationPressure = assessment.RelationBudget > 0
-            ? Math.Clamp((double)assessment.RelationsAfter / assessment.RelationBudget, 0.0, 2.0)
-            : 0.0;
-        var pressure = Clamp01((assessment.NoiseRatio * 0.55) + ((1.0 - averageBridge) * 0.35) + (Math.Max(0.0, relationPressure - 1.0) * 0.10));
-        TrainSpacePolicyFromTelemetryOutcome(assessment.NoiseRatio, averageBridge, relationPressure, flush: false);
-        if (pressure < 0.05)
-        {
-            TrainSpacePolicyFromTelemetryOutcome(assessment.NoiseRatio, averageBridge, relationPressure, flush: true);
-            return;
-        }
-
-        var state = CreateSpacePolicyState(assessment, averageBridge, relationPressure, _priorSpaceActionId, concepts);
-        if (!TryPredictSpaceTool(state, allowExploration: true, out var tool))
-        {
-            TrainSpaceToolPolicy(state.ToDeterministicEncoding(), EncodeSpaceToolActionId(0), 0.10);
-            return;
-        }
-
-        var actionId = ToSpaceToolActionId(tool);
-        _priorSpaceActionId = actionId;
-        _spacePolicyActionCounters.TryGetValue(actionId, out var actionCount);
-        _spacePolicyActionCounters[actionId] = actionCount + 1;
-        EnqueueSpacePolicyTransition(state, actionId, assessment.NoiseRatio, averageBridge, relationPressure);
-        _spaceDecisionJournal.Record(new SpaceDecisionJournalEntry(
-            Step: _spacePolicyStepCounter,
-            ActionId: actionId,
-            Tool: tool.ToString(),
-            AffectedConcepts: concepts.Take(8)
-                .Select(NormalizeConceptToken)
-                .Where(c => c.Length > 0)
-                .Concat(new[]
-                {
-                    $"state:{state.ConceptFeatures}",
-                    FormattableString.Invariant($"noise:{Math.Clamp(assessment.NoiseRatio, 0.0, 2.0):F1}"),
-                    FormattableString.Invariant($"bridge:{Math.Clamp(averageBridge, 0.0, 1.0):F1}"),
-                    FormattableString.Invariant($"pressure:{Math.Clamp(relationPressure, 0.0, 2.0):F1}")
-                })
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToArray(),
-            StateEncoding: state.ToDeterministicEncoding(),
-            PreMutationNoiseRatio: assessment.NoiseRatio,
-            PreMutationAverageBridgeConfidence: averageBridge,
-            PreMutationRelationPressure: relationPressure,
-            PreMutationNodes: assessment.NodesAfter,
-            PreMutationRelations: assessment.RelationsAfter,
-            AccumulatedRetrospectiveReward: 0.0));
-        var label = ToSpaceToolLabel(tool);
-
-        _ = _spaceManager.ExecuteTool(
-            tool,
-            concepts.Take(8).ToArray());
-
-        var primaryId = EnsureTickElement(concepts[0], ElementKind.Function);
-        var (updatedState, generated) = TickExecutor.ExecuteTick(
-            new TickAction(
-                Kind: TickKind.SpaceTool,
-                PrimaryElementId: primaryId,
-                Parameter: label),
-            _tickState);
-        _tickState = updatedState;
-        PromoteDetectedPatterns(label, generated);
-    }
-
-    private void TrainSpaceToolPolicy(string input, string output, double reinforcementScale)
-        => TrainControlPolicy(input, output, reinforcementScale);
-
+    // Evidence→contradiction credit: feeds the REAL inference channel (PlatonicSpaceMemory's
+    // value-update rule). The journal-replay credit that rewarded the cut space/concept token-LM
+    // policies has been removed; only the genuine space update remains.
     private void ObserveRetrospectiveEvidenceCredit(GenerationResult telemetry, bool success)
     {
         var evidence = telemetry.Evidence;
@@ -1326,63 +1352,6 @@ public sealed class GenesisTrainer
             return;
 
         _platonicSpace.ReinforceEvidence(evidence, success);
-        var evidenceConcepts = evidence
-            .SelectMany(e => new[] { e.Concept, e.RelatedConcept })
-            .Where(c => !string.IsNullOrWhiteSpace(c))
-            .Select(c => NormalizeConceptToken(c!))
-            .Where(c => c.Length > 0)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        if (evidenceConcepts.Count == 0)
-            return;
-
-        var contribution = Math.Clamp(evidence.Sum(e => Math.Abs(e.Contribution)) / Math.Max(1, evidence.Count), 0.05, 1.0);
-        var direction = success ? 1.0 : -1.0;
-        foreach (var entry in _spaceDecisionJournal.FindOverlapping(evidenceConcepts).Take(24))
-        {
-            var age = Math.Max(0, _spacePolicyStepCounter - entry.Step);
-            var discount = 1.0 / (1.0 + (age / 16.0));
-            var reward = direction * 0.08 * contribution * discount;
-            var targetAction = reward >= 0.0 ? entry.ActionId : 0;
-            var scale = reward >= 0.0
-                ? Math.Clamp(0.25 + Math.Abs(reward), 0.10, 0.50)
-                : Math.Clamp(0.08 + Math.Abs(reward), 0.05, 0.25);
-            TrainSpaceToolPolicy(entry.StateEncoding, EncodeSpaceToolActionId(targetAction), scale);
-            _spaceDecisionJournal.ApplyRetrospectiveReward(entry.Step, entry.ActionId, reward);
-            _spacePolicyRetrospectiveCreditCount++;
-        }
-
-        ApplyConceptPlanRetrospectiveCredit(evidenceConcepts, success, contribution);
-    }
-
-    private void ApplyConceptPlanRetrospectiveCredit(IReadOnlySet<string> evidenceConcepts, bool success, double contribution)
-    {
-        if (!success || evidenceConcepts.Count == 0)
-            return;
-
-        foreach (var entry in _conceptPlanDecisionJournal.Where(e => e.SelectedLatentConcepts.Any(evidenceConcepts.Contains)).TakeLast(12))
-        {
-            var age = Math.Max(0, _trainStepCount - entry.Step);
-            var discount = 1.0 / (1.0 + (age / 32.0));
-            var scale = Math.Clamp(0.12 + (0.10 * contribution * discount), 0.05, 0.35);
-            TrainConceptPlanPolicy(entry.Prompt, entry.Target, scale);
-            _conceptPlanRetrospectiveCreditCount++;
-        }
-    }
-
-    private void JournalConceptPlanDecision(string prompt, string target, IReadOnlyList<string> selectedConcepts)
-    {
-        var latent = selectedConcepts
-            .Select(NormalizeConceptToken)
-            .Where(c => c.Length > 0 && !_conceptCoverageCounts.ContainsKey(c))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .Take(MaxConceptCount)
-            .ToArray();
-        if (latent.Length == 0)
-            return;
-
-        _conceptPlanDecisionJournal.Enqueue(new ConceptPlanDecisionJournalEntry(_trainStepCount, prompt, target, latent));
-        while (_conceptPlanDecisionJournal.Count > MaxConceptPlanDecisionJournalEntries)
-            _conceptPlanDecisionJournal.Dequeue();
     }
 
     private void AddMasteredRehearsalExample(GenesisExample example)
@@ -1416,197 +1385,6 @@ public sealed class GenesisTrainer
         _model.CloneParametersToBreakGraph();
         _masteredRehearsalCount++;
         _masteredInterleavedRehearsalCount++;
-    }
-
-    private void TrainConceptPlanPolicy(string input, string output, double reinforcementScale)
-        => TrainControlPolicy(input, output, reinforcementScale);
-
-    private void TrainControlPolicy(string input, string output, double reinforcementScale)
-    {
-        var inputTokens = _tokenizer.Encode(input);
-        var targetTokens = _tokenizer.Encode(output, addEos: true);
-        _model.EnsureVocabularySize(_tokenizer.VocabularySize);
-        _trainStepCount++;
-        _ = _model.TrainExample(
-            inputTokens,
-            targetTokens,
-            _tokenizer.BosTokenId,
-            lossScale: Math.Clamp(reinforcementScale, 0.05, 0.5));
-        _model.CloneParametersToBreakGraph();
-    }
-
-    private void TrainSpacePolicyFromTelemetryOutcome(
-        double currentNoise,
-        double currentBridge,
-        double currentRelationPressure,
-        bool flush)
-    {
-        while (_spacePolicyTrajectory.Count > 0 &&
-               (flush || _spacePolicyTrajectory.Count >= SpacePolicyRewardHorizon))
-        {
-            var previous = _spacePolicyTrajectory.Dequeue();
-            var stepsAhead = Math.Clamp(_spacePolicyStepCounter - previous.StepIndex, 1, SpacePolicyRewardHorizon);
-            var horizonDiscount = 1.0 / stepsAhead;
-            var noiseImprovement = previous.NoiseRatio - currentNoise;
-            var bridgeImprovement = currentBridge - previous.AverageBridgeConfidence;
-            var pressureImprovement = Math.Abs(previous.RelationPressure - 1.0) - Math.Abs(currentRelationPressure - 1.0);
-            var reward = ((noiseImprovement * 0.55) + (bridgeImprovement * 0.35) + (pressureImprovement * 0.10)) * horizonDiscount;
-
-            if (Math.Abs(reward) < 0.005)
-                continue;
-
-            var scale = reward > 0
-                ? Math.Clamp(1.0 + (reward * 6.0), 1.0, 2.5)
-                : Math.Clamp(0.9 + (reward * 2.0), 0.2, 0.9);
-            TrainSpaceToolPolicy(
-                input: previous.State.ToDeterministicEncoding(),
-                output: EncodeSpaceToolActionId(previous.ActionId),
-                reinforcementScale: scale);
-        }
-    }
-
-    private void EnqueueSpacePolicyTransition(
-        SpacePolicyState state,
-        int actionId,
-        double noiseRatio,
-        double averageBridgeConfidence,
-        double relationPressure)
-    {
-        _spacePolicyStepCounter++;
-        _spacePolicyTrajectory.Enqueue(new SpacePolicyTransition(
-            State: state,
-            ActionId: actionId,
-            NoiseRatio: noiseRatio,
-            AverageBridgeConfidence: averageBridgeConfidence,
-            RelationPressure: relationPressure,
-            StepIndex: _spacePolicyStepCounter));
-        while (_spacePolicyTrajectory.Count > MaxSpacePolicyTrajectory)
-            _spacePolicyTrajectory.Dequeue();
-    }
-
-    private SpacePolicyState CreateSpacePolicyState(
-        SpaceManagementResult assessment,
-        double averageBridge,
-        double relationPressure,
-        int priorActionId,
-        IReadOnlyList<string> concepts)
-        => new(
-            Nodes: assessment.NodesAfter,
-            Relations: assessment.RelationsAfter,
-            Noise: Math.Clamp(assessment.NoiseRatio, 0.0, 2.0),
-            Bridge: Math.Clamp(averageBridge, 0.0, 1.0),
-            RelationPressure: Math.Clamp(relationPressure, 0.0, 2.0),
-            PriorActionId: Math.Max(0, priorActionId),
-            ConceptFeatures: ComputeConceptAnchorFeatures(concepts));
-
-    private bool TryPredictSpaceTool(SpacePolicyState state, bool allowExploration, out SpaceToolKind tool)
-    {
-        var prompt = state.ToDeterministicEncoding();
-        var generated = GenerateAndObserveInference(
-            new GenerationRequest(prompt, MaxNewTokens: 2, ChunkTokenBudget: 2),
-            contextLabel: "space-tool",
-            expectedCorrect: null);
-
-        if (!TryDecodePredictedSpaceTool(generated.Output ?? string.Empty, out var parsed))
-        {
-            _spaceToolParseFailureCount++;
-            tool = default;
-            return false;
-        }
-
-        tool = allowExploration && Random.Shared.NextDouble() < SpacePolicyExplorationRate
-            ? SampleExplorationAction(parsed)
-            : parsed;
-        return true;
-    }
-
-    private static bool TryDecodePredictedSpaceTool(string output, out SpaceToolKind tool)
-    {
-        tool = default;
-        var candidates = output
-            .Split(new[] { ' ', '\t', '\r', '\n', ',', ';', ':', '.', '|', '=', '[', ']' }, StringSplitOptions.RemoveEmptyEntries);
-        foreach (var candidate in candidates.Prepend(output))
-        {
-            if (TryParseSpaceToolActionId(candidate, out var actionId) &&
-                TryGetSpaceToolFromActionId(actionId, out tool))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private static string ToSpaceToolLabel(SpaceToolKind tool)
-        => tool.ToString().ToLowerInvariant();
-
-    private static int ToSpaceToolActionId(SpaceToolKind tool)
-    {
-        var index = Array.IndexOf(SpaceToolActions, tool);
-        return index < 0 ? 0 : index + 1;
-    }
-
-    private static bool TryGetSpaceToolFromActionId(int actionId, out SpaceToolKind tool)
-    {
-        var index = actionId - 1;
-        if (index < 0 || index >= SpaceToolActions.Length)
-        {
-            tool = SpaceToolKind.DefaultAlgorithm;
-            return false;
-        }
-
-        tool = SpaceToolActions[index];
-        return true;
-    }
-
-    private static string EncodeSpaceToolActionId(int actionId)
-        => $"a{Math.Clamp(actionId, 0, SpaceToolActions.Length).ToString("00", System.Globalization.CultureInfo.InvariantCulture)}";
-
-    private static bool TryParseSpaceToolActionId(string value, out int actionId)
-    {
-        actionId = 0;
-        if (string.IsNullOrWhiteSpace(value))
-            return false;
-
-        var trimmed = value.Trim();
-        if (!trimmed.StartsWith("a", StringComparison.OrdinalIgnoreCase) || trimmed.Length < 2)
-            return false;
-
-        trimmed = trimmed[1..];
-        if (trimmed.Length != 2)
-            return false;
-
-        if (!int.TryParse(trimmed, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var parsed))
-            return false;
-
-        if (parsed <= 0 || parsed > SpaceToolActions.Length)
-            return false;
-
-        actionId = parsed;
-        return true;
-    }
-
-    private static string ComputeConceptAnchorFeatures(IReadOnlyList<string> concepts)
-    {
-        var normalizedLengths = concepts
-            .Where(c => !string.IsNullOrWhiteSpace(c))
-            .Select(c => NormalizeConceptToken(c).Length)
-            .Where(length => length > 0)
-            .ToArray();
-        if (normalizedLengths.Length == 0)
-            return "cnt=0,avg=0.00,spread=0";
-
-        var averageLength = normalizedLengths.Average();
-        var spread = normalizedLengths.Max() - normalizedLengths.Min();
-        return FormattableString.Invariant($"cnt={normalizedLengths.Length},avg={averageLength:F2},spread={spread}");
-    }
-
-    private static SpaceToolKind SampleExplorationAction(SpaceToolKind preferred)
-    {
-        var options = SpaceToolActions.Where(action => action != preferred).ToArray();
-        if (options.Length == 0)
-            return preferred;
-        return options[Random.Shared.Next(options.Length)];
     }
 
     private void UpdateTransformDiscovery(GenesisExample example)
@@ -1877,40 +1655,156 @@ public sealed class GenesisTrainer
             ObserveArithmeticFaces(arithmetic);
 
         var isNegative = IsNegativeText(example.Output);
-        var inputConcepts = ResolveConcepts(example.Input, string.Empty);
-        var outputConcepts = ResolveConcepts(string.Empty, example.Output);
+
+        // Learned edit strength: the NN's edit-head predicts HOW STRONGLY to edit the space for this
+        // example, replacing the hand-coded 0.2/0.8. Direction comes from isNegative; the magnitude
+        // m∈[0,1] scales how far the contradiction is pushed from neutral 0.5. The head is rewarded
+        // after the step (RewardEditHead) by a CAUSAL, space-state-dependent outcome.
+        //
+        // Anti-collapse exploration: add small zero-mean noise to m BEFORE use/storage so the
+        // do-nothing fixed point (m→0) is never a stable optimum. The noise is derived
+        // deterministically from _trainStepCount (Random may be unavailable/seeded) and varies per
+        // step; the explored magnitude m' is what we both APPLY and later REINFORCE.
+        var editTokens = _tokenizer.Encode(example.Input);
+        var rawM = Math.Clamp(_model.PredictEditMagnitude(editTokens), 0.0, 1.0);
+        var explorationNoise = DeterministicEditExplorationNoise(_trainStepCount);
+        var m = Math.Clamp(rawM + explorationNoise, 0.0, 1.0);
+        _pendingEditTokens = editTokens;
+        _pendingEditMagnitude = m;
+        var contradiction = isNegative ? (0.5 + (0.5 * m)) : (0.5 - (0.5 * m));
+
+        // Couple the GENUINE input→output tokens (deterministic mirror), NOT the NN concept-planner's
+        // output. The planner hallucinates fringe tokens ("0", "0+") which, once coupled, contaminate the
+        // relation graph so a number-word ends up spuriously related to noise. The directly-observed
+        // input→output pair IS the genuine relationship and is what should dominate. (The planner still
+        // runs once per example upstream for its concept set / telemetry — only the COUPLING source
+        // changes here.)
+        var inputConcepts = ExtractMirrorConcepts(example.Input, string.Empty);
+        var outputConcepts = ExtractMirrorConcepts(example.Output, string.Empty);
         if (inputConcepts.Count == 0 || outputConcepts.Count == 0)
         {
-            for (var i = 0; i < concepts.Count; i++)
-            {
-                for (var j = i + 1; j < concepts.Count; j++)
-                {
-                    var contradiction = isNegative ? 0.8 : 0.2;
-                    _platonicSpace.ObserveContradiction(concepts[i], concepts[j], contradiction);
-                }
-            }
+            // Bounded fallback: couple only ADJACENT concepts (sequential structure), not the full
+            // O(n²) pairwise mesh — keeps contamination linear in the concept count.
+            for (var i = 0; i + 1 < concepts.Count; i++)
+                _platonicSpace.ObserveContradiction(concepts[i], concepts[i + 1], contradiction);
             _platonicSpace.FineEditFromExample(concepts, concepts, isNegative);
             return;
         }
 
-        foreach (var left in inputConcepts)
+        // Academic coupling: link each output concept to its SINGLE nearest input concept (the
+        // genuinely-related pair, found via the lattice), NOT the full input×output mesh — and drop
+        // output↔output coupling entirely (co-occurrence is not a relationship). This is the
+        // minimum-contamination signal that still teaches the input→output association.
+        foreach (var output in outputConcepts)
         {
-            foreach (var right in outputConcepts)
-            {
-                var contradiction = left.Equals(right, StringComparison.OrdinalIgnoreCase)
-                    ? 0.05
-                    : (isNegative ? 0.8 : 0.2);
-                _platonicSpace.ObserveContradiction(left, right, contradiction);
-            }
-        }
-
-        for (var i = 0; i < outputConcepts.Count; i++)
-        {
-            for (var j = i + 1; j < outputConcepts.Count; j++)
-                _platonicSpace.ObserveContradiction(outputConcepts[i], outputConcepts[j], 0.1);
+            var partners = inputConcepts
+                .Where(inp => !inp.Equals(output, StringComparison.OrdinalIgnoreCase))
+                .ToArray();
+            if (partners.Length == 0)
+                continue;
+            var nearest = _platonicSpace.GetNearestConcepts(output, candidates: partners, maxNeighbors: 1);
+            var partner = nearest.Count > 0 ? nearest[0].Symbol : partners[0];
+            _platonicSpace.ObserveContradiction(partner, output, contradiction);
         }
 
         _platonicSpace.FineEditFromExample(inputConcepts, outputConcepts, isNegative);
+    }
+
+    // CAUSAL REINFORCE reward for the edit-head. The token forward pass never reads the space, so a
+    // token-loss delta was causally disconnected from the edit. Instead we measure a
+    // SPACE-STATE-DEPENDENT outcome in [0,1]: AFTER the edit was applied (in ObservePlatonicSpace,
+    // which ran just before this), does the platonic space now RETRIEVE the correct output for this
+    // input? Retrieval is the universal op, so this generalizes across modalities. The reward is
+    // outcome - the last-seen outcome for this example (REINFORCE baseline); first sighting -> 0.
+    // This nudges PredictEditMagnitude toward the write strength that genuinely improves retrieval,
+    // and the exploration noise added to m (in ObservePlatonicSpace) prevents the m->0 fixed point.
+    // tokenLoss is retained in the signature (callers pass it) but no longer drives the reward.
+    private void RewardEditHead(GenesisExample example, double tokenLoss)
+    {
+        _ = tokenLoss; // no longer causally relevant to the edit-head reward
+        var pending = _pendingEditTokens;
+        _pendingEditTokens = null;
+        if (pending is null || pending.Count == 0)
+            return;
+
+        var outcome = ComputeEditOutcome(example);
+
+        var key = (example.Input ?? string.Empty) + "" + (example.Output ?? string.Empty);
+        var reward = _exampleOutcomeBaseline.TryGetValue(key, out var prev)
+            ? outcome - prev     // positive when retrieval improved vs the last sighting of this example
+            : 0.0;               // first sighting → neutral
+        _exampleOutcomeBaseline[key] = outcome;
+
+        // Bound the baseline map so it cannot grow without limit across a long run.
+        if (_exampleOutcomeBaseline.Count > 50_000)
+            _exampleOutcomeBaseline.Clear();
+
+        _model.ReinforceEditHead(pending, _pendingEditMagnitude, reward);
+    }
+
+    // Space-state-dependent outcome in [0,1]: does the platonic space now retrieve/produce the correct
+    // output for this input? Retrieval is the universal op (generalizes across modalities). Scored by
+    // whether the target output concept is the nearest / in the top-K neighbours of the primary input
+    // concept, graded by rank and distance; arithmetic correctness is credited via the face path.
+    private double ComputeEditOutcome(GenesisExample example)
+    {
+        // Arithmetic: credit numerical correctness directly (already mirrored into the space's faces
+        // by ObserveArithmeticFaces during the edit).
+        if (TryExtractArithmeticObservation(example, out var arithmetic))
+            return arithmetic.AbsoluteError <= 1e-6 ? 1.0 : 0.0;
+
+        var input = example.Input ?? string.Empty;
+        var output = example.Output ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(input) || string.IsNullOrWhiteSpace(output))
+            return 0.0;
+
+        var inputConcepts = ExtractMirrorConcepts(input, string.Empty);
+        var outputConcepts = ExtractMirrorConcepts(output, string.Empty);
+        if (inputConcepts.Count == 0 || outputConcepts.Count == 0)
+            return 0.0;
+
+        const int maxNeighbors = 8;
+        var primaryInput = inputConcepts[0];
+        var nearest = _platonicSpace.GetNearestConcepts(
+            primaryInput,
+            candidates: outputConcepts,
+            maxNeighbors: maxNeighbors);
+        if (nearest.Count == 0)
+            return 0.0;
+
+        var outputConceptSet = new HashSet<string>(
+            outputConcepts.Select(c => c.ToLowerInvariant()),
+            StringComparer.OrdinalIgnoreCase);
+
+        for (var rank = 0; rank < nearest.Count; rank++)
+        {
+            if (!outputConceptSet.Contains(nearest[rank].Symbol))
+                continue;
+
+            // Graded by rank (nearest = best) AND by distance (closer = better); combine so the
+            // single nearest exact hit scores ~1 and deeper/farther hits decay toward 0.
+            var rankScore = 1.0 / (1.0 + rank);
+            var distanceScore = 1.0 / (1.0 + Math.Max(0.0, nearest[rank].Distance));
+            return Clamp01((0.5 * rankScore) + (0.5 * distanceScore));
+        }
+
+        return 0.0;
+    }
+
+    // Deterministic zero-mean exploration noise in ~+/-0.05, derived from the step index so it varies
+    // per step without relying on a (possibly seeded/unavailable) Random. A simple integer hash gives
+    // a well-mixed value in [0,1), recentred to [-0.05, 0.05).
+    private static double DeterministicEditExplorationNoise(int step)
+    {
+        unchecked
+        {
+            var h = (uint)step * 2654435761u; // Knuth multiplicative hash
+            h ^= h >> 15;
+            h *= 2246822519u;
+            h ^= h >> 13;
+            var unit = (h & 0xFFFFFF) / (double)0x1000000; // [0,1)
+            return (unit - 0.5) * 0.10;                    // [-0.05, 0.05)
+        }
     }
 
     private void ObserveArithmeticFaces(ArithmeticObservation arithmetic)

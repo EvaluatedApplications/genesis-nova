@@ -47,26 +47,13 @@ public record PlatonicElement(
     double[] Embedding,
     string Symbol,
     int GeneratedAtTick,
-    int? ComplementId = null,
     double NoveltyScore = 0.5,
     double BridgeConfidence = 0.5,
     ImmutableArray<int> RelatedTo = default,
-    string? GenerationPath = null,
-    bool IsVocabulary = false,
-    bool IsHypothesis = false,
-    double[]? LocalTransformDelta = null,
-    double LocalTransformConfidence = 0.0,
-    int LocalTransformObservations = 0,
-    CompositionMode LocalComposition = CompositionMode.Sum,
-    bool IsDevolved = false,
-    int? DevolvedParentId = null,
-    ImmutableArray<int> DevolvedChildIds = default
-)
-{
-    /// <summary>Normalize backing field</summary>
-    public ImmutableArray<int> RelatedToArray => RelatedTo;
-    public ImmutableArray<int> DevolvedChildIdsArray => DevolvedChildIds;
-}
+    string? GenerationPath = null
+);
+// (R6/R7/R9-only fields — ComplementId, IsHypothesis, LocalTransform*, IsDevolved/Devolved* — were
+// removed 2026-06-14 with the disconnected tick rules that set them; nothing read them. See TickExecutor.)
 
 /// <summary>
 /// The complete state of the platonic space at a moment in time.

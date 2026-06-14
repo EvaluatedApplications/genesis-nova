@@ -38,9 +38,7 @@ public sealed class NumberWordEquivalenceProductionTests
         var memory = new PlatonicSpaceMemory(faceDimension: config.HiddenSize / 2, seed: 7);
         var trainer = new GenesisTrainer(tokenizer, model, memory, config);
         var inference = new GenesisInferenceEngine(
-            tokenizer, model, memory, null,
-            trainer.FoldPathDiscovery, trainer.TransformAccumulator,
-            enableDiagnosticFaceArithmeticShortcut: true);
+            tokenizer, model, memory, null);
         trainer.SetInferencePolicy(inference);
 
         // Sanity: the platonic space must actually be fully instantiated (free region beyond numeric).
@@ -50,15 +48,33 @@ public sealed class NumberWordEquivalenceProductionTests
         var lesson = new NumberWordCreator().Generate(20, 0, true)
             .Select(p => new GenesisExample(p.Input, p.Output, SourceCreatorName: "corenova:number-word-equiv"))
             .ToList();
+        var digitWords = new[] { ("0","zero"),("1","one"),("2","two"),("3","three"),("4","four"),
+            ("5","five"),("6","six"),("7","seven"),("8","eight"),("9","nine") };
+
+        // Both-direction mastery probe — train STOPS as soon as the capability emerges instead of always
+        // burning the full epoch budget (no fixed-count waste).
+        (int W2d, int D2wPlat) Score()
+        {
+            int w = 0, d = 0;
+            foreach (var (digit, word) in digitWords)
+            {
+                if (inference.Generate(new GenerationRequest(word, 4)).Output.Trim() == digit) w++;
+                var gg = inference.Generate(new GenerationRequest(digit, 4));
+                if (gg.Output.Trim() == word && gg.UsedPlatonicQuery && !gg.UsedNeuralFallback) d++;
+            }
+            return (w, d);
+        }
+
         var rng = new Random(123);
-        for (var e = 0; e < 20; e++)
+        const int maxEpochs = 20;       // give-up cap, not the normal stop
+        for (var e = 0; e < maxEpochs; e++)
         {
             for (var i = lesson.Count - 1; i > 0; i--) { var j = rng.Next(i + 1); (lesson[i], lesson[j]) = (lesson[j], lesson[i]); }
             foreach (var ex in lesson) trainer.TrainStep(ex);
+            var (w, d) = Score();
+            if (w >= 8 && d >= 8) break; // both directions mastered — stop early
         }
 
-        var digitWords = new[] { ("0","zero"),("1","one"),("2","two"),("3","three"),("4","four"),
-            ("5","five"),("6","six"),("7","seven"),("8","eight"),("9","nine") };
         int w2d = 0, d2wPlat = 0;
         foreach (var (digit, word) in digitWords)
         {

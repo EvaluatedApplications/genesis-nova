@@ -114,6 +114,17 @@ public sealed class PlatonicGliderDemoTests
         Assert.Equal("8", Interp().Execute(dbl, ["4"]));
     }
 
+    [Fact] // Fold: VARIADIC reduce of an op over all operands (the functional fold; arbitrary arity).
+    public void Fold_ReducesVariadically()
+    {
+        var interp = Interp();
+        var sum = new PlatonicGlider("sum", new Fold(GliderOp.Add, 0));
+        Assert.Equal("6", interp.Execute(sum, ["1", "2", "3"]));
+        Assert.Equal("100", interp.Execute(sum, ["10", "20", "30", "40"]));
+        var product = new PlatonicGlider("product", new Fold(GliderOp.Multiply, 0));
+        Assert.Equal("24", interp.Execute(product, ["2", "3", "4"]));
+    }
+
     [Fact] // Compare: numeric predicate → boolean (1/0).
     public void Compare_YieldsPredicate()
     {

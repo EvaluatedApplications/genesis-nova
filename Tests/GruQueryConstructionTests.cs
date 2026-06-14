@@ -40,9 +40,7 @@ public sealed class GruQueryConstructionTests
         var memory = new PlatonicSpaceMemory(faceDimension: config.HiddenSize / 2, seed: 7);
         var trainer = new GenesisTrainer(tokenizer, model, memory, config);
         var inference = new GenesisInferenceEngine(
-            tokenizer, model, memory, null,
-            trainer.FoldPathDiscovery, trainer.TransformAccumulator,
-            enableDiagnosticFaceArithmeticShortcut: true);
+            tokenizer, model, memory, null);
         trainer.SetInferencePolicy(inference);
 
         // Train on the REAL multi-surface generator: difficulty 1 includes framed forms

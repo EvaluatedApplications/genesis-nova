@@ -1,5 +1,6 @@
 <Solution>
   <Folder Name="/Solution Items/">
+    <File Path="PLATONIC_SPACE.md" />
     <File Path="PROJECT_GLIDER.md" />
     <File Path="README.md" />
   </Folder>

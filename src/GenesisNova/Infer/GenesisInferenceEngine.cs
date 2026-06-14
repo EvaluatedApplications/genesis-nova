@@ -18,13 +18,13 @@ public sealed class GenesisInferenceEngine
     private readonly IGenesisTokenizer _tokenizer;
     private readonly GenesisNeuralModel _model;
     private readonly PlatonicSpaceMemory _memory;
-    private readonly FoldPathDiscovery? _foldPathDiscovery;
+    // Learned-function store: functions learned as transform vectors T(f)=avg(embed(out)-embed(in)),
+    // applied by composition (embed(x)+T(f)) in the learned-function route. Optional (null → route off).
     private readonly TransformAccumulator? _transformAccumulator;
-    // Per-component glider-block route: runs hand-built block compositions (Compare/Branch/Const) on the
-    // substrate to answer their compact capabilities, credited platonic. See PROJECT_GLIDER.md §6.
-    private readonly PlatonicGliderInterpreter _glider;
+    // Learned BINARY ops: a discovered fold/log-linear structure (e.g. mul = fold of add; c = a^α·b^β),
+    // applied in the learned-function route's two-operand case. Optional (null → binary route off).
+    private readonly FoldPathDiscovery? _foldPathDiscovery;
     private readonly Func<string?>? _platonicFilePathProvider;
-    private readonly bool _enableDiagnosticFaceArithmeticShortcut;
     private readonly int _maxPlatonicAssistInvocations;
     private readonly object _platonicFileCacheLock = new();
     private string? _cachedPlatonicFilePath;
@@ -44,23 +44,18 @@ public sealed class GenesisInferenceEngine
         GenesisNeuralModel model,
         PlatonicSpaceMemory memory,
         Func<string?>? platonicFilePathProvider = null,
-        FoldPathDiscovery? foldPathDiscovery = null,
         TransformAccumulator? transformAccumulator = null,
-        bool enableDiagnosticFaceArithmeticShortcut = true,
+        FoldPathDiscovery? foldPathDiscovery = null,
         int maxPlatonicAssistInvocations = 3)
     {
         _tokenizer = tokenizer;
         _model = model;
         _memory = memory;
-        _glider = new PlatonicGliderInterpreter(memory);
         _platonicFilePathProvider = platonicFilePathProvider;
-        _foldPathDiscovery = foldPathDiscovery;
         _transformAccumulator = transformAccumulator;
-        _enableDiagnosticFaceArithmeticShortcut = enableDiagnosticFaceArithmeticShortcut;
+        _foldPathDiscovery = foldPathDiscovery;
         _maxPlatonicAssistInvocations = Math.Clamp(maxPlatonicAssistInvocations, 0, 16);
     }
-
-    public bool DiagnosticFaceArithmeticShortcutEnabled => _enableDiagnosticFaceArithmeticShortcut;
 
     /// <summary>
     /// When false (the default), inference performs NO writes to any learned store — the transform
@@ -231,31 +226,11 @@ public sealed class GenesisInferenceEngine
         // mid-generation as an internal scratchpad. Falls back to pure neural if no sub-step fires.
         if (routeId == 2)
         {
-            // Most-specific resolver FIRST: the glider-block route fires only for the exact compact
-            // block capabilities (compare/larger/double/triple) and abstains for everything else, so it
-            // must precede the greedy concept-chain/arithmetic resolvers that would otherwise intercept.
-            if (TryGenerateFromGliderBlock(request, out var gliderBlock2))
-            {
-                RecordRouteDecision(routeId, 1, true, true, true, 1, gliderBlock2.DecisionPath, routeConfidence);
-                return gliderBlock2;
-            }
-            // Route-1 and route-2 must NOT disagree on a query the platonic space answers EXACTLY.
-            // When the WHOLE input is a directly-resolvable arithmetic expression, answer it directly
-            // instead of neural-decoding scaffolding around the exact value — that scaffolding is what
-            // corrupts "5" into "1= 5" when broad training erodes router confidence and tips bare
-            // arithmetic from route-1 into route-2. Restricted to the ARITHMETIC-direct resolvers (NOT
-            // the general concept-chain) so genuine multi-step queries that need the neural+platonic
-            // interleave are left untouched and still flow through the assist below.
-            if (TryGenerateFromDiscoveredTransform(request, out var directTransform))
-            {
-                RecordRouteDecision(routeId, 1, true, true, true, 1, directTransform.DecisionPath, routeConfidence);
-                return directTransform;
-            }
-            if (TryGenerateFromArithmeticQuery(request, out var directArithmetic))
-            {
-                RecordRouteDecision(routeId, 1, true, true, true, 1, directArithmetic.DecisionPath, routeConfidence);
-                return directArithmetic;
-            }
+            // Arithmetic is resolved by the GRU-CONSTRUCTED query (op CLASSIFIED from context + operand
+            // selection), not a hardcoded symbol→op parser. Removing the compact regex (2026-06-14): it
+            // forced ambiguous tokens to a fixed math meaning ("x"⇒multiply always), which is wrong when
+            // "x" is a variable/word; the op head decides from context (digits flanking "x" ⇒ multiply;
+            // otherwise abstain) and the homomorphism computes.
             if (TryGenerateFromGruQuery(request, out var gruQuery))
             {
                 RecordRouteDecision(routeId, 1, true, true, true, 1, gruQuery.DecisionPath, routeConfidence);
@@ -277,18 +252,6 @@ public sealed class GenesisInferenceEngine
         // Mode 1 (platonic-direct): answer straight from a platonic transform/query.
         if (routeId == 1)
         {
-            // Most-specific resolver FIRST (see route-2 note): the block capabilities must be answered by
-            // their own block path, not the greedy concept-chain plan that follows.
-            if (TryGenerateFromGliderBlock(request, out var gliderBlockDirect))
-            {
-                RecordRouteDecision(routeId, 1, true, true, true, 1, gliderBlockDirect.DecisionPath, routeConfidence);
-                return gliderBlockDirect;
-            }
-            if (TryGenerateFromDiscoveredTransform(request, out var discovered))
-            {
-                RecordRouteDecision(routeId, 1, true, true, true, 1, discovered.DecisionPath, routeConfidence);
-                return discovered;
-            }
             if (TryGenerateFromPlatonicPlan(request, out var platonic))
             {
                 RecordRouteDecision(routeId, 1, true, true, true, 1, platonic.DecisionPath, routeConfidence);
@@ -461,10 +424,13 @@ public sealed class GenesisInferenceEngine
     }
 
     /// <summary>
-    /// Identifies a platonic-resolvable arithmetic sub-step inside <paramref name="workingText"/>
-    /// and resolves it EXACTLY through the face homomorphism (log/poly faces) or a discovered
-    /// transform. Returns the formatted sub-result and a decode-consistency confidence.
-    /// Returns false when no resolvable sub-step exists or confidence is too low.
+    /// Resolves the arithmetic sub-step in <paramref name="workingText"/> through the SAME
+    /// GRU-constructed query path the direct route uses (<see cref="TryGenerateFromGruQuery"/>): the GRU
+    /// op head classifies the operation from the scratchpad's CONTEXT and the face homomorphism computes
+    /// it exactly. NO hardcoded symbol parser (the regex / "x"⇒multiply switch was removed 2026-06-14) —
+    /// the operator is never read off a pattern, so the assist disambiguates the op the same learned way
+    /// as every other arithmetic path. Returns the injected sub-result (" = N ") and a decode-consistency
+    /// confidence; false when the GRU abstains, nothing resolves, or this value was already injected.
     /// </summary>
     private bool TryResolveAssistSubResult(
         string workingText,
@@ -477,69 +443,20 @@ public sealed class GenesisInferenceEngine
         if (string.IsNullOrWhiteSpace(workingText))
             return false;
 
-        // Scan for the LAST compact arithmetic sub-expression (e.g. "12+7", "8*3") anywhere in the
-        // working text — the most recent sub-step is the one the model is currently working toward.
-        var matches = System.Text.RegularExpressions.Regex.Matches(
-            workingText,
-            @"(-?\d+(?:\.\d+)?)\s*([+\-*/x])\s*(-?\d+(?:\.\d+)?)");
-        for (var m = matches.Count - 1; m >= 0; m--)
-        {
-            var match = matches[m];
-            var key = match.Value.Trim();
-            if (alreadyResolved.Contains(key))
-                continue;
+        // The whole working context IS the query: the GRU selects the operands + op and the homomorphism
+        // computes. Abstains (false) on non-arithmetic scratchpads or low decode quality — same gates as
+        // the direct route, so the assist injects only what the learned query path would itself produce.
+        if (!TryGenerateFromGruQuery(new GenerationRequest(workingText, 6), out var resolved))
+            return false;
 
-            if (!double.TryParse(match.Groups[1].Value, System.Globalization.NumberStyles.Any,
-                    System.Globalization.CultureInfo.InvariantCulture, out var left) ||
-                !double.TryParse(match.Groups[3].Value, System.Globalization.NumberStyles.Any,
-                    System.Globalization.CultureInfo.InvariantCulture, out var right))
-                continue;
+        var value = resolved.Output.Trim();
+        if (value.Length == 0 || !alreadyResolved.Add(value))
+            return false; // nothing resolved, or this value was already injected this generation
 
-            var op = match.Groups[2].Value switch
-            {
-                "+" => ArithmeticOperation.Add,
-                "-" => ArithmeticOperation.Subtract,
-                "*" or "x" => ArithmeticOperation.Multiply,
-                "/" => ArithmeticOperation.Divide,
-                _ => ArithmeticOperation.Add
-            };
-            if (op == ArithmeticOperation.Divide && Math.Abs(right) < 1e-12)
-                continue; // division by zero — skip
-
-            // Prefer a learned/discovered transform when the capability exists; otherwise resolve
-            // via the exact face homomorphism. Both keep the arithmetic exact.
-            double value;
-            double quality;
-            var operationName = ToOperationName(op);
-            if (_foldPathDiscovery is not null &&
-                _foldPathDiscovery.HasOperation(operationName) &&
-                _foldPathDiscovery.TryPredict(operationName, left, right, out var predicted, out _))
-            {
-                value = predicted;
-                quality = 0.85;
-            }
-            else
-            {
-                var additiveFace = op is ArithmeticOperation.Add or ArithmeticOperation.Subtract;
-                var rightFaceSign = op is ArithmeticOperation.Subtract or ArithmeticOperation.Divide ? -1.0 : 1.0;
-                if (!TryFaceArithmetic(left, right, additiveFace, rightFaceSign, out value, out quality))
-                    continue;
-            }
-
-            if (LooksLikeIntegerOperands(left, right) && Math.Abs(value - Math.Round(value)) > 0.25)
-                continue;
-            if (quality <= 0.50)
-                continue; // low decode confidence — fall back to pure neural for this step
-
-            alreadyResolved.Add(key);
-            // Inject as " = <result> " so the neural decoder can continue conditioned on the
-            // resolved scratchpad value and transform it back into words.
-            subResult = $" = {FormatNumber(value)} ";
-            confidence = quality;
-            return true;
-        }
-
-        return false;
+        // Inject as " = <result> " so the neural decoder continues conditioned on the resolved value.
+        subResult = $" = {value} ";
+        confidence = resolved.PlatonicConfidence;
+        return true;
     }
 
     private GenerationResult GenerateNeuralTokens(
@@ -611,121 +528,12 @@ public sealed class GenesisInferenceEngine
         return $"{baseInput}\n{generatedText}";
     }
 
-    private bool TryGenerateFromDiscoveredTransform(GenerationRequest request, out GenerationResult result)
-    {
-        result = default!;
-        if (_foldPathDiscovery is null)
-            return false;
-
-        if (!TryParseArithmeticInput(request.Input, out var left, out var right, out var operation, out var isContextWrapped, out _))
-            return false;
-        if (isContextWrapped)
-            return false;
-        var operationName = ToOperationName(operation);
-        if (!_foldPathDiscovery.HasOperation(operationName))
-            return false;
-
-        if (!_foldPathDiscovery.TryPredict(operationName, left, right, out var prediction, out var route))
-            return false;
-
-        if (LooksLikeIntegerOperands(left, right) &&
-            Math.Abs(prediction - Math.Round(prediction)) > 0.25)
-            return false;
-
-        var response = FormatNumber(prediction);
-        var tokens = _tokenizer
-            .Encode(response, addEos: true)
-            .Take(Math.Max(1, request.MaxNewTokens))
-            .ToArray();
-        if (tokens.Length == 0)
-            return false;
-
-        UpdateAccumulatorFromInference(operationName, request.Input, response);
-
-        // Confidence from decode self-consistency of the learned transform's PREDICTED embedding
-        // (TransformAccumulator.Apply yields input+transform; the canonical codec decodes it and
-        // scores how well the predicted face matches the value it claims) — not a hardcoded floor.
-        var confidence = DecodeTransformConfidence(operationName, request.Input, operation, prediction);
-
-        result = new GenerationResult(
-            Output: _tokenizer.Decode(tokens),
-            GeneratedTokens: tokens,
-            UsedPlatonicQuery: true,
-            UsedNeuralFallback: false,
-            DecisionPath: "platonic-discovered-transform",
-            PlatonicConfidence: confidence,
-            AppliedBiasCount: 0,
-            AverageBiasMagnitude: 0.0,
-            ChunksGenerated: 1,
-            PlatonicHopCount: 1,
-            RoutedTransform: operationName,
-            TransformIntercept: route);
-        return true;
-    }
-
-    /// <summary>
-    /// Resolves the input EXACTLY as a compact arithmetic expression via the face homomorphism and
-    /// formats it as a direct platonic answer. The arithmetic-direct slice of the platonic-direct
-    /// route — shared by route 1 (platonic-direct) and the route-2 short-circuit so the two can never
-    /// produce DIFFERENT answers for the same exact arithmetic. Returns false for anything that is not
-    /// a directly-resolvable arithmetic expression (those flow through concept-chain / assist).
-    /// </summary>
-    private bool TryGenerateFromArithmeticQuery(GenerationRequest request, out GenerationResult result)
-    {
-        result = default!;
-        if (!TryResolveArithmeticQuery(request.Input, out var arithmetic))
-            return false;
-
-        var queryTokens = _tokenizer.Encode(arithmetic.ResponseText, addEos: true);
-        var bounded = queryTokens.Take(Math.Max(1, request.MaxNewTokens)).ToArray();
-        result = new GenerationResult(
-            Output: _tokenizer.Decode(bounded),
-            GeneratedTokens: bounded,
-            UsedPlatonicQuery: true,
-            UsedNeuralFallback: false,
-            DecisionPath: "platonic-query-slot-decode",
-            PlatonicConfidence: arithmetic.Confidence,
-            AppliedBiasCount: 0,
-            AverageBiasMagnitude: 0.0,
-            ChunksGenerated: 1,
-            PlatonicHopCount: 1);
-        return true;
-    }
-
-    /// <summary>
-    /// PER-COMPONENT GLIDER-BLOCK route (2026-06-14): answers a compact block capability — "compare a b",
-    /// "larger a b", "double|triple x" — by running the corresponding hand-built glider (a composition of
-    /// the reusable blocks: Compare/Branch/Const/Compute/Operand/Literal) on the platonic substrate via
-    /// <see cref="PlatonicGliderInterpreter.TryResolveCapability"/>. The blocks ARE the inference
-    /// mechanism here — there is no GRU-constructed plan. Credited platonic (UsedPlatonicQuery), so
-    /// RequirePlatonicForCorrect counts it and the router learns the capability. Abstains (false) for
-    /// anything that is not one of these compact forms — NL flows through the ML path.
-    /// </summary>
-    private bool TryGenerateFromGliderBlock(GenerationRequest request, out GenerationResult result)
-    {
-        result = default!;
-        if (!_glider.TryResolveCapability(request.Input, out var answer, out var capability))
-            return false;
-
-        var tokens = _tokenizer.Encode(answer, addEos: true)
-            .Take(Math.Max(1, request.MaxNewTokens))
-            .ToArray();
-        if (tokens.Length == 0)
-            return false;
-
-        result = new GenerationResult(
-            Output: _tokenizer.Decode(tokens),
-            GeneratedTokens: tokens,
-            UsedPlatonicQuery: true,
-            UsedNeuralFallback: false,
-            DecisionPath: $"platonic-glider-block:{capability}",
-            PlatonicConfidence: 1.0,
-            AppliedBiasCount: 0,
-            AverageBiasMagnitude: 0.0,
-            ChunksGenerated: 1,
-            PlatonicHopCount: 1);
-        return true;
-    }
+    // NOTE: the symbol→op COMPACT ARITHMETIC parser (TryGenerateFromDiscoveredTransform,
+    // TryGenerateFromArithmeticQuery, TryResolveArithmeticQuery, TryParseArithmeticInput) was removed
+    // 2026-06-14. It hardcoded ambiguous operator tokens to a single math meaning ("x"⇒multiply always),
+    // which is wrong when "x" is a variable/word. Arithmetic now flows through TryGenerateFromGruQuery:
+    // the GRU op head CLASSIFIES the operation from context and the homomorphism (TryFaceArithmetic)
+    // computes — so "x" only means multiply when context (flanking operands) says so. See PLATONIC_SPACE.md.
 
     /// <summary>
     /// The GRU-CONSTRUCTED platonic query: the model itself selects the face operation (learned op
@@ -830,15 +638,121 @@ public sealed class GenesisInferenceEngine
         return true;
     }
 
+    /// <summary>
+    /// LEARNED-OPERATION route. An operation LEARNED from examples (not a fixed op vocabulary, not parsed
+    /// by name) is a first-class element of the space, SELECTED by following a learned RELATION from a cue
+    /// concept (so "twice 7" reaches "double" through the learned twice↔double edge), and APPLIED:
+    ///  • UNARY (one operand) — a transform vector T(f)=avg(embed(out)−embed(in)) applied BY COMPOSITION
+    ///    (predicted = embed(x)+T(f), a Sum-composition of the argument with the function element), decoded
+    ///    in the function's own face (PreferredFace: poly +k / log ×k; the other face holds a spurious but
+    ///    clean reading, so decoding the wrong one would silently mislead).
+    ///  • BINARY (two operands) — a discovered fold / log-linear STRUCTURE (mul = fold of add; c = a^α·b^β),
+    ///    evaluated by <see cref="FoldPathDiscovery.TryPredict"/>.
+    /// Both generalize to UNSEEN operands from a few examples (measured). Abstains when no store is wired,
+    /// the operand count isn't 1 or 2, no cue resolves to a learned op, or the decode is low-quality.
+    /// </summary>
+    private bool TryGenerateFromLearnedFunction(GenerationRequest request, out GenerationResult result)
+    {
+        result = default!;
+        if ((_transformAccumulator is null && _foldPathDiscovery is null) || string.IsNullOrWhiteSpace(request.Input))
+            return false;
+
+        var tokens = request.Input.Trim().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        if (tokens.Length < 2)
+            return false;
+
+        const System.Globalization.NumberStyles numericStyle =
+            System.Globalization.NumberStyles.AllowLeadingSign | System.Globalization.NumberStyles.AllowDecimalPoint;
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
+
+        var operandTokens = tokens.Where(t => double.TryParse(t, numericStyle, inv, out _)).ToArray();
+        if (operandTokens.Length is not (1 or 2)) // unary or binary learned op (binary arithmetic with an
+            return false;                          // operator token is handled by the GRU-query route first)
+        var cues = tokens.Where(t => t.Any(char.IsLetter)).ToArray();
+        if (cues.Length == 0)
+            return false;
+
+        var dim = _memory.FaceDimension;
+
+        foreach (var cue in cues)
+        {
+            // The op element is the cue itself OR a relational neighbour of it (learned edge) — retrieval
+            // from the space, not a name lookup. First candidate carrying a learned op wins.
+            var candidates = new List<string>(5) { cue };
+            candidates.AddRange(_memory
+                .GetNeighbors(cue, PlatonicNeighborhoodType.Relational, maxNeighbors: 4, minConfidence: 0.35)
+                .Select(n => n.Concept));
+
+            foreach (var fn in candidates)
+            {
+                // UNARY — learned transform applied by composition.
+                if (operandTokens.Length == 1 && _transformAccumulator is not null
+                    && _transformAccumulator.TryGetTransform(fn, out var transform))
+                {
+                    var predicted = _transformAccumulator.Apply(fn, InputEmbeddingComposer.GetInputEmbedding(operandTokens[0], dim));
+                    if (predicted is null)
+                        continue;
+                    var (value, quality, face) = PlatonicFaceDecoder.DecodeNumericFromPrediction(predicted, dim, transform.PreferredFace);
+                    if (face != "none" && quality > 0.50
+                        && TryBuildNumericResult(value, quality, $"platonic-learned-function:{fn}", request, out result))
+                        return true;
+                    continue;
+                }
+
+                // BINARY — learned fold / log-linear structure evaluated on the operands.
+                if (operandTokens.Length == 2 && _foldPathDiscovery is not null && _foldPathDiscovery.HasOperation(fn)
+                    && double.TryParse(operandTokens[0], numericStyle, inv, out var a)
+                    && double.TryParse(operandTokens[1], numericStyle, inv, out var b)
+                    && _foldPathDiscovery.TryPredict(fn, a, b, out var predValue, out _)
+                    && TryBuildNumericResult(predValue, 0.85, $"platonic-learned-op:{fn}", request, out result))
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    // Encode a numeric value into a platonic-credited GenerationResult; false if it doesn't tokenize.
+    private bool TryBuildNumericResult(double value, double confidence, string decisionPath,
+        GenerationRequest request, out GenerationResult result)
+    {
+        result = default!;
+        var outTokens = _tokenizer.Encode(FormatNumber(value), addEos: true)
+            .Take(Math.Max(1, request.MaxNewTokens))
+            .ToArray();
+        if (outTokens.Length == 0)
+            return false;
+        result = new GenerationResult(
+            Output: _tokenizer.Decode(outTokens),
+            GeneratedTokens: outTokens,
+            UsedPlatonicQuery: true,
+            UsedNeuralFallback: false,
+            DecisionPath: decisionPath,
+            PlatonicConfidence: confidence,
+            AppliedBiasCount: 0,
+            AverageBiasMagnitude: 0.0,
+            ChunksGenerated: 1,
+            PlatonicHopCount: 1);
+        return true;
+    }
+
     private bool TryGenerateFromPlatonicPlan(GenerationRequest request, out GenerationResult result)
     {
         result = default!;
-        if (TryGenerateFromArithmeticQuery(request, out result))
-            return true;
-        // The GRU-constructed query runs after the exact compact parser (bare expressions stay on the
-        // authoritative path) and before the concept-chain (so framed arithmetic doesn't fall into a
-        // relational text walk).
+        // Arithmetic = the GRU-constructed query (op classified from context + operand selection), then
+        // the homomorphism computes. No hardcoded compact symbol parser (removed 2026-06-14). Runs before
+        // the concept-chain so framed/compact arithmetic doesn't fall into a relational text walk.
         if (TryGenerateFromGruQuery(request, out result))
+            return true;
+        // LEARNED-FUNCTION: apply a function learned as a transform-element by COMPOSITION, the function
+        // selected from the space by relation (not parsed by name). Handles unary learned functions the
+        // homomorphism can't (it computes a SPECIFIED op; this LEARNED which function from examples).
+        if (TryGenerateFromLearnedFunction(request, out result))
+            return true;
+        // RELATION-FIRST retrieval: for a single-concept query, follow the strongest learned RELATION edge
+        // before the geometric concept-chain. MEASURED (2026-06-14): pure geometric retrieval was refuted
+        // as a replacement — the migrated numeric face is unstable under contrastive repulsion and the
+        // semantic face is lexical (confuses "four"≈"fruit"), so the relation edge is the robust mechanism.
+        if (TryGenerateFromRelationEdge(request, out result))
             return true;
 
         var anchors = ExtractConceptAnchors(request.Input);
@@ -883,131 +797,46 @@ public sealed class GenesisInferenceEngine
         return true;
     }
 
-    private bool TryResolveArithmeticQuery(string input, out PlatonicQueryResolution resolution)
+    // RELATION-FIRST retrieval. For a single-concept query, return the strongest learned relational
+    // neighbour ("1"→"one", "apple"→"fruit") — the STABLE substrate fact the lesson established. (A
+    // geometric-first variant was tried and empirically refuted: the migrated numeric face is unstable
+    // under contrastive repulsion and the semantic face is lexical, so geometry mis-retrieved; the edge
+    // is the robust mechanism.) Single-concept only; arithmetic / glider capabilities are handled earlier.
+    private const double RelationFirstMinConfidence = 0.5;
+
+    private bool TryGenerateFromRelationEdge(GenerationRequest request, out GenerationResult result)
     {
-        resolution = default;
-        if (!TryParseArithmeticInput(input, out var left, out var right, out var op, out var likelyContextWrapped, out var isExplicitArithmeticExpression))
-            return false;
-        if (likelyContextWrapped)
-            return false;
-
-        // The exact direct face-arithmetic path is available by default in production: when the
-        // 3-mode router selects platonic-direct (route 1) and the input is a compact arithmetic
-        // expression, we resolve it exactly here rather than silently falling through to neural.
-        // (_enableDiagnosticFaceArithmeticShortcut is retained for telemetry/diagnostics but no
-        // longer gates this production route — it defaults true and the gate is removed so a
-        // disabled flag can never drop a platonic-direct answer to neural.)
-
-        var additiveFace = op is ArithmeticOperation.Add or ArithmeticOperation.Subtract;
-        var rightFaceSign = op is ArithmeticOperation.Subtract or ArithmeticOperation.Divide ? -1.0 : 1.0;
-
-        // Compute via face arithmetic — preserves the homomorphism poly(a)±poly(b)=poly(a±b),
-        // log(a)±log(b)=log(a*b or a/b). No plain C# arithmetic shortcut.
-        if (!TryFaceArithmetic(left, right, additiveFace, rightFaceSign, out var faceValue, out var faceQuality))
+        result = default!;
+        var anchors = ExtractConceptAnchors(request.Input);
+        if (anchors.Count != 1)
             return false;
 
-        // Confidence comes from decode consistency across face dimensions (no hardcoded floor).
-        var confidence = faceQuality;
-        if (!isExplicitArithmeticExpression && confidence <= 0.50)
+        var neighbours = _memory.GetNeighbors(
+            anchors[0],
+            PlatonicNeighborhoodType.Relational,
+            maxNeighbors: 1,
+            minConfidence: RelationFirstMinConfidence);
+        if (neighbours.Count == 0)
             return false;
 
-        resolution = new PlatonicQueryResolution(
-            ResponseText: FormatNumber(faceValue),
-            Confidence: confidence,
-            Operation: op,
-            IsExplicitExpression: isExplicitArithmeticExpression);
-
-        var operationName = ToOperationName(op);
-        UpdateAccumulatorFromInference(operationName, input, resolution.ResponseText);
-        return true;
-    }
-
-    // Parses ONLY compact arithmetic expressions (e.g. "4+5", "3*2", "10-1").
-    // Natural language forms ("what is 4 plus 5") are NOT handled here — they flow through
-    // the ML path so routing is informed by learned structure, not keyword heuristics.
-    private bool TryParseArithmeticInput(
-        string input,
-        out double left,
-        out double right,
-        out ArithmeticOperation operation,
-        out bool likelyContextWrapped,
-        out bool isExplicitArithmeticExpression)
-    {
-        left = 0d;
-        right = 0d;
-        operation = ArithmeticOperation.Add;
-        likelyContextWrapped = false;
-        isExplicitArithmeticExpression = false;
-        if (string.IsNullOrWhiteSpace(input))
+        var answer = neighbours[0].Concept;
+        var tokens = _tokenizer.Encode(answer, addEos: true)
+            .Take(Math.Max(1, request.MaxNewTokens))
+            .ToArray();
+        if (tokens.Length == 0)
             return false;
 
-        var normalized = input.ToLowerInvariant();
-        likelyContextWrapped =
-            normalized.Contains("context:") ||
-            normalized.Contains("\nuser:") ||
-            normalized.Contains("\nassistant:");
-        if (likelyContextWrapped)
-            return false;
-
-        // Relational token canonicalization (NOTHING hardcoded): before the compact regex, rewrite
-        // each whitespace-delimited NON-numeric operand token into the digit of its strongest numeric
-        // relational neighbour, learned from the platonic relation graph (e.g. "one" -> "1"). Operators
-        // and unresolvable tokens (e.g. "zarp") are left verbatim, so the EXISTING compact regex below
-        // is the sole arithmetic grammar — words with no learned numeric relation simply never resolve.
-        var tokens = normalized.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
-        if (tokens.Length > 1)
-        {
-            var rewritten = false;
-            for (var i = 0; i < tokens.Length; i++)
-            {
-                // Only WORD-LIKE tokens (containing a letter) are candidates for number-word resolution.
-                // Operator symbols (+, -, *, /) have no letters, so they pass through untouched — without
-                // this guard an operator that co-occurs with numbers in training would itself resolve to a
-                // digit and corrupt the expression ("1 + 1" -> "1 5 1"). Not an operator table: just "only
-                // resolve words, not symbols".
-                if (!tokens[i].Any(char.IsLetter))
-                    continue;
-                if (TryResolveTokenToNumber(tokens[i], out var digit) && !string.Equals(digit, tokens[i], StringComparison.Ordinal))
-                {
-                    tokens[i] = digit;
-                    rewritten = true;
-                }
-            }
-            if (rewritten)
-                normalized = string.Join(" ", tokens);
-        }
-
-        // Only handle compact symbol-based expressions: "4+5", "3*2", "10-1", "8/2", "6x3"
-        var compact = System.Text.RegularExpressions.Regex.Match(
-            normalized,
-            @"^\s*(-?\d+(?:\.\d+)?)\s*([+\-*/x])\s*(-?\d+(?:\.\d+)?)\s*$");
-        if (!compact.Success)
-            return false;
-
-        if (!double.TryParse(compact.Groups[1].Value, System.Globalization.NumberStyles.Any,
-                System.Globalization.CultureInfo.InvariantCulture, out left) ||
-            !double.TryParse(compact.Groups[3].Value, System.Globalization.NumberStyles.Any,
-                System.Globalization.CultureInfo.InvariantCulture, out right))
-            return false;
-
-        isExplicitArithmeticExpression = true;
-        operation = compact.Groups[2].Value switch
-        {
-            "+" => ArithmeticOperation.Add,
-            "-" => ArithmeticOperation.Subtract,
-            "*" or "x" => ArithmeticOperation.Multiply,
-            _ => ArithmeticOperation.Add
-        };
-
-        if (compact.Groups[2].Value is "/" && Math.Abs(right) > 1e-12)
-        {
-            operation = ArithmeticOperation.Divide;
-        }
-        else if (compact.Groups[2].Value is "/")
-        {
-            return false; // division by zero
-        }
-
+        result = new GenerationResult(
+            Output: _tokenizer.Decode(tokens),
+            GeneratedTokens: tokens,
+            UsedPlatonicQuery: true,
+            UsedNeuralFallback: false,
+            DecisionPath: "platonic-relation-edge",
+            PlatonicConfidence: neighbours[0].Confidence,
+            AppliedBiasCount: 0,
+            AverageBiasMagnitude: 0.0,
+            ChunksGenerated: 1,
+            PlatonicHopCount: 1);
         return true;
     }
 
@@ -1056,76 +885,6 @@ public sealed class GenesisInferenceEngine
 
         digit = bestConcept;
         return true;
-    }
-
-    private static string ToOperationName(ArithmeticOperation operation)
-        => operation switch
-        {
-            ArithmeticOperation.Add => "add",
-            ArithmeticOperation.Subtract => "sub",
-            ArithmeticOperation.Multiply => "mul",
-            ArithmeticOperation.Divide => "div",
-            _ => "add"
-        };
-
-    private static bool LooksLikeIntegerOperands(double left, double right)
-        => Math.Abs(left - Math.Round(left)) <= 1e-6 && Math.Abs(right - Math.Round(right)) <= 1e-6;
-
-    private void UpdateAccumulatorFromInference(string operation, string input, string output)
-    {
-        // Training-only: inference must not mutate the shared persistent transform store.
-        if (_transformAccumulator is null || !LearningEnabled)
-            return;
-
-        var dim = _transformAccumulator.EmbeddingDimension;
-        var mode = _foldPathDiscovery?.GetComposition(operation) ?? CompositionMode.Sum;
-        var inputEmbedding = InputEmbeddingComposer.ComposeInput(input, mode, dim);
-        var outputEmbedding = InputEmbeddingComposer.GetInputEmbedding(output, dim);
-        _transformAccumulator.Learn(operation, inputEmbedding, outputEmbedding);
-    }
-
-    /// <summary>
-    /// Derives a principled confidence for a discovered-transform answer by decoding the learned
-    /// transform's PREDICTED embedding through the canonical codec. Composes the input embedding the
-    /// same way <see cref="UpdateAccumulatorFromInference"/> does, applies the accumulated transform
-    /// (predicted = input + transform vector), then decodes that predicted face with the operation's
-    /// preferred face (1=poly for add/sub, 2=log for mul/div). The decode Quality measures how
-    /// self-consistent the predicted face is; we additionally require the decoded value to agree with
-    /// the discovered prediction, otherwise the transform face and the fold route disagree and the
-    /// answer is less trustworthy. Falls back to a moderate confidence when no transform is available
-    /// to decode (e.g. answer came purely from the fold/log-linear route before any accumulation).
-    /// </summary>
-    private double DecodeTransformConfidence(
-        string operationName,
-        string input,
-        ArithmeticOperation operation,
-        double prediction)
-    {
-        const double NoDecodeFallbackConfidence = 0.75;
-        if (_transformAccumulator is null)
-            return NoDecodeFallbackConfidence;
-
-        var dim = _transformAccumulator.EmbeddingDimension;
-        var mode = _foldPathDiscovery?.GetComposition(operationName) ?? CompositionMode.Sum;
-        var inputEmbedding = InputEmbeddingComposer.ComposeInput(input, mode, dim);
-        var predicted = _transformAccumulator.Apply(operationName, inputEmbedding);
-        if (predicted is null)
-            return NoDecodeFallbackConfidence;
-
-        var preferFace = operation is ArithmeticOperation.Multiply or ArithmeticOperation.Divide ? 2 : 1;
-        var (decodedValue, quality, face) = PlatonicFaceDecoder.DecodeNumericFromPrediction(predicted, dim, preferFace);
-        if (face == "none" || quality <= 0.0)
-            return NoDecodeFallbackConfidence;
-
-        // The log face decodes a positive magnitude; compare on magnitude so a sign mismatch from the
-        // unsigned log face does not spuriously deflate agreement.
-        var agreementBase = Math.Max(1.0, Math.Abs(prediction));
-        var disagreement = face == "log"
-            ? Math.Abs(Math.Abs(decodedValue) - Math.Abs(prediction)) / agreementBase
-            : Math.Abs(decodedValue - prediction) / agreementBase;
-        var agreement = Math.Clamp(1.0 - disagreement, 0.0, 1.0);
-
-        return Math.Clamp(quality * agreement, 0.0, 1.0);
     }
 
     /// <summary>
@@ -1372,12 +1131,6 @@ public sealed class GenesisInferenceEngine
             .ToArray();
     }
 
-    private readonly record struct PlatonicQueryResolution(
-        string ResponseText,
-        double Confidence,
-        ArithmeticOperation Operation,
-        bool IsExplicitExpression);
-
     private IReadOnlyCollection<string> LoadCheckpointContextConcepts()
     {
         if (_platonicFilePathProvider is null)
@@ -1467,14 +1220,6 @@ public sealed class GenesisInferenceEngine
 
     private static double BlendEma(double current, double sample, double alpha)
         => (current * (1.0 - alpha)) + (sample * alpha);
-
-    private enum ArithmeticOperation
-    {
-        Add,
-        Subtract,
-        Multiply,
-        Divide
-    }
 }
 
 public sealed record RouteDecisionTelemetry(

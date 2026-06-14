@@ -18,7 +18,6 @@ public static class ExampleCreatorRegistry
         new ArithmeticCreator("sub"),    // arithmetic:sub
         new ArithmeticCreator("mul"),    // arithmetic:mul
         new ArithmeticCreator("div"),    // arithmetic:div
-        new ComparisonCreator(),         // numeric:compare
         new SequenceCreator(),           // sequence:next
         new RelationCreator(),           // relation:category
     };
@@ -37,26 +36,11 @@ public static class ExampleCreatorRegistry
         new ArithmeticCreator("mul"),          // arithmetic:mul (25)
         new ArithmeticCreator("div"),          // arithmetic:div (30)
 
-        // ── Per-component glider-block regimens (2026-06-14, PROJECT_GLIDER.md §6) ──────────────────────
-        // Each trains ONE reusable block via the platonic path: the input is answered by running a small
-        // hand-built glider (a block composition) on the substrate (PlatonicGliderInterpreter
-        // .TryResolveCapability), so RequirePlatonicForCorrect credits it and the router learns to send
-        // the capability to platonic-direct. Components-first: gliders compose from already-trained
-        // blocks (we deliberately do NOT train a full-glider creator — see the answer-template deferral).
-        new ComparisonCreator(),               // numeric:compare      (22) — Compare block (difference-sign predicate)
-        new BranchSelectCreator(),             // numeric:larger       (23) — Branch block (select on platonic compare)
-        new ConstScaleCreator(),               // numeric:scale        (24) — Const block (parameterises Compute)
-        new RefComposeCreator(),               // numeric:twice-larger (26) — Ref block (higher-order: glider invokes glider)
-
         // ── DEFERRED (intentionally NOT in the active curriculum yet) ─────────────────────────────────
-        // Removed so the run converges; re-add each when its platonic path is ready:
-        //   • corenova:answer-template (GliderAnswerCreator) — needs the GRU glider PLAN-heads
-        //     (see PROJECT_GLIDER.md). Until then it cannot CONSTRUCT the glider via the platonic path,
-        //     so it would stall the curriculum at its high complexity.
-        //   • Seq + Literal blocks have NO dedicated regimen by design (PROJECT_GLIDER.md §6): Seq is the
-        //     output boundary, already exercised by every multi-token creator; Literal (emit a stored
-        //     chunk) is covered by the Hop retrieval primitive. A standalone creator for either would be
-        //     contrived, not beneficial.
+        // NB the hardcoded glider-capability creators (compare/larger/scale/twice-larger) + the templated
+        // answer creator were REMOVED 2026-06-14: hand-wired block compositions lock tokens to fixed
+        // meanings and the templated answer is overfitting. Capability should EMERGE from the GRU composing
+        // the substrate (faces, relations-as-elements, learned-function transforms) — not premade tables.
         //   • public:* corpora (fineweb-edu, slimpajama, gutenberg, openwebmath, gsm8k, wikidata-triples)
         //     — remote hydration + windowed-text never reach platonic-path mastery, so they only burn
         //     FocusBudget. Re-add for broad LM-style training once the core is solid.

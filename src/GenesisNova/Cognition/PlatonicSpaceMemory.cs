@@ -14,6 +14,20 @@ public readonly record struct PlatonicNeighbor(
     PlatonicNeighborhoodType Type,
     int ObservationCount);
 
+/// <summary>
+/// A relation as a FIRST-CLASS, POSITIONED ELEMENT of the platonic space (genesis-faithful Kind=Relation):
+/// its two endpoints, a strength (1 − synthesis contradiction), and a POSITION at the centroid of the
+/// endpoints' faces — so the relation is itself a positioned object that can be related/composed
+/// (higher-order relations). This is the canonical, immutable VIEW of a <see cref="RelationElementNode"/>
+/// (the mutable element behind the keyed <c>_relationIndex</c>); <see cref="PlatonicSpaceMemory.GetRelationElements"/>
+/// projects the index into these positioned elements.
+/// </summary>
+public readonly record struct RelationElement(
+    string Left,
+    string Right,
+    double Strength,
+    double[] Embedding);
+
 public sealed class PlatonicSpaceMemory
 {
     // Capacity caps (hard eviction). The defaults here are the standalone/test fallback; the RUNTIME
@@ -61,8 +75,14 @@ public sealed class PlatonicSpaceMemory
         int NodesMerged);
 
     private readonly int _faceDimension;
+    // Two element collections, each a keyed INDEX into first-class elements of the space (NOT side-graphs):
+    //  • _nodes        — concept elements (objects), positioned by their faces.
+    //  • _relationIndex — RELATION elements, each positioned at the centroid of its endpoints (see
+    //    RelationElementNode / GetRelationElements). The dict is purely the O(1) access index over the
+    //    relation-elements — exactly as _nodes indexes concept-elements — so relations are themselves
+    //    positioned, composable objects in the substrate, not an opaque graph layered on top of it.
     private readonly Dictionary<string, ConceptNode> _nodes = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<string, ConceptRelation> _relations = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, RelationElementNode> _relationIndex = new(StringComparer.OrdinalIgnoreCase);
     private readonly PlatonicLattice _lattice;
     private long _utilityStep;
 
@@ -81,7 +101,7 @@ public sealed class PlatonicSpaceMemory
     }
 
     public int NodeCount => _nodes.Count;
-    public int RelationCount => _relations.Count;
+    public int RelationCount => _relationIndex.Count;
     public int FaceDimension => _faceDimension;
 
     public IReadOnlyList<string> Concepts
@@ -173,10 +193,10 @@ public sealed class PlatonicSpaceMemory
         b.ObservationCount++;
 
         var key = RelationKey(left, right);
-        if (!_relations.TryGetValue(key, out var relation))
+        if (!_relationIndex.TryGetValue(key, out var relation))
         {
             EnsureRelationCapacity();
-            relation = new ConceptRelation(
+            relation = new RelationElementNode(
                 left: Normalize(left),
                 right: Normalize(right),
                 thesisContradiction: observedContradiction,
@@ -187,7 +207,7 @@ public sealed class PlatonicSpaceMemory
                 successCount: 0,
                 failureCount: 0,
                 lastUsedStep: 0);
-            _relations[key] = relation;
+            _relationIndex[key] = relation;
             IndexRelation(relation);
         }
 
@@ -212,9 +232,63 @@ public sealed class PlatonicSpaceMemory
     public double GetContradiction(string left, string right)
     {
         var key = RelationKey(left, right);
-        return _relations.TryGetValue(key, out var relation)
+        return _relationIndex.TryGetValue(key, out var relation)
             ? relation.SynthesisContradiction
             : 0.5;
+    }
+
+    /// <summary>
+    /// Projects the relation index into its canonical positioned relation-ELEMENTS (see
+    /// <see cref="RelationElement"/>): each relation is an element located at the CENTROID of its endpoints'
+    /// faces, strength = 1 − synthesis contradiction. This is the substrate-native form — relations are
+    /// positioned objects that can themselves be related/composed (higher-order); the keyed index simply
+    /// provides O(1) access to them (the same role <c>_nodes</c> plays for concept-elements).
+    /// </summary>
+    public IReadOnlyList<RelationElement> GetRelationElements()
+    {
+        var result = new List<RelationElement>(_relationIndex.Count);
+        foreach (var rel in _relationIndex.Values)
+        {
+            var embedding = Array.Empty<double>();
+            if (TryGetConceptFace(rel.Left, out var lf) && TryGetConceptFace(rel.Right, out var rf)
+                && lf.Length == rf.Length && lf.Length > 0)
+            {
+                embedding = new double[lf.Length];
+                for (var i = 0; i < lf.Length; i++)
+                    embedding[i] = 0.5 * (lf[i] + rf[i]); // centroid: the relation sits between its endpoints
+            }
+            result.Add(new RelationElement(rel.Left, rel.Right, rel.Strength, embedding));
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Strongest related neighbour of a concept by TRAVERSING relation-elements — the canonical
+    /// element-native retrieval. Returns the other endpoint of the highest-strength relation-element
+    /// referencing the concept.
+    /// </summary>
+    public bool TryRelationElementNeighbour(string concept, out string neighbour, out double strength)
+    {
+        neighbour = string.Empty;
+        strength = 0.0;
+        if (string.IsNullOrWhiteSpace(concept))
+            return false;
+        var key = Normalize(concept);
+        var found = false;
+        foreach (var re in GetRelationElements())
+        {
+            string? other = null;
+            if (string.Equals(re.Left, key, StringComparison.OrdinalIgnoreCase)) other = re.Right;
+            else if (string.Equals(re.Right, key, StringComparison.OrdinalIgnoreCase)) other = re.Left;
+            if (other is null) continue;
+            if (!found || re.Strength > strength)
+            {
+                neighbour = other;
+                strength = re.Strength;
+                found = true;
+            }
+        }
+        return found;
     }
 
     public PlatonicMemorySnapshot ExportSnapshot()
@@ -232,7 +306,7 @@ public sealed class PlatonicSpaceMemory
                    n.FailureCount,
                    n.LastUsedStep))
                .ToArray(),
-            Relations: _relations.Values
+            Relations: _relationIndex.Values
                .Select(r => new PlatonicRelationSnapshot(
                    r.Left,
                    r.Right,
@@ -404,16 +478,18 @@ public sealed class PlatonicSpaceMemory
         var wantNumeric = type is PlatonicNeighborhoodType.Any or PlatonicNeighborhoodType.Numeric;
         var wantSemantic = type is PlatonicNeighborhoodType.Any or PlatonicNeighborhoodType.Semantic;
 
-        // Relational tier: explicit relation edges; confidence from the learned contradiction.
+        // Relational tier: traverse the concept's RELATION-ELEMENTS — the adjacency index gives O(1) access
+        // to them, and each element's Strength (1 − synthesis contradiction) is the confidence. This is the
+        // element-native retrieval; the index is just the access path, not a separate graph.
         if (wantRelational)
         {
             foreach (var neighbor in _lattice.GetRelationalNeighbors(key))
             {
-                if (!_relations.TryGetValue(RelationKey(key, neighbor), out var relation))
+                if (!_relationIndex.TryGetValue(RelationKey(key, neighbor), out var relation))
                     continue;
                 Consider(new PlatonicNeighbor(
                     Concept: neighbor,
-                    Confidence: 1.0 - relation.SynthesisContradiction,
+                    Confidence: relation.Strength,
                     Type: ClassifyConceptType(neighbor),
                     ObservationCount: relation.ObservationCount));
             }
@@ -500,7 +576,7 @@ public sealed class PlatonicSpaceMemory
     public IReadOnlyList<(string Left, string Right, long ObservationCount)> GetAllRelations()
     {
         var result = new List<(string Left, string Right, long ObservationCount)>();
-        foreach (var rel in _relations.Values)
+        foreach (var rel in _relationIndex.Values)
         {
             result.Add((rel.Left, rel.Right, rel.ObservationCount));
         }
@@ -510,7 +586,7 @@ public sealed class PlatonicSpaceMemory
     public void ImportSnapshot(PlatonicMemorySnapshot snapshot)
     {
         _nodes.Clear();
-        _relations.Clear();
+        _relationIndex.Clear();
         _lattice.Clear();
 
         foreach (var node in snapshot.Nodes)
@@ -547,7 +623,7 @@ public sealed class PlatonicSpaceMemory
         foreach (var relation in snapshot.Relations)
         {
             var key = RelationKey(relation.Left, relation.Right);
-            var conceptRelation = new ConceptRelation(
+            var conceptRelation = new RelationElementNode(
                 left: Normalize(relation.Left),
                 right: Normalize(relation.Right),
                 thesisContradiction: Clamp01(relation.ThesisContradiction),
@@ -558,12 +634,12 @@ public sealed class PlatonicSpaceMemory
                 successCount: Math.Max(0, relation.SuccessCount),
                 failureCount: Math.Max(0, relation.FailureCount),
                 lastUsedStep: Math.Max(0, relation.LastUsedStep));
-            _relations[key] = conceptRelation;
+            _relationIndex[key] = conceptRelation;
             IndexRelation(conceptRelation);
         }
         _utilityStep = Math.Max(
             _nodes.Values.Select(n => n.LastUsedStep).DefaultIfEmpty(0).Max(),
-            _relations.Values.Select(r => r.LastUsedStep).DefaultIfEmpty(0).Max());
+            _relationIndex.Values.Select(r => r.LastUsedStep).DefaultIfEmpty(0).Max());
     }
 
     public void ReinforceEvidence(IReadOnlyList<PlatonicEvidence> evidence, bool success)
@@ -586,7 +662,7 @@ public sealed class PlatonicSpaceMemory
             if (related is not null)
                 TouchNode(related, success, step);
 
-            if (related is null || !_relations.TryGetValue(RelationKey(concept, related), out var relation))
+            if (related is null || !_relationIndex.TryGetValue(RelationKey(concept, related), out var relation))
                 continue;
 
             TouchRelation(relation, success, step);
@@ -624,7 +700,7 @@ public sealed class PlatonicSpaceMemory
                 n.FailureCount,
                 n.LastUsedStep))
             .ToDictionary(n => n.Name, StringComparer.OrdinalIgnoreCase);
-        var relations = _relations.Values
+        var relations = _relationIndex.Values
             .Select(r => new MutableRelation(
                 r.Left,
                 r.Right,
@@ -847,8 +923,8 @@ public sealed class PlatonicSpaceMemory
     }
 
     // Adjacency is owned by the lattice (Layer 1 topology). The relation payload
-    // (contradiction, observation counts) stays in _relations, keyed by RelationKey.
-    private void IndexRelation(ConceptRelation relation)
+    // (contradiction, observation counts) stays in _relationIndex, keyed by RelationKey.
+    private void IndexRelation(RelationElementNode relation)
         => _lattice.AddEdge(relation.Left, relation.Right);
 
     /// <summary>
@@ -958,7 +1034,7 @@ public sealed class PlatonicSpaceMemory
                     continue;
                 // Repulsion is ONLY for unrelated pairs — a confirmed relation is exempt (it is what
                 // earns proximity). This is the contrastive half: attract related, repel everything else.
-                if (_relations.ContainsKey(RelationKey(node.Name, other.Name)))
+                if (_relationIndex.ContainsKey(RelationKey(node.Name, other.Name)))
                     continue;
 
                 var of = other.PositiveFace;
@@ -1128,7 +1204,7 @@ public sealed class PlatonicSpaceMemory
         node.LastUsedStep = step;
     }
 
-    private static void TouchRelation(ConceptRelation relation, bool success, long step)
+    private static void TouchRelation(RelationElementNode relation, bool success, long step)
     {
         relation.UseCount++;
         if (success)
@@ -1144,7 +1220,7 @@ public sealed class PlatonicSpaceMemory
     private double NodeUtilityScore(MutableNode node)
         => UtilityScore(node.UseCount, node.SuccessCount, node.FailureCount, node.LastUsedStep);
 
-    private double RelationUtilityScore(ConceptRelation relation)
+    private double RelationUtilityScore(RelationElementNode relation)
         => UtilityScore(relation.UseCount, relation.SuccessCount, relation.FailureCount, relation.LastUsedStep);
 
     private double RelationUtilityScore(MutableRelation relation)
@@ -1271,10 +1347,10 @@ public sealed class PlatonicSpaceMemory
 
     private void EnsureRelationCapacity()
     {
-        if (_relations.Count < _maxPlatonicRelations)
+        if (_relationIndex.Count < _maxPlatonicRelations)
             return;
 
-        var candidate = _relations.Values
+        var candidate = _relationIndex.Values
             .OrderBy(r => RelationUtilityScore(r))
             .ThenBy(r => r.ObservationCount)
             .ThenByDescending(r => r.SynthesisContradiction)
@@ -1287,7 +1363,7 @@ public sealed class PlatonicSpaceMemory
     private void RemoveNode(string concept)
     {
         var key = Normalize(concept);
-        var incident = _relations.Values
+        var incident = _relationIndex.Values
             .Where(r => r.Left.Equals(key, StringComparison.OrdinalIgnoreCase) ||
                         r.Right.Equals(key, StringComparison.OrdinalIgnoreCase))
             .ToArray();
@@ -1298,9 +1374,9 @@ public sealed class PlatonicSpaceMemory
         _lattice.UnregisterNode(key);
     }
 
-    private void RemoveRelation(ConceptRelation relation)
+    private void RemoveRelation(RelationElementNode relation)
     {
-        _relations.Remove(RelationKey(relation.Left, relation.Right));
+        _relationIndex.Remove(RelationKey(relation.Left, relation.Right));
         _lattice.RemoveEdge(relation.Left, relation.Right);
     }
 
@@ -1518,9 +1594,14 @@ public sealed class PlatonicSpaceMemory
         public long LastUsedStep { get; set; }
     }
 
-    private sealed class ConceptRelation
+    // A relation as a first-class POSITIONED element (genesis Kind=Relation): the mutable element behind the
+    // keyed _relationIndex. Its POSITION is the centroid of its endpoints' faces (derived, always consistent —
+    // projected by GetRelationElements); its STRENGTH is 1 − SynthesisContradiction. The remaining fields are
+    // the relation's learned dynamics + lifecycle. Because it is a positioned element, it can itself become an
+    // endpoint of another relation (higher-order) — the substrate is uniform.
+    private sealed class RelationElementNode
     {
-        public ConceptRelation(
+        public RelationElementNode(
             string left,
             string right,
             double thesisContradiction,
@@ -1554,6 +1635,9 @@ public sealed class PlatonicSpaceMemory
         public int SuccessCount { get; set; }
         public int FailureCount { get; set; }
         public long LastUsedStep { get; set; }
+
+        // Strength of the relation as a positioned element: confirmed attraction = 1 − synthesis contradiction.
+        public double Strength => Math.Max(0.0, Math.Min(1.0, 1.0 - SynthesisContradiction));
     }
 
     private sealed class MutableNode

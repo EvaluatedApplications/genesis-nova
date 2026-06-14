@@ -39,6 +39,10 @@ public record Transform(
     double NeighborhoodScore = 0.0,
     double PolarityCoherenceScore = 0.0,
     double SelfConsistencyScore = 0.0,
+    // The numeric face this function is a CONSTANT translation in — the one whose per-example delta is
+    // consistent across training (poly=1 for additive +k, log=2 for multiplicative ×k). 0 = unknown/auto.
+    // Decoding the applied transform in this face avoids the spurious-but-clean reading in the other face.
+    int PreferredFace = 0,
     IReadOnlyList<double[]>? InputSamples = null,
     IReadOnlyList<double[]>? OutputSamples = null);
 
@@ -127,12 +131,15 @@ public class TransformAccumulator
                 blended[i] = existing.Vector[i] * (1.0 - alpha) + delta[i] * alpha;
 
             var newCount = existing.ObservationCount + 1;
+            var newInputs = AppendSample(existing.InputSamples, inputEmbedding);
+            var newOutputs = AppendSample(existing.OutputSamples, outputEmbedding);
             var updated = existing with
             {
                 Vector = blended,
                 ObservationCount = newCount,
-                InputSamples = AppendSample(existing.InputSamples, inputEmbedding),
-                OutputSamples = AppendSample(existing.OutputSamples, outputEmbedding),
+                PreferredFace = ComputePreferredFace(newInputs, newOutputs),
+                InputSamples = newInputs,
+                OutputSamples = newOutputs,
             };
 
             // Drive Confidence + lifecycle State from the canonical 5-gate audit, not a fake increment.
@@ -297,6 +304,59 @@ public class TransformAccumulator
                 InputSamples: null,
                 OutputSamples: null);
         }
+    }
+
+    /// <summary>
+    /// Determine which numeric face this function is a CONSTANT translation in, by comparing how consistent
+    /// the per-example delta (out−in) is in the poly region [0,nd) vs the log region [nd,2nd) across the
+    /// stored samples. Additive functions (+k) are constant in poly; multiplicative (×k) constant in log.
+    /// Returns 1 (poly), 2 (log), or 0 when undecidable (too few samples / no signal). Uses the dominant
+    /// dim of each region (index 0 and nd) and the coefficient of variation — lower CoV = the true face.
+    /// </summary>
+    private int ComputePreferredFace(IReadOnlyList<double[]>? inputs, IReadOnlyList<double[]>? outputs)
+    {
+        if (inputs is null || outputs is null)
+            return 0;
+        var m = Math.Min(inputs.Count, outputs.Count);
+        if (m < 2)
+            return 0;
+
+        var nd = Math.Min(_embeddingDim / 2, 21);
+        if (nd < 1 || nd >= _embeddingDim)
+            return 0;
+
+        var polyCoV = DeltaCoV(inputs, outputs, m, dim: 0);
+        var logCoV = DeltaCoV(inputs, outputs, m, dim: nd);
+        if (double.IsNaN(polyCoV) && double.IsNaN(logCoV))
+            return 0;
+        if (double.IsNaN(logCoV))
+            return 1;
+        if (double.IsNaN(polyCoV))
+            return 2;
+        return polyCoV <= logCoV ? 1 : 2;
+    }
+
+    // Coefficient of variation (std/|mean|) of the per-example delta out[k][dim]-in[k][dim] across samples.
+    // NaN when the mean delta is ~0 (no signal in this face). Lower CoV ⇒ a more constant translation here.
+    private static double DeltaCoV(IReadOnlyList<double[]> inputs, IReadOnlyList<double[]> outputs, int m, int dim)
+    {
+        double sum = 0;
+        var deltas = new double[m];
+        for (var k = 0; k < m; k++)
+        {
+            deltas[k] = outputs[k][dim] - inputs[k][dim];
+            sum += deltas[k];
+        }
+        var mean = sum / m;
+        if (Math.Abs(mean) < 1e-12)
+            return double.NaN;
+        double varSum = 0;
+        for (var k = 0; k < m; k++)
+        {
+            var d = deltas[k] - mean;
+            varSum += d * d;
+        }
+        return Math.Sqrt(varSum / m) / Math.Abs(mean);
     }
 
     private static double EuclideanDistance(double[] a, double[] b)

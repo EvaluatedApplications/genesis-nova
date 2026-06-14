@@ -26,16 +26,13 @@ public sealed class GenesisTrainer
     private readonly GenesisNeuralModel _model;
     private readonly PlatonicSpaceMemory _platonicSpace;
     private readonly SpaceManager _spaceManager;
-    private readonly int _trainingTickMultiplier;
     private GenesisInferenceEngine _inferencePolicy;
     private readonly GenesisCompositeObjective _objective;
     private readonly FoldPathDiscovery _foldPathDiscovery;
     private readonly TransformAccumulator _transformAccumulator;
-    private PlatonicState _tickState;
     private readonly Queue<SpacePolicyTransition> _spacePolicyTrajectory = new();
     private int _spacePolicyStepCounter;
     private int _priorSpaceActionId;
-    private int _tickPatternPromotions;
     private int _trainStepCount;
     // Model-driven edit-head wiring: ObservePlatonicSpace stashes the (explored) magnitude it
     // requested from _model.PredictEditMagnitude (plus the tokens it conditioned on); the surrounding
@@ -119,9 +116,6 @@ public sealed class GenesisTrainer
     private double? _cachedQualityLoss;
     private int _lastRelationCountForQuality;
     private int _lastQualityComputationStep = int.MinValue;
-    // Per-component glider-block route labeling: lets ResolveRouteLabel recognise the compact block
-    // capabilities (compare/larger/scale) and supervise them as platonic-direct. See PROJECT_GLIDER.md §6.
-    private readonly PlatonicGliderInterpreter _gliderInterpreter;
 
     public GenesisTrainer(
         IGenesisTokenizer tokenizer,
@@ -133,16 +127,13 @@ public sealed class GenesisTrainer
         _tokenizer = tokenizer;
         _model = model;
         _platonicSpace = platonicSpace;
-        _gliderInterpreter = new PlatonicGliderInterpreter(platonicSpace);
         var runtimeConfig = config ?? new GenesisNovaConfig();
         _foldPathDiscovery = new FoldPathDiscovery();
         _transformAccumulator = new TransformAccumulator(Math.Max(4, _platonicSpace.FaceDimension));
-        _tickState = new PlatonicState(ImmutableArray<PlatonicElement>.Empty, _transformAccumulator.EmbeddingDimension);
         _spaceManager = new SpaceManager(_platonicSpace, new SpaceManagerSettings(
             Enabled: runtimeConfig.AutoManagePlatonicSpace,
             MaxNodes: Math.Max(256, runtimeConfig.MaxPlatonicNodes),
             MaxRelations: Math.Max(1_024, runtimeConfig.MaxPlatonicRelations)));
-        _trainingTickMultiplier = Math.Clamp(runtimeConfig.TrainingTickMultiplier, 1, 32);
         _objective = objective ?? new GenesisCompositeObjective(
             TokenWeight: 1.0,
             RouteWeight: 0.3,
@@ -154,8 +145,8 @@ public sealed class GenesisTrainer
             tokenizer,
             model,
             platonicSpace,
-            foldPathDiscovery: _foldPathDiscovery,
-            transformAccumulator: _transformAccumulator);
+            transformAccumulator: _transformAccumulator,
+            foldPathDiscovery: _foldPathDiscovery);
     }
 
     public int[] EncodeInput(string input)
@@ -166,9 +157,9 @@ public sealed class GenesisTrainer
 
     public int EosTokenId => _tokenizer.EosTokenId;
 
-    public FoldPathDiscovery FoldPathDiscovery => _foldPathDiscovery;
+    // Exposed so the runtime can hand the trained learned-op stores to inference (the learned-op route).
     public TransformAccumulator TransformAccumulator => _transformAccumulator;
-    public int TickPatternPromotions => _tickPatternPromotions;
+    public FoldPathDiscovery FoldPathDiscovery => _foldPathDiscovery;
     public int HiddenSize => _model.HiddenSize;
 
     /// <summary>Current SGD step size — settable so a regime can anneal it (see CoreBootstrapRegime).</summary>
@@ -187,13 +178,6 @@ public sealed class GenesisTrainer
     /// </summary>
     public bool RequirePlatonicForCorrect { get; set; } = true;
 
-    /// <summary>
-    /// PROBE/design toggle: when true, face-computable arithmetic examples do NOT create relational
-    /// operand↔result edges — the face homomorphism already represents the computation. Stops an
-    /// operand like "3" from accumulating dozens of arithmetic co-occurrence relations (3↔-1, 3↔4 …)
-    /// that drown genuine equivalence/retrieval relations (3↔three). Default false = legacy coupling.
-    /// </summary>
-    public bool SuppressArithmeticOperandRelations { get; set; }
     public InferenceTelemetryHint InferenceTelemetryHint => _inferenceTelemetryHint;
     public int SpaceToolParseFailureCount => _spaceToolParseFailureCount;
     public int PendingInferenceIntrospectionCount => _pendingInferenceIntrospection.Count;
@@ -969,16 +953,6 @@ public sealed class GenesisTrainer
             return bareNumberOut ? 1 : 2;
         }
 
-        // Per-component glider-block capabilities (compare/larger/scale): answered by running a hand-built
-        // block composition on the substrate. Exact and space-independent (face arithmetic), so this is a
-        // clean DIRECT (route 1) label from step 0 whenever it reproduces the target — which teaches the
-        // router to send the capability to platonic-direct. See PROJECT_GLIDER.md §6.
-        if (_gliderInterpreter.TryResolveCapability(example.Input ?? string.Empty, out var blockAnswer, out _)
-            && string.Equals(blockAnswer.Trim(), (example.Output ?? string.Empty).Trim(), StringComparison.OrdinalIgnoreCase))
-        {
-            return 1;
-        }
-
         // General (non-arithmetic) modality: the universal platonic op is RETRIEVAL. Label the
         // platonic route whenever the space reproduces the target for this input — relational,
         // functional, lookup, etc. Cheap deterministic space queries only (no generation).
@@ -1318,9 +1292,6 @@ public sealed class GenesisTrainer
         ObservePlatonicSpace(example, concepts);
         if (allowTransformDiscovery)
             UpdateTransformDiscovery(example);
-        // Academic cadence: a single principled pass per example (conforms to the source's
-        // once-per-tick frontier update), not a 1–24x storm that amplifies noise and contamination.
-        RunTickPatternLoop(example, concepts);
 
         if (trackCoverage)
         {
@@ -1413,217 +1384,10 @@ public sealed class GenesisTrainer
         _transformAccumulator.Learn(arithmetic.OperationConcept, inputEmbedding, outputEmbedding);
     }
 
-    private void RunTickPatternLoop(GenesisExample example, IReadOnlyList<string> concepts)
-    {
-        if (concepts.Count == 0)
-            return;
-
-        var dimension = _tickState.EmbeddingDimension;
-        _tickState = _tickState with { CurrentTick = _tickState.CurrentTick + 1 };
-
-        var primarySymbol = concepts[0];
-        var primaryId = EnsureTickElement(primarySymbol, ElementKind.Function);
-        var secondaryIds = concepts.Skip(1).Take(4)
-            .Select(c => EnsureTickElement(c, ElementKind.Object))
-            .ToArray();
-        var actionBudget = Math.Clamp(_trainingTickMultiplier + (concepts.Count / 2), 2, 8);
-        var actionsExecuted = 0;
-
-        void ExecuteIfPossible(TickAction action, string promoteKey)
-        {
-            if (actionsExecuted >= actionBudget)
-                return;
-
-            var (updatedState, generated) = TickExecutor.ExecuteTick(action, _tickState);
-            _tickState = updatedState;
-            actionsExecuted++;
-
-            if (generated.Length > 0)
-                PromoteDetectedPatterns(promoteKey, generated);
-        }
-
-        if (TryExtractArithmeticObservation(example, out var arithmetic))
-        {
-            var mode = _foldPathDiscovery.GetComposition(arithmetic.OperationConcept);
-            var inputEmbedding = InputEmbeddingComposer.ComposeInput(example.Input, mode, dimension);
-            var outputEmbedding = InputEmbeddingComposer.GetInputEmbedding(example.Output, dimension);
-            var delta = new double[dimension];
-            for (var i = 0; i < dimension; i++)
-                delta[i] = outputEmbedding[i] - inputEmbedding[i];
-
-            ExecuteIfPossible(
-                new TickAction(
-                    Kind: TickKind.LocalLearn,
-                    PrimaryElementId: primaryId,
-                    Parameter: arithmetic.OperationConcept,
-                    AuxiliaryEmbedding: delta),
-                arithmetic.OperationConcept);
-
-            var leftId = EnsureTickElement(arithmetic.LeftToken, ElementKind.Object);
-            var rightId = EnsureTickElement(arithmetic.RightToken, ElementKind.Object);
-            var resultId = EnsureTickElement(arithmetic.ResultToken, ElementKind.Object);
-            ExecuteIfPossible(
-                new TickAction(
-                    Kind: TickKind.FoldChain,
-                    PrimaryElementId: primaryId,
-                    SecondaryIds: [leftId, rightId, resultId],
-                    Parameter: arithmetic.OperationConcept),
-                arithmetic.OperationConcept);
-            ExecuteIfPossible(
-                new TickAction(
-                    Kind: TickKind.Gap,
-                    PrimaryElementId: primaryId,
-                    SecondaryIds: [leftId, resultId],
-                    Parameter: arithmetic.OperationConcept),
-                arithmetic.OperationConcept);
-            ExecuteIfPossible(
-                new TickAction(
-                    Kind: TickKind.Analogy,
-                    PrimaryElementId: resultId,
-                    SecondaryIds: [leftId, rightId],
-                    Parameter: arithmetic.OperationConcept),
-                arithmetic.OperationConcept);
-            ExecuteIfPossible(
-                new TickAction(
-                    Kind: TickKind.Relate,
-                    PrimaryElementId: resultId,
-                    Parameter: arithmetic.OperationConcept),
-                arithmetic.OperationConcept);
-            return;
-        }
-
-        if (secondaryIds.Length >= 1)
-        {
-            ExecuteIfPossible(
-                new TickAction(
-                    Kind: TickKind.Relate,
-                    PrimaryElementId: secondaryIds[0]),
-                primarySymbol);
-            ExecuteIfPossible(
-                new TickAction(
-                    Kind: TickKind.FoldChain,
-                    PrimaryElementId: primaryId,
-                    SecondaryIds: secondaryIds.Take(3).ToArray()),
-                primarySymbol);
-        }
-
-        if (secondaryIds.Length >= 2)
-        {
-            ExecuteIfPossible(
-                new TickAction(
-                    Kind: TickKind.Gap,
-                    PrimaryElementId: primaryId,
-                    SecondaryIds: [secondaryIds[0], secondaryIds[1]]),
-                primarySymbol);
-            ExecuteIfPossible(
-                new TickAction(
-                    Kind: TickKind.Analogy,
-                    PrimaryElementId: secondaryIds[0],
-                    SecondaryIds: [secondaryIds[1], primaryId]),
-                primarySymbol);
-        }
-
-        var composeCandidate = secondaryIds
-            .Prepend(primaryId)
-            .Select(FindTickElementById)
-            .Where(e => e is not null && e.RelatedTo.Length >= 2)
-            .Cast<PlatonicElement>()
-            .OrderByDescending(e => e.LocalTransformConfidence + e.BridgeConfidence)
-            .FirstOrDefault();
-        if (composeCandidate != null)
-        {
-            ExecuteIfPossible(
-                new TickAction(
-                    Kind: TickKind.Compose,
-                    PrimaryElementId: composeCandidate.Id),
-                primarySymbol);
-            ExecuteIfPossible(
-                new TickAction(
-                    Kind: TickKind.Surprise,
-                    PrimaryElementId: composeCandidate.Id),
-                primarySymbol);
-        }
-
-        if (concepts.Count >= 4 && (_tickState.CurrentTick % 5 == 0))
-        {
-            ExecuteIfPossible(
-                new TickAction(
-                    Kind: TickKind.BranchDetect,
-                    PrimaryElementId: primaryId),
-                primarySymbol);
-        }
-    }
-
-    private void PromoteDetectedPatterns(string operation, IReadOnlyList<PlatonicElement> candidates)
-    {
-        if (candidates.Count == 0)
-            return;
-
-        var state = _tickState;
-        var existingPromotion = state.Elements.Any(e =>
-            e.Kind == ElementKind.Function &&
-            e.Symbol.Equals($"promoted:{operation}", StringComparison.OrdinalIgnoreCase));
-        if (existingPromotion)
-            return;
-
-        var candidate = candidates
-            .Where(e => e.Kind == ElementKind.Composition)
-            .OrderByDescending(e => e.NoveltyScore)
-            .FirstOrDefault();
-        if (candidate is null || candidate.NoveltyScore < 0.75)
-            return;
-
-        var promoted = new PlatonicElement(
-            Id: state.NextId,
-            Kind: ElementKind.Function,
-            Embedding: candidate.Embedding.ToArray(),
-            Symbol: $"promoted:{operation}",
-            GeneratedAtTick: state.CurrentTick,
-            NoveltyScore: candidate.NoveltyScore,
-            BridgeConfidence: Math.Max(0.5, candidate.BridgeConfidence),
-            RelatedTo: ImmutableArray.Create(candidate.Id),
-            GenerationPath: $"tick-promote:{operation}");
-
-        _tickState = state with
-        {
-            Elements = state.Elements.Add(promoted),
-            NextId = state.NextId + 1
-        };
-        _tickPatternPromotions++;
-    }
-
-    private int EnsureTickElement(string symbol, ElementKind kind)
-    {
-        var existing = _tickState.Elements.FirstOrDefault(e =>
-            e.Symbol.Equals(symbol, StringComparison.OrdinalIgnoreCase) && e.Kind == kind);
-        if (existing is not null)
-            return existing.Id;
-
-        var baseConfidence = 0.5;
-        var kindBias = kind == ElementKind.Function ? 0.1 : 0.0;
-
-        var element = new PlatonicElement(
-            Id: _tickState.NextId,
-            Kind: kind,
-            Embedding: InputEmbeddingComposer.GetInputEmbedding(symbol, _tickState.EmbeddingDimension),
-            Symbol: symbol,
-            GeneratedAtTick: _tickState.CurrentTick,
-            NoveltyScore: 0.6,
-            BridgeConfidence: Clamp01(baseConfidence + kindBias),
-            RelatedTo: ImmutableArray<int>.Empty,
-            GenerationPath: "tick-observe");
-
-        _tickState = _tickState with
-        {
-            Elements = _tickState.Elements.Add(element),
-            NextId = _tickState.NextId + 1
-        };
-
-        return element.Id;
-    }
-
-    private PlatonicElement? FindTickElementById(int id)
-        => _tickState.Elements.FirstOrDefault(e => e.Id == id);
+    // NOTE: the per-example tick loop (R1–R9 on a private `_tickState`) was removed 2026-06-14 — it was a
+    // disconnected scratchpad: its elements/patterns were never written to the live PlatonicSpaceMemory nor
+    // read by inference; its only effect was a telemetry counter. The one USEFUL tick capability (R2
+    // Compose) is adapted directly by the glider blocks (PlatonicGlider via TickExecutor.ExecuteTick).
 
     private void ObservePlatonicSpace(GenesisExample example, IReadOnlyList<string> concepts)
     {
@@ -1659,9 +1423,15 @@ public sealed class GenesisTrainer
         // input→output pair IS the genuine relationship and is what should dominate. (The planner still
         // runs once per example upstream for its concept set / telemetry — only the COUPLING source
         // changes here.)
-        // Face-computable arithmetic: the homomorphism + operation→face coupling already represent it;
-        // skip the relational input→output (operand↔result) coupling that would overload operands.
-        if (SuppressArithmeticOperandRelations && hasArithmetic)
+        // Arithmetic is represented by the NUMERIC FACE HOMOMORPHISM (poly/log), NOT relation edges.
+        // Canonical genesis creates NO operand↔result coupling for arithmetic (confirmed against the
+        // source of truth: it uses the face homomorphism + function-application triplets, never direct
+        // operand↔result edges). Such edges overload the operand concepts — digit "1" ends up related to
+        // every result it ever appears in (1↔-1, 1↔3 …), drowning the genuine equivalence edge
+        // ("1"↔"one") and ERASING prior lessons (measured: the dominant cause of number-word forgetting).
+        // So arithmetic contributes ONLY its operation→face affinity (ObserveArithmeticFaces, above); it
+        // does no relational coupling and no geometric edit.
+        if (hasArithmetic)
             return;
 
         var inputConcepts = ExtractMirrorConcepts(example.Input, string.Empty);
@@ -1671,7 +1441,11 @@ public sealed class GenesisTrainer
             // Bounded fallback: couple only ADJACENT concepts (sequential structure), not the full
             // O(n²) pairwise mesh — keeps contamination linear in the concept count.
             for (var i = 0; i + 1 < concepts.Count; i++)
+            {
+                if (IsNumericConcept(concepts[i]) && IsNumericConcept(concepts[i + 1]))
+                    continue; // number↔number lives in the faces, not the relation graph
                 _platonicSpace.ObserveContradiction(concepts[i], concepts[i + 1], contradiction);
+            }
             _platonicSpace.FineEditFromExample(concepts, concepts, isNegative);
             return;
         }
@@ -1680,6 +1454,14 @@ public sealed class GenesisTrainer
         // genuinely-related pair, found via the lattice), NOT the full input×output mesh — and drop
         // output↔output coupling entirely (co-occurrence is not a relationship). This is the
         // minimum-contamination signal that still teaches the input→output association.
+        // A NUMERIC output from a MULTI-concept input is a COMPUTATION (e.g. framed arithmetic
+        // "what is 1 plus 1" → "2" that slipped past the compact-only arithmetic gate). Numbers relate
+        // via the face homomorphism, NOT the relation graph — so such an example writes NO relation edge.
+        // Otherwise its framing words ("what","the","sum") AND operands get coupled to the result number,
+        // and those spurious word↔number edges make the GRU treat "what" as an operand (measured: framed
+        // arithmetic collapsed to 0/5). A single-token input ("one"→"1") IS a genuine number-word
+        // equivalence and is still coupled. (PLATONIC_SPACE.md §6.2: arithmetic writes no relation edges.)
+        var outputComputed = inputConcepts.Count > 1;
         foreach (var output in outputConcepts)
         {
             var partners = inputConcepts
@@ -1689,11 +1471,24 @@ public sealed class GenesisTrainer
                 continue;
             var nearest = _platonicSpace.GetNearestConcepts(output, candidates: partners, maxNeighbors: 1);
             var partner = nearest.Count > 0 ? nearest[0].Symbol : partners[0];
+            // Skip ANY edge to a numeric result of a computation (multi-concept input), and the
+            // number↔number case generally — both are carried by the homomorphism, not the graph.
+            if (IsNumericConcept(output) && (outputComputed || IsNumericConcept(partner)))
+                continue;
             _platonicSpace.ObserveContradiction(partner, output, contradiction);
         }
 
         _platonicSpace.FineEditFromExample(inputConcepts, outputConcepts, isNegative);
     }
+
+    // Numbers relate geometrically via the face homomorphism, never as relation-graph edges — so the
+    // input→output coupling must never mint a number↔number relation (see ObservePlatonicSpace).
+    private static bool IsNumericConcept(string concept)
+        => double.TryParse(
+            concept,
+            System.Globalization.NumberStyles.Float | System.Globalization.NumberStyles.AllowLeadingSign,
+            System.Globalization.CultureInfo.InvariantCulture,
+            out _);
 
     // CAUSAL REINFORCE reward for the edit-head. The token forward pass never reads the space, so a
     // token-loss delta was causally disconnected from the edit. Instead we measure a
@@ -1805,15 +1600,10 @@ public sealed class GenesisTrainer
             _platonicSpace.ObserveContradiction(arithmetic.OperationConcept, "face:log", 0.05);
         }
 
-        // Tighten arithmetic links when equation is numerically correct — operand↔result relational
-        // edges. These overload operands (3↔-1, 3↔4 …) and the face homomorphism already represents
-        // the computation, so they are suppressible.
-        if (!SuppressArithmeticOperandRelations)
-        {
-            var accuracyContradiction = Clamp01(arithmetic.AbsoluteError <= 1e-6 ? 0.05 : 0.6);
-            _platonicSpace.ObserveContradiction(arithmetic.LeftToken, arithmetic.ResultToken, accuracyContradiction);
-            _platonicSpace.ObserveContradiction(arithmetic.RightToken, arithmetic.ResultToken, accuracyContradiction);
-        }
+        // NOTE: arithmetic deliberately creates NO operand↔result relation edges. The face homomorphism
+        // above IS the platonic representation of the computation; canonical genesis stores no such edges.
+        // Coupling operands to results (1↔-1, 3↔4 …) overloaded the operand concepts and erased the
+        // number-word equivalence — removed 2026-06-14. Only the operation→face affinity is observed.
     }
 
     private static bool TryExtractArithmeticObservation(GenesisExample example, out ArithmeticObservation observation)

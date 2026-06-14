@@ -31,12 +31,8 @@ public sealed class GenesisRuntimeState
             Model,
             Memory,
             ResolvePlatonicCheckpointPath,
-            Trainer.FoldPathDiscovery,
-            Trainer.TransformAccumulator,
-            // Production enables the exact direct face-arithmetic route: when the router selects
-            // platonic-direct for a compact arithmetic query, it is answered exactly via the face
-            // homomorphism instead of silently falling through to neural.
-            enableDiagnosticFaceArithmeticShortcut: true);
+            transformAccumulator: Trainer.TransformAccumulator,
+            foldPathDiscovery: Trainer.FoldPathDiscovery);
         Trainer.SetInferencePolicy(Inference);
     }
 
@@ -84,10 +80,8 @@ public sealed class GenesisRuntimeState
             Model,
             Memory,
             ResolvePlatonicCheckpointPath,
-            Trainer.FoldPathDiscovery,
-            Trainer.TransformAccumulator,
-            // Production enables the exact direct face-arithmetic route (see ctor above).
-            enableDiagnosticFaceArithmeticShortcut: true);
+            transformAccumulator: Trainer.TransformAccumulator,
+            foldPathDiscovery: Trainer.FoldPathDiscovery);
         Trainer.SetInferencePolicy(Inference);
     }
 

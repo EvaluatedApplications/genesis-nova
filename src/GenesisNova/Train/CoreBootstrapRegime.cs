@@ -70,12 +70,15 @@ public sealed class CoreBootstrapRegime
     // learning rate while the lesson is still climbing and freezes it on a plateau (an 86%-stuck
     // lesson is NOT oscillating-near-the-optimum — it needs MORE step, not less). Only shrink once
     // we're at the top, where the user's real "90% then oscillate" overshoot actually happens.
-    private static double AnnealFactor(double accuracy) => accuracy switch
+    // Anneal RELATIVE to the lesson's own target so the curve works for both the strict (0.95) and the
+    // majority-mastery (0.85, learned/stochastic) bars: full steps until just below target, shrink in the
+    // approach band, smallest at/above. (For target 0.95 this reproduces the original 0.92/0.97 cuts.)
+    private static double AnnealFactor(double accuracy, double target)
     {
-        < 0.92 => 1.00,  // still climbing (incl. the plateau zone): full steps, do not starve
-        < 0.97 => 0.30,  // near the top: shrink to settle, stop overshooting the last cases
-        _ => 0.10,        // at mastery: small steps to HOLD without bouncing back out
-    };
+        if (accuracy < target - 0.03) return 1.00;  // still climbing (incl. the plateau zone): full steps
+        if (accuracy < target + 0.02) return 0.30;  // near the top: shrink to settle, stop overshooting
+        return 0.10;                                 // at mastery: small steps to HOLD without bouncing out
+    }
 
     public IReadOnlyList<BootstrapLessonOutcome> Run(
         IReadOnlyList<CoreBootstrapLesson>? lessons = null,
@@ -97,6 +100,10 @@ public sealed class CoreBootstrapRegime
                     continue;
 
                 _trainer.LearningRate = baseLr; // reset the anneal per lesson
+
+                // Per-lesson bar: exact capabilities use the strict default; learned/stochastic ones
+                // (arithmetic) declare a majority-mastery target on the lesson itself.
+                var targetAccuracy = lesson.TargetAccuracy ?? _options.TargetAccuracy;
 
                 var aboveTargetStreak = 0;
                 var converged = false;
@@ -128,12 +135,12 @@ public sealed class CoreBootstrapRegime
                     accuracy = Accuracy(examples);
 
                     // Anneal BEFORE the next epoch based on where we are now.
-                    _trainer.LearningRate = baseLr * AnnealFactor(accuracy);
+                    _trainer.LearningRate = baseLr * AnnealFactor(accuracy, targetAccuracy);
 
                     log?.Invoke($"[bootstrap] {lesson.Creator.Name} epoch {epochsRun} " +
                         $"acc={accuracy:P0} lr={_trainer.LearningRate:F4}");
 
-                    if (accuracy >= _options.TargetAccuracy)
+                    if (accuracy >= targetAccuracy)
                     {
                         if (++aboveTargetStreak >= _options.StabilityWindow)
                         {

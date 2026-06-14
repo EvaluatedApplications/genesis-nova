@@ -18,6 +18,11 @@ namespace GenesisNova.Tests;
 /// target and HOLDS it for a stability window — the proof it stopped oscillating) and earlier lessons
 /// are RETAINED. One end-to-end training test (own class → runs in parallel); capability/stability
 /// demonstration, not exact-certainty.
+///
+/// Each lesson converges to ITS OWN bar (CoreBootstrapSuite): exact capabilities (relational lookup)
+/// hold the strict 0.95; arithmetic holds a majority-mastery 0.85 because the operation is now LEARNED
+/// (GRU op-classification from context, not an exact symbol parser), so the pipeline is stochastic.
+/// The held stability window — not the absolute number — is what refutes "90% then oscillates".
 /// </summary>
 public sealed class CoreBootstrapRegimeTests
 {
@@ -33,9 +38,7 @@ public sealed class CoreBootstrapRegimeTests
         var memory = new PlatonicSpaceMemory(faceDimension: config.HiddenSize / 2, seed: 7);
         var trainer = new GenesisTrainer(tokenizer, model, memory, config);
         var inference = new GenesisInferenceEngine(
-            tokenizer, model, memory, null,
-            trainer.FoldPathDiscovery, trainer.TransformAccumulator,
-            enableDiagnosticFaceArithmeticShortcut: true);
+            tokenizer, model, memory, null);
         trainer.SetInferencePolicy(inference);
 
         var regime = new CoreBootstrapRegime(trainer, inference,

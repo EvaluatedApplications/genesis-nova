@@ -22,6 +22,8 @@ namespace GenesisNova.Cognition;
 ///                                      resolve (one→1), format (2→two), category (apple→fruit), facts
 ///                                      (france→paris) — only the target kind differs.
 ///  • <see cref="Compute"/>(op, args) — exact arithmetic over numeric args via the face homomorphism.
+///  • <see cref="Fold"/>(op, from)    — REDUCE op across all operands from a slot onward (variadic compute;
+///                                      the functional fold — sum/product of an arbitrary-length sequence).
 ///  • <see cref="Seq"/>(parts)        — concatenate the parts into the final text (numbers → digits).
 ///
 /// This block set is the TARGET vocabulary the GRU will later learn to SEQUENCE — composing general ops,
@@ -40,6 +42,16 @@ public sealed record Hop(GliderBlock Source, HopTarget Target) : GliderBlock;
 
 /// <summary>Exact arithmetic over numeric args via the face homomorphism.</summary>
 public sealed record Compute(GliderOp Op, IReadOnlyList<GliderBlock> Args) : GliderBlock;
+
+/// <summary>
+/// HIGHER-ORDER (a FUNCTION over a sequence): REDUCE <paramref name="Op"/> across ALL operands from
+/// <paramref name="FromSlot"/> onward — the variadic sibling of <see cref="Compute"/> (which is fixed-arity).
+/// Folds "1 + 2 + 3 + …" / "2 × 3 × 4 × …" for ANY operand count, so the glider isn't tied to a 2-operand
+/// shape. Element-native: the whole sequence composes via one R2 compose (the homomorphism is associative,
+/// so a single multi-operand compose == repeated pairwise folds). For Subtract/Divide the tail operands are
+/// composed via the complement (a − b − c = a + ¬b + ¬c), matching <see cref="ComposeArithmetic"/>.
+/// </summary>
+public sealed record Fold(GliderOp Op, int FromSlot = 0) : GliderBlock;
 
 /// <summary>Concatenate child outputs into the final text.</summary>
 public sealed record Seq(IReadOnlyList<GliderBlock> Parts) : GliderBlock;
@@ -96,102 +108,15 @@ public sealed class PlatonicGliderInterpreter
     {
         _space = space ?? throw new ArgumentNullException(nameof(space));
         _faceDim = space.FaceDimension;
-        _library = library ?? BuildDefaultLibrary();
+        // No hardcoded capability library: the blocks are a COMPOSABLE VOCABULARY the GRU assembles, not a
+        // table of premade gliders that lock tokens (compare/double/sum) to fixed meanings. A library can be
+        // supplied (e.g. for Ref composition or tests); default is empty.
+        _library = library ?? new Dictionary<string, PlatonicGlider>(StringComparer.OrdinalIgnoreCase);
     }
-
-    // The canonical block-gliders, named, so Ref (higher-order: a glider that invokes another glider —
-    // the "glider gun") can reference them. Shared with TryResolveCapability so the per-component
-    // regimens and the library never drift. See PROJECT_GLIDER.md §6.1.
-    private static GliderBlock CompareRoot() => new Branch(
-        new Compare(CompareOp.Greater, new Operand(0), new Operand(1)),
-        new Literal("greater"),
-        new Branch(new Compare(CompareOp.Less, new Operand(0), new Operand(1)),
-            new Literal("less"), new Literal("equal")));
-
-    private static GliderBlock LargerRoot() => new Branch(
-        new Compare(CompareOp.Greater, new Operand(0), new Operand(1)),
-        new Operand(0), new Operand(1));
-
-    private static GliderBlock ScaleRoot(double k) => new Compute(
-        GliderOp.Multiply, new GliderBlock[] { new Operand(0), new Const(k) });
-
-    private static IReadOnlyDictionary<string, PlatonicGlider> BuildDefaultLibrary() =>
-        new Dictionary<string, PlatonicGlider>(StringComparer.OrdinalIgnoreCase)
-        {
-            ["compare"] = new PlatonicGlider("compare", CompareRoot()),
-            ["larger"] = new PlatonicGlider("larger", LargerRoot()),
-            ["scale-double"] = new PlatonicGlider("scale-double", ScaleRoot(2)),
-            ["scale-triple"] = new PlatonicGlider("scale-triple", ScaleRoot(3)),
-        };
 
     /// <summary>Evaluate the glider against the query's operand tokens, returning the assembled text.</summary>
     public string Execute(PlatonicGlider glider, IReadOnlyList<string> operandTokens)
         => AsText(Eval(glider.Root, operandTokens));
-
-    /// <summary>
-    /// PER-COMPONENT REGIMENS (2026-06-14): parse a COMPACT block-capability input and answer it by
-    /// running the corresponding hand-built glider — a small composition of the reusable blocks — on the
-    /// substrate. This is how the Compare / Branch / Const blocks are wired into inference WITHOUT any
-    /// GRU-constructed plan: each capability is a fixed block tree, executed on the platonic physics, so
-    /// the answer is platonic-credited. The compact forms (NL flows through the ML path, never parsed here):
-    ///   compare {a} {b}     -> "greater" | "less" | "equal" (Compare + Branch + Literal)
-    ///   larger {a} {b}      -> the larger operand             (Branch + Compare + Operand)
-    ///   double|triple {x}   -> x*2 | x*3                      (Compute + Const + Operand)
-    ///   twicelarger {a} {b} -> 2*max(a,b)                     (Ref→larger + Const + Compute) — higher-order
-    /// Returns false for anything else. Never throws (a malformed/unresolvable case returns false).
-    /// </summary>
-    public bool TryResolveCapability(string input, out string answer, out string capability)
-    {
-        answer = string.Empty;
-        capability = string.Empty;
-        if (string.IsNullOrWhiteSpace(input))
-            return false;
-
-        var toks = input.Trim().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
-        if (toks.Length < 2)
-            return false;
-        var head = toks[0].ToLowerInvariant();
-        var args = toks.Skip(1).ToArray();
-        if (!args.All(t => TryParseNumber(t, out _)))
-            return false;
-
-        try
-        {
-            if (head == "compare" && args.Length == 2)
-            {
-                answer = Execute(new PlatonicGlider("compare", CompareRoot()), args);
-                capability = "compare";
-                return true;
-            }
-            if (head == "larger" && args.Length == 2)
-            {
-                answer = Execute(new PlatonicGlider("larger", LargerRoot()), args);
-                capability = "larger";
-                return true;
-            }
-            if ((head == "double" || head == "triple") && args.Length == 1)
-            {
-                answer = Execute(new PlatonicGlider("scale", ScaleRoot(head == "double" ? 2.0 : 3.0)), args);
-                capability = "scale";
-                return true;
-            }
-            if (head == "twicelarger" && args.Length == 2)
-            {
-                // HIGHER-ORDER (Ref): the top glider invokes the named "larger" sub-glider on the same
-                // operands and doubles it — a glider built FROM a glider (Ref→larger, then Const×Compute).
-                answer = Execute(new PlatonicGlider("twice-larger", new Compute(
-                    GliderOp.Multiply, new GliderBlock[] { new Ref("larger"), new Const(2.0) })), args);
-                capability = "twice-larger";
-                return true;
-            }
-        }
-        catch (InvalidOperationException)
-        {
-            return false; // unresolvable on the substrate — let the ML path handle it
-        }
-
-        return false;
-    }
 
     private GliderValue Eval(GliderBlock block, IReadOnlyList<string> operands) => block switch
     {
@@ -199,6 +124,7 @@ public sealed class PlatonicGliderInterpreter
         Literal l => GliderValue.Str(l.Chunk),
         Hop h => EvalHop(h, operands),
         Compute c => GliderValue.Num(EvalCompute(c, operands)),
+        Fold f => GliderValue.Num(EvalFold(f, operands)),
         Const k => GliderValue.Num(k.Value),
         Compare cmp => GliderValue.Num(EvalCompare(cmp, operands) ? 1.0 : 0.0),
         Branch b => IsTruthy(Eval(b.Condition, operands)) ? Eval(b.WhenTrue, operands) : Eval(b.WhenFalse, operands),
@@ -266,6 +192,22 @@ public sealed class PlatonicGliderInterpreter
         if (values.Length == 0)
             return 0.0;
         return DecodeArithmetic(compute.Op, ComposeArithmetic(compute.Op, values), values);
+    }
+
+    // VARIADIC FOLD: reduce the op across every operand from FromSlot onward. Reuses the SAME element-native
+    // path as Compute (ComposeArithmetic handles N operands via one R2 compose), so a fold of 5 operands is
+    // a single platonic composition, not 4 chained C# ops. Needs ≥1 operand; ≥2 to be a meaningful reduce.
+    private double EvalFold(Fold fold, IReadOnlyList<string> operands)
+    {
+        var from = Math.Max(0, fold.FromSlot);
+        if (from >= operands.Count)
+            throw new InvalidOperationException($"glider: fold from slot {from} but only {operands.Count} operands");
+        var values = new double[operands.Count - from];
+        for (var i = from; i < operands.Count; i++)
+            values[i - from] = AsNumber(GliderValue.Str(operands[i]));
+        if (values.Length == 1)
+            return Math.Round(values[0]);
+        return DecodeArithmetic(fold.Op, ComposeArithmetic(fold.Op, values), values);
     }
 
     /// <summary>

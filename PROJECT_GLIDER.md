@@ -2,6 +2,16 @@
 
 > The platonic space is Conway's Game of Life. We are building gliders.
 
+> **STATUS (2026-06-14) — DIRECTION CORRECTED. No premade answers, no hardcoding.** The hand-wired
+> capability resolvers (`compare`/`larger`/`double`/`sum` via `TryResolveCapability`), the named-glider
+> library, the inference glider route, the capability training creators, and the templated-answer creator
+> (`GliderAnswerCreator`, "the answer is N") were **removed**: hand-built compositions LOCK tokens to fixed
+> meanings and a templated answer is overfitting. **Kept:** the block records + interpreter as a *composable
+> vocabulary* (`PlatonicGlider.cs`; tested in `PlatonicGliderDemoTests`). The principle: **if the GRU can
+> figure it out, it should — it builds what it needs in platonic space** (faces, relations-as-elements,
+> R2 composition, learned-function/op transforms). Capability EMERGES from composition; it is not enumerated.
+> Sections below describing premade gliders / answer-templates / capability registers are HISTORICAL.
+
 ## 0. The metaphor, made precise
 
 The platonic space is a **substrate with fixed physics**:

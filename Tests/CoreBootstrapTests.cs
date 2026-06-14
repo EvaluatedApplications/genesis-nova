@@ -79,55 +79,6 @@ public sealed class CategoryRetrievalCreatorTests
     }
 }
 
-public sealed class GliderAnswerCreatorTests
-{
-    [Fact]
-    public void EmitsScaffoldedAnswers_Deterministically()
-    {
-        var creator = new GliderAnswerCreator();
-        var a = creator.Generate(40, difficulty: 0, forTraining: true);
-        var b = creator.Generate(40, difficulty: 0, forTraining: true);
-
-        Assert.Equal(40, a.Length);
-        Assert.Equal(a, b); // deterministic per (creator, difficulty) — IExampleCreator rule 3
-
-        // Every output is the scaffold + a slot: the structure the glider must learn to construct.
-        Assert.All(a, p => Assert.StartsWith("the answer is ", p.Output));
-        // d0 is add-only over a small range; answers are correct sums (compute, not noise).
-    }
-
-    [Fact]
-    public void VariesOperandAndAnswerSurfaces_SoStructureMustGeneralise()
-    {
-        var creator = new GliderAnswerCreator();
-        var examples = creator.Generate(60, difficulty: 1, forTraining: true);
-
-        // Operands appear BOTH as words and as digits (resolve must handle both).
-        Assert.Contains(examples, p => p.Input.Contains("one") || p.Input.Contains("two") || p.Input.Contains("three"));
-        Assert.Contains(examples, p => System.Text.RegularExpressions.Regex.IsMatch(p.Input, @"\d"));
-
-        // Answers appear BOTH as words and as digits (format is a conditional, not fixed).
-        Assert.Contains(examples, p => System.Text.RegularExpressions.Regex.IsMatch(p.Output, @"the answer is \d"));
-        Assert.Contains(examples, p => System.Text.RegularExpressions.Regex.IsMatch(p.Output, @"the answer is [a-z]+$"));
-
-        // Multiple input framings of the same operation (surface must not be the carrier).
-        var framings = examples.Select(p => p.Input).Distinct().Count();
-        Assert.True(framings >= 4, $"expected varied surfaces, saw {framings}");
-    }
-
-    [Fact]
-    public void DifficultyWidensTheOperatorSet()
-    {
-        var creator = new GliderAnswerCreator();
-        var d0 = creator.Generate(200, 0, true);
-        var d3 = creator.Generate(200, 3, true);
-
-        // d0 is add-only; subtraction/division framings only appear at higher difficulty.
-        Assert.DoesNotContain(d0, p => p.Input.Contains(" minus ") || p.Input.Contains(" divided by "));
-        Assert.Contains(d3, p => p.Input.Contains(" minus ") || p.Input.Contains("-"));
-    }
-}
-
 public sealed class CoreBootstrapSuiteTests
 {
     [Fact]

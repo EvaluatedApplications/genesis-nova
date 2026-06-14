@@ -1336,6 +1336,24 @@ public class GenesisNeuralModel
     }
 
     /// <summary>
+    /// Total trainable parameter count across all (lazily-initialised) tensors — for footprint reporting
+    /// and like-for-like model-size comparisons. Counts every parameter on the GPU, including the
+    /// REINFORCE-trained edit head. (The platonic space itself is CPU-side double[] state, not counted here.)
+    /// </summary>
+    public long ParameterCount()
+    {
+        long n = 0;
+        foreach (var p in new[]
+        {
+            _embT, _wOutT, _bOutT, _routeWT, _routeB,
+            _gruWih, _gruWhh, _gruBih, _gruBhh,
+            _queryOpWT, _queryOpB, _queryOperandWT, _queryOperandB, _editWT, _editB
+        })
+            if (p is not null) n += p.numel();
+        return n;
+    }
+
+    /// <summary>
     /// Current SGD step size. Defaults to <c>config.LearningRate</c> but is ADJUSTABLE so a training
     /// regime can ANNEAL it — the single most important lever against the "reaches ~90% then
     /// oscillates" failure: a fixed step overshoots the optimum once most examples are right, so the

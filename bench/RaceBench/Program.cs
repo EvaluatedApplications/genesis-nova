@@ -22,7 +22,8 @@ void P(string s) { Console.WriteLine(s); log.WriteLine(s); }
 void Rule() => P(new string('═', 86));
 
 var dev = cuda.is_available() ? CUDA : CPU;
-const int HIDDEN = 512, EPOCHS = 20, SEED = 7;
+const int HIDDEN = 256, EPOCHS = 20, SEED = 7;  // SMALL: nova keeps all faces (poly/log/char/word); the
+                                                // question is whether a transformer this size has the capacity
 var rng = new Random(SEED);
 
 // ── Full curriculum: pool every creator, split disjoint train / held-out per creator ─────────────────
@@ -58,7 +59,8 @@ novaTrainer.SetInferencePolicy(inference);
 novaTrainer.TrainStep(new GenesisExample("0 + 0", "0"));
 var novaParams = model.ParameterCount();
 
-// ── Transformer sized to ≈ nova's parameter count (equal budget), best config at that size ───────────
+// ── Transformer sized to ≈ nova's (small) parameter count — EQUAL PARAMS, both small. The bet: nova's
+//    structural priors (homomorphism, relations) need little capacity, so a transformer this size struggles. ──
 long XfParams(int d, int L, int ff, int maxLen)
 {
     long V = vocab + 1;
@@ -66,7 +68,7 @@ long XfParams(int d, int L, int ff, int maxLen)
     return V * d + (long)maxLen * d + L * perBlock + 2L * d + (V * d + V);
 }
 const int FF = 4, MAXLEN = 32;
-var configs = new (int d, int L, int h)[] { (192, 2, 4), (192, 3, 4), (224, 2, 4), (256, 2, 4), (256, 3, 8), (320, 2, 8), (384, 2, 8) };
+var configs = new (int d, int L, int h)[] { (96, 2, 4), (112, 2, 4), (128, 2, 4), (96, 3, 4), (128, 3, 4), (160, 2, 8) };
 var best = configs.OrderBy(c => Math.Abs(XfParams(c.d, c.L, FF, MAXLEN) - novaParams)).First();
 var xf = new TransformerTrainer(tok, vocab, dModel: best.d, heads: best.h, layers: best.L,
     ffMult: FF, maxLen: MAXLEN, maxAnswer: 8, dev, lr: 3e-4);
@@ -82,7 +84,7 @@ P($"  curriculum  : {string.Join(", ", creators.Select(c => c.Name))}");
 P($"  data        : train {train.Count}   held-out {heldAll.Count}   epochs {EPOCHS}   tokenizer shared");
 P($"  nova        : {novaParams,10:N0} params   ~{NovaMB,5:F1} MB   (GRU controller + platonic substrate, SGD)");
 P($"  transformer : {xf.ParameterCount,10:N0} params   ~{XfMB,5:F1} MB   (d={best.d} L={best.L} h={best.h}, Adam)");
-P($"  budget      : matched on parameters; nova's optimizer is lighter (SGD vs Adam, ~half the VRAM)");
+P($"  budget      : EQUAL PARAMETERS, both SMALL — nova's structure needs little capacity; can a transformer this size find it?");
 Rule();
 P("  epoch │  NOVA  train   held-out   │  TRANSFORMER  train   held-out");
 P("  ──────┼──────────────────────────┼──────────────────────────────");

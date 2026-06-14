@@ -3,6 +3,15 @@ using System.Globalization;
 
 namespace GenesisNova.Data.Creators;
 
+/// <summary>
+/// PER-COMPONENT REGIMEN for the Compare block (PROJECT_GLIDER.md §6). Bare, focused form
+/// "compare {a} {b}" → "greater" | "less" | "equal" — ONE prompt shape (bare beats diverse) so the
+/// lesson is masterable. The answer is produced platonically: PlatonicGliderInterpreter runs the
+/// hand-built glider Branch(Compare(&gt;), "greater", Branch(Compare(&lt;), "less", "equal")) on the
+/// substrate (the difference-sign predicate), so RequirePlatonicForCorrect credits it. The creator is
+/// the TRAINING regime that makes the routing to that block reliably emerge; the demonstration test
+/// proves it CAN. Difficulty widens the operand range.
+/// </summary>
 public sealed class ComparisonCreator : IExampleCreator
 {
     private const int StepSize = 24;
@@ -15,34 +24,19 @@ public sealed class ComparisonCreator : IExampleCreator
     public ImmutableArray<(string Input, string Output)> Generate(int count, int difficulty, bool forTraining)
     {
         var pairs = PairsForLevel(Math.Max(0, difficulty));
-        var prompts = new[]
-        {
-            "compare {0} and {1}",
-            "is {0} greater than {1}",
-            "relation {0} {1}",
-            "{0} ? {1}"
-        };
+        if (count <= 0)
+            return ImmutableArray<(string, string)>.Empty;
 
         var examples = ImmutableArray.CreateBuilder<(string Input, string Output)>(count);
         for (var i = 0; i < count; i++)
         {
             var (left, right) = pairs[i % pairs.Length];
-            var prompt = prompts[i % prompts.Length];
-            var input = string.Format(CultureInfo.InvariantCulture, prompt, left, right);
-            var output = Compare(left, right, i % prompts.Length);
+            var input = string.Format(CultureInfo.InvariantCulture, "compare {0} {1}", left, right);
+            var output = left > right ? "greater" : left < right ? "less" : "equal";
             examples.Add((input, output));
         }
 
         return examples.ToImmutable();
-    }
-
-    private static string Compare(double left, double right, int promptIndex)
-    {
-        if (promptIndex == 1)
-            return left > right ? "yes" : "no";
-        if (promptIndex == 3)
-            return left > right ? "greater" : left < right ? "less" : "equal";
-        return left > right ? "greater" : left < right ? "less" : "equal";
     }
 
     private static (double Left, double Right)[] PairsForLevel(int difficulty)

@@ -33,8 +33,8 @@ public sealed class GenesisSmokeTest
     public void TrainingInterface_RunsSingleStep_WithoutThrowing()
     {
         var tokenizer = new WhitespaceGenesisTokenizer();
-        var model = new GenesisNeuralModel(new GenesisNovaConfig(HiddenSize: 24, LearningRate: 0.05));
-        var memory = new PlatonicSpaceMemory(faceDimension: 16, seed: 7);
+        var model = new GenesisNeuralModel(new GenesisNovaConfig(HiddenSize: ProductionDims.HiddenSize, LearningRate: 0.05));
+        var memory = new PlatonicSpaceMemory(faceDimension: ProductionDims.FaceDimension, seed: 7);
         var trainer = new GenesisTrainer(tokenizer, model, memory);
 
         var loss = trainer.TrainStep(new GenesisExample("say one", "one"));
@@ -54,7 +54,7 @@ public sealed class GenesisSmokeTest
     [Fact]
     public void Checkpoint_SaveLoad_RoundTrips_WholeModel_NoLoss()
     {
-        var config = new GenesisNovaConfig(HiddenSize: 24, LearningRate: 0.05);
+        var config = new GenesisNovaConfig(HiddenSize: ProductionDims.HiddenSize, LearningRate: 0.05);
         var tokenizer = new WhitespaceGenesisTokenizer();
         var model = new GenesisNeuralModel(config);
         var memory = new PlatonicSpaceMemory(faceDimension: config.HiddenSize / 2, seed: 7);

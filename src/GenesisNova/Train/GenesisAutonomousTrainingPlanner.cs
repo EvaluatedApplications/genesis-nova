@@ -68,6 +68,14 @@ public sealed class GenesisAutonomousTrainingPlanner
 
         var signals = BuildSignals(request, history, activeCreators)
             .ToDictionary(s => s.CreatorName, StringComparer.OrdinalIgnoreCase);
+
+        // CURRICULUM STRATEGY. Default: FOCUSED — train ONE creator to convergence at a time
+        // (complexity order, corenova first) + replay mastered, since focused converges where
+        // composite/mixed oscillates. Legacy: bootstrap-first gate, then composite-all.
+        activeCreators = request.FocusedCurriculum
+            ? ApplyFocusedCurriculum(request, activeCreators, signals)
+            : ApplyBootstrapFirstGate(request, roundIndex, activeCreators, signals);
+
         var plans = new List<GenesisAutonomousCreatorPlan>(activeCreators.Count);
         foreach (var creator in activeCreators)
         {
@@ -521,10 +529,26 @@ public sealed class GenesisAutonomousTrainingPlanner
                 ? creatorRounds[^1].CreatorProgress!.SeenCount
                 : creatorRounds[^1].SampleCount;
             var stableCount = creatorRounds.Count(r => IsStable(r, request));
+            // Capability gate: a PROMPT-ANSWER creator must also reach the success threshold — and
+            // with RequirePlatonicForCorrect that success counts only answers via the platonic path,
+            // so a creator answering neurally never masters. Windowed-text (no platonic/prompt-answer
+            // success signal) is exempt.
+            var requiresPlatonicSuccess = creator.TrainingKind == GenesisTrainingExampleKind.PromptAnswer;
+            var successMastered = !requiresPlatonicSuccess || recentSuccessRate >= request.MasterySuccessThreshold;
+            // DRIVE-TO-DEPTH: require the creator to have reached MasteryDifficulty (clamped to its
+            // legal range) before it can master — so the focus stays on it while it climbs difficulties
+            // (stable, focused climb) instead of advancing at trivial difficulty and leaving the rest
+            // to the oscillation-prone composite maintenance phase. The FocusBudget safety valve still
+            // advances past a creator that can't reach this depth (it then rides along as replay).
+            var requiredMasteryDifficulty = Math.Clamp(
+                request.MasteryDifficulty,
+                Math.Max(request.InitialDifficulty, 1),
+                Math.Max(request.MaxDifficulty, 1));
             var mastered = attempts >= 3 &&
                            stableCount >= 2 &&
                            avgLoss <= request.LossThreshold * request.MasteryLossMultiplier &&
-                           maxDifficulty >= Math.Max(request.InitialDifficulty, 1);
+                           maxDifficulty >= requiredMasteryDifficulty &&
+                           successMastered;
             var regressing = IsRegressing(recent[^1], request);
             var weakness = Math.Clamp(avgLoss / Math.Max(0.0001, request.LossThreshold), request.WeaknessMin, request.WeaknessMax);
             var exploration = request.ExplorationBase / (1.0 + attempts);
@@ -566,6 +590,94 @@ public sealed class GenesisAutonomousTrainingPlanner
         }
 
         return -1;
+    }
+
+    // The "corenova:" name prefix marks a CORE tool-training primitive (teaches USING the platonic
+    // space) — see NumberWordCreator/CategoryRetrievalCreator. Bootstrap-first gates on these.
+    private const string CoreToolPrefix = "corenova:";
+
+    // FOCUSED CURRICULUM: the active set for this round = the single FOCUS creator (the first, in
+    // complexity order, that is neither mastered nor focus-exhausted) plus every MASTERED creator AND
+    // every focus-EXHAUSTED creator (both ride along as low-priority replay for retention). Creators
+    // AFTER the focus that are not yet mastered/exhausted are held back — only one NEW capability is
+    // learned at a time. When every creator is mastered or exhausted, the full set trains (maintenance).
+    // Curriculum position is derived entirely from the mastery signals, so it needs no extra persistence
+    // and re-opens regressed creators automatically (a regressed creator's signal flips and it becomes
+    // first-unmastered again).
+    //
+    // FORGETTING FIX: a focus-exhausted-but-unmastered creator used to be DROPPED from the set (neither
+    // focus nor replay) — so the curriculum simply forgot it. It now rides along as replay exactly like
+    // a mastered creator: the focus advances past it (it couldn't master within FocusBudget), but its
+    // examples keep being rehearsed so its partial competence is retained and can keep climbing.
+    private static IReadOnlyList<IExampleCreator> ApplyFocusedCurriculum(
+        GenesisAutonomousTrainingRequest request,
+        IReadOnlyList<IExampleCreator> active,
+        IReadOnlyDictionary<string, CreatorSignal> signals)
+    {
+        if (active.Count <= 1)
+            return active;
+
+        // active is already complexity-ordered (constructor sorts _creators); ResolveActiveCreators
+        // preserves that order.
+        IExampleCreator? focus = null;
+        var replay = new List<IExampleCreator>();
+        foreach (var creator in active)
+        {
+            var hasSignal = signals.TryGetValue(creator.Name, out var s);
+            var isMastered = hasSignal && s!.Mastered;
+            if (isMastered)
+            {
+                replay.Add(creator); // mastered → replay for retention
+                continue;
+            }
+            if (focus is not null)
+            {
+                // A focus is already chosen; a LATER creator only joins as replay if it is itself
+                // exhausted (it had its focus turn already). Otherwise it waits its turn.
+                if (hasSignal && s!.Attempts >= request.FocusBudget)
+                    replay.Add(creator);
+                continue;
+            }
+            var exhausted = hasSignal && s!.Attempts >= request.FocusBudget;
+            if (!exhausted)
+                focus = creator; // first unmastered, not-yet-exhausted creator → the focus
+            else
+                replay.Add(creator); // exhausted-and-unmastered → replay (retained, not forgotten)
+        }
+
+        if (focus is null)
+            return active; // everything mastered or exhausted → train all (maintenance pass)
+
+        var selected = new List<IExampleCreator>(replay.Count + 1) { focus };
+        selected.AddRange(replay); // replay riders get little budget via priority allocation
+        return selected;
+    }
+
+    private static IReadOnlyList<IExampleCreator> ApplyBootstrapFirstGate(
+        GenesisAutonomousTrainingRequest request,
+        int roundIndex,
+        IReadOnlyList<IExampleCreator> active,
+        IReadOnlyDictionary<string, CreatorSignal> signals)
+    {
+        if (!request.BootstrapFirst)
+            return active;
+
+        var coreCreators = active
+            .Where(c => c.Name.StartsWith(CoreToolPrefix, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+        if (coreCreators.Length == 0 || coreCreators.Length == active.Count)
+            return active; // nothing to gate (no primitives, or everything IS a primitive)
+
+        // Safety valve: never let an un-masterable primitive starve broad training indefinitely.
+        if (roundIndex >= request.BootstrapMaxRounds)
+            return active;
+
+        // Gate broad creators out until EVERY core primitive is mastered. A primitive with no signal
+        // yet (never trained) counts as not-mastered, so the very first rounds are core-only.
+        var allCoreMastered = coreCreators.All(c =>
+            signals.TryGetValue(c.Name, out var s) && s.Mastered);
+
+        return allCoreMastered ? active : coreCreators;
     }
 
     private IReadOnlyList<IExampleCreator> ResolveActiveCreators(GenesisAutonomousTrainingRequest request)

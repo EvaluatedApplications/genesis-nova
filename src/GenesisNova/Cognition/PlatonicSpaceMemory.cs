@@ -16,8 +16,13 @@ public readonly record struct PlatonicNeighbor(
 
 public sealed class PlatonicSpaceMemory
 {
-    private const int MaxPlatonicNodes = 12_000;
-    private const int MaxPlatonicRelations = 48_000;
+    // Capacity caps (hard eviction). The defaults here are the standalone/test fallback; the RUNTIME
+    // passes these from GenesisNovaConfig (the single source of truth), so the memory's eviction cap and
+    // the SpaceManager's maintenance pruning use the SAME limits instead of two independent constants.
+    private const int DefaultMaxPlatonicNodes = 12_000;
+    private const int DefaultMaxPlatonicRelations = 48_000;
+    private readonly int _maxPlatonicNodes;
+    private readonly int _maxPlatonicRelations;
     private const double GeometryLearningRate = 0.04;
 
     // Contrastive repulsion — ported from the genesis source of truth (GraphAligner.NudgeGraphAlignment,
@@ -61,9 +66,15 @@ public sealed class PlatonicSpaceMemory
     private readonly PlatonicLattice _lattice;
     private long _utilityStep;
 
-    public PlatonicSpaceMemory(int faceDimension, int seed = 42)
+    public PlatonicSpaceMemory(
+        int faceDimension,
+        int seed = 42,
+        int maxNodes = DefaultMaxPlatonicNodes,
+        int maxRelations = DefaultMaxPlatonicRelations)
     {
         _faceDimension = Math.Max(4, faceDimension);
+        _maxPlatonicNodes = Math.Max(256, maxNodes);
+        _maxPlatonicRelations = Math.Max(1024, maxRelations);
         _lattice = new PlatonicLattice(
             nodeNames: () => _nodes.Keys,
             nodeFaces: () => _nodes.Values.Select(n => (n.Name, n.PositiveFace)));
@@ -134,7 +145,7 @@ public sealed class PlatonicSpaceMemory
                     continue;
                 if (!_nodes.TryGetValue(normalized, out var node))
                     continue;
-                scored.Add((normalized, EuclideanDistance(conceptFace, node.PositiveFace)));
+                scored.Add((normalized, FaceAwareDistance(conceptFace, node.PositiveFace)));
                 seen++;
             }
             return scored.Count == 0
@@ -269,11 +280,23 @@ public sealed class PlatonicSpaceMemory
             var candidateEvidence = new Dictionary<string, List<PlatonicEvidence>>(StringComparer.OrdinalIgnoreCase);
             foreach (var source in frontier)
             {
+                // Relational-first retrieval: LEARNED relations are observed facts ("3" relates to
+                // "three"); numeric value-proximity ("3" is near "4") and face KNN are geometry, not
+                // relatedness — and for numbers they always win on full-vector distance (poly/log face
+                // clusters values), returning the adjacent number instead of the related concept. So
+                // prefer the relational tier; fall back to Any (semantic/numeric) only when the concept
+                // has NO learned relations. General: 3→three, him→paul, apple→fruit.
                 var neighbors = GetNeighbors(
                     source,
-                    type: PlatonicNeighborhoodType.Any,
+                    type: PlatonicNeighborhoodType.Relational,
                     maxNeighbors: Math.Max(8, beam * 8),
                     minConfidence: 0.35);
+                if (neighbors.Count == 0)
+                    neighbors = GetNeighbors(
+                        source,
+                        type: PlatonicNeighborhoodType.Any,
+                        maxNeighbors: Math.Max(8, beam * 8),
+                        minConfidence: 0.35);
 
                 foreach (var neighbor in neighbors)
                 {
@@ -1222,7 +1245,7 @@ public sealed class PlatonicSpaceMemory
 
     private void EnsureNodeCapacity(IReadOnlyCollection<string> protectedConcepts)
     {
-        if (_nodes.Count < MaxPlatonicNodes)
+        if (_nodes.Count < _maxPlatonicNodes)
             return;
 
         var protectedSet = protectedConcepts
@@ -1248,7 +1271,7 @@ public sealed class PlatonicSpaceMemory
 
     private void EnsureRelationCapacity()
     {
-        if (_relations.Count < MaxPlatonicRelations)
+        if (_relations.Count < _maxPlatonicRelations)
             return;
 
         var candidate = _relations.Values
@@ -1337,6 +1360,43 @@ public sealed class PlatonicSpaceMemory
         var length = Math.Min(a.Count, b.Count);
         var sum = 0.0;
         for (var i = 0; i < length; i++)
+        {
+            var diff = a[i] - b[i];
+            sum += diff * diff;
+        }
+        return Math.Sqrt(sum);
+    }
+
+    // FACE-AWARE distance (genesis hybrid): relatedness is measured on the SEMANTIC face [WordFaceStart..dim)
+    // so a concept's value (numeric face) and spelling (char face) cannot contaminate it. For a NUMERIC
+    // query (arithmetic-face signal present) we ALSO measure the arithmetic face and take the MIN, so
+    // numbers still surface value-near neighbours while text comparisons stay shielded. This is the real
+    // fix the per-concept zero-freezing was bandaging.
+    private double FaceAwareDistance(IReadOnlyList<double> query, IReadOnlyList<double> candidate)
+    {
+        var dim = _faceDimension;
+        var arithEnd = Math.Min(2 * NumericDimensions, dim);
+        var semStart = Core.FaceLayout.WordFaceStart(dim);
+        var semantic = semStart > 0 && semStart < dim
+            ? RangeDistance(query, candidate, semStart, dim)
+            : RangeDistance(query, candidate, 0, dim);
+
+        var arithNorm = 0.0;
+        for (var i = 0; i < arithEnd && i < query.Count; i++)
+            arithNorm += query[i] * query[i];
+        if (arithNorm <= 0.01) // text query → semantic face only
+            return semantic;
+
+        return Math.Min(semantic, RangeDistance(query, candidate, 0, arithEnd)); // numeric → blend value face
+    }
+
+    private static double RangeDistance(IReadOnlyList<double> a, IReadOnlyList<double> b, int start, int end)
+    {
+        var n = Math.Min(a.Count, b.Count);
+        var e = Math.Min(end, n);
+        var s = Math.Min(Math.Max(0, start), e);
+        var sum = 0.0;
+        for (var i = s; i < e; i++)
         {
             var diff = a[i] - b[i];
             sum += diff * diff;

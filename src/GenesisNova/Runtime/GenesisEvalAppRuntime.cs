@@ -427,7 +427,8 @@ public sealed class GenesisEvalAppRuntime
             var pred = await PredictAsync(ex.Input, maxTokens: 48);
             var output = pred.Result?.Output?.Trim().ToLowerInvariant() ?? string.Empty;
             var expected = ex.Output.Trim().ToLowerInvariant();
-            if (output == expected)
+            // Face-aware: a digit and its number-word both count (see AnswerEquivalence).
+            if (GenesisNova.Core.AnswerEquivalence.Equivalent(output, expected))
                 exact++;
         }
 

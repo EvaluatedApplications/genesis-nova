@@ -19,8 +19,10 @@ public sealed class GenesisInferenceEngine
     private readonly GenesisNeuralModel _model;
     private readonly PlatonicSpaceMemory _memory;
     private readonly FoldPathDiscovery? _foldPathDiscovery;
-    private readonly TransformLibrary? _transformLibrary;
     private readonly TransformAccumulator? _transformAccumulator;
+    // Per-component glider-block route: runs hand-built block compositions (Compare/Branch/Const) on the
+    // substrate to answer their compact capabilities, credited platonic. See PROJECT_GLIDER.md §6.
+    private readonly PlatonicGliderInterpreter _glider;
     private readonly Func<string?>? _platonicFilePathProvider;
     private readonly bool _enableDiagnosticFaceArithmeticShortcut;
     private readonly int _maxPlatonicAssistInvocations;
@@ -43,7 +45,6 @@ public sealed class GenesisInferenceEngine
         PlatonicSpaceMemory memory,
         Func<string?>? platonicFilePathProvider = null,
         FoldPathDiscovery? foldPathDiscovery = null,
-        TransformLibrary? transformLibrary = null,
         TransformAccumulator? transformAccumulator = null,
         bool enableDiagnosticFaceArithmeticShortcut = true,
         int maxPlatonicAssistInvocations = 3)
@@ -51,9 +52,9 @@ public sealed class GenesisInferenceEngine
         _tokenizer = tokenizer;
         _model = model;
         _memory = memory;
+        _glider = new PlatonicGliderInterpreter(memory);
         _platonicFilePathProvider = platonicFilePathProvider;
         _foldPathDiscovery = foldPathDiscovery;
-        _transformLibrary = transformLibrary;
         _transformAccumulator = transformAccumulator;
         _enableDiagnosticFaceArithmeticShortcut = enableDiagnosticFaceArithmeticShortcut;
         _maxPlatonicAssistInvocations = Math.Clamp(maxPlatonicAssistInvocations, 0, 16);
@@ -230,6 +231,37 @@ public sealed class GenesisInferenceEngine
         // mid-generation as an internal scratchpad. Falls back to pure neural if no sub-step fires.
         if (routeId == 2)
         {
+            // Most-specific resolver FIRST: the glider-block route fires only for the exact compact
+            // block capabilities (compare/larger/double/triple) and abstains for everything else, so it
+            // must precede the greedy concept-chain/arithmetic resolvers that would otherwise intercept.
+            if (TryGenerateFromGliderBlock(request, out var gliderBlock2))
+            {
+                RecordRouteDecision(routeId, 1, true, true, true, 1, gliderBlock2.DecisionPath, routeConfidence);
+                return gliderBlock2;
+            }
+            // Route-1 and route-2 must NOT disagree on a query the platonic space answers EXACTLY.
+            // When the WHOLE input is a directly-resolvable arithmetic expression, answer it directly
+            // instead of neural-decoding scaffolding around the exact value — that scaffolding is what
+            // corrupts "5" into "1= 5" when broad training erodes router confidence and tips bare
+            // arithmetic from route-1 into route-2. Restricted to the ARITHMETIC-direct resolvers (NOT
+            // the general concept-chain) so genuine multi-step queries that need the neural+platonic
+            // interleave are left untouched and still flow through the assist below.
+            if (TryGenerateFromDiscoveredTransform(request, out var directTransform))
+            {
+                RecordRouteDecision(routeId, 1, true, true, true, 1, directTransform.DecisionPath, routeConfidence);
+                return directTransform;
+            }
+            if (TryGenerateFromArithmeticQuery(request, out var directArithmetic))
+            {
+                RecordRouteDecision(routeId, 1, true, true, true, 1, directArithmetic.DecisionPath, routeConfidence);
+                return directArithmetic;
+            }
+            if (TryGenerateFromGruQuery(request, out var gruQuery))
+            {
+                RecordRouteDecision(routeId, 1, true, true, true, 1, gruQuery.DecisionPath, routeConfidence);
+                return gruQuery;
+            }
+
             var assisted = GenerateNeuralWithPlatonicAssist(request, inputTokens);
             RecordRouteDecision(
                 routeId, 2,
@@ -245,6 +277,13 @@ public sealed class GenesisInferenceEngine
         // Mode 1 (platonic-direct): answer straight from a platonic transform/query.
         if (routeId == 1)
         {
+            // Most-specific resolver FIRST (see route-2 note): the block capabilities must be answered by
+            // their own block path, not the greedy concept-chain plan that follows.
+            if (TryGenerateFromGliderBlock(request, out var gliderBlockDirect))
+            {
+                RecordRouteDecision(routeId, 1, true, true, true, 1, gliderBlockDirect.DecisionPath, routeConfidence);
+                return gliderBlockDirect;
+            }
             if (TryGenerateFromDiscoveredTransform(request, out var discovered))
             {
                 RecordRouteDecision(routeId, 1, true, true, true, 1, discovered.DecisionPath, routeConfidence);
@@ -387,7 +426,8 @@ public sealed class GenesisInferenceEngine
                 disallowToken: i == 0 ? _tokenizer.EosTokenId : null,
                 penalizedTokens: generated,
                 repetitionPenalty: 0.35,
-                tokenBiases: biases);
+                tokenBiases: biases,
+                stopToken: _tokenizer.EosTokenId);
             if (biases is not null)
             {
                 totalBiasCount += biases.Count;
@@ -533,7 +573,8 @@ public sealed class GenesisInferenceEngine
                 disallowToken: i == 0 ? _tokenizer.EosTokenId : null,
                 penalizedTokens: generated,
                 repetitionPenalty: 0.35,
-                tokenBiases: biases);
+                tokenBiases: biases,
+                stopToken: _tokenizer.EosTokenId);
             if (biases is not null)
             {
                 totalBiasCount += biases.Count;
@@ -581,16 +622,11 @@ public sealed class GenesisInferenceEngine
         if (isContextWrapped)
             return false;
         var operationName = ToOperationName(operation);
-        var hasCapability = _foldPathDiscovery.HasOperation(operationName) ||
-                            (_transformLibrary?.HasCapability(operationName) ?? false);
-        if (!hasCapability)
+        if (!_foldPathDiscovery.HasOperation(operationName))
             return false;
 
         if (!_foldPathDiscovery.TryPredict(operationName, left, right, out var prediction, out var route))
-        {
-            _transformLibrary?.RecordFailure(operationName);
             return false;
-        }
 
         if (LooksLikeIntegerOperands(left, right) &&
             Math.Abs(prediction - Math.Round(prediction)) > 0.25)
@@ -604,7 +640,6 @@ public sealed class GenesisInferenceEngine
         if (tokens.Length == 0)
             return false;
 
-        _transformLibrary?.RecordSuccess(operationName);
         UpdateAccumulatorFromInference(operationName, request.Input, response);
 
         // Confidence from decode self-consistency of the learned transform's PREDICTED embedding
@@ -628,26 +663,183 @@ public sealed class GenesisInferenceEngine
         return true;
     }
 
+    /// <summary>
+    /// Resolves the input EXACTLY as a compact arithmetic expression via the face homomorphism and
+    /// formats it as a direct platonic answer. The arithmetic-direct slice of the platonic-direct
+    /// route — shared by route 1 (platonic-direct) and the route-2 short-circuit so the two can never
+    /// produce DIFFERENT answers for the same exact arithmetic. Returns false for anything that is not
+    /// a directly-resolvable arithmetic expression (those flow through concept-chain / assist).
+    /// </summary>
+    private bool TryGenerateFromArithmeticQuery(GenerationRequest request, out GenerationResult result)
+    {
+        result = default!;
+        if (!TryResolveArithmeticQuery(request.Input, out var arithmetic))
+            return false;
+
+        var queryTokens = _tokenizer.Encode(arithmetic.ResponseText, addEos: true);
+        var bounded = queryTokens.Take(Math.Max(1, request.MaxNewTokens)).ToArray();
+        result = new GenerationResult(
+            Output: _tokenizer.Decode(bounded),
+            GeneratedTokens: bounded,
+            UsedPlatonicQuery: true,
+            UsedNeuralFallback: false,
+            DecisionPath: "platonic-query-slot-decode",
+            PlatonicConfidence: arithmetic.Confidence,
+            AppliedBiasCount: 0,
+            AverageBiasMagnitude: 0.0,
+            ChunksGenerated: 1,
+            PlatonicHopCount: 1);
+        return true;
+    }
+
+    /// <summary>
+    /// PER-COMPONENT GLIDER-BLOCK route (2026-06-14): answers a compact block capability — "compare a b",
+    /// "larger a b", "double|triple x" — by running the corresponding hand-built glider (a composition of
+    /// the reusable blocks: Compare/Branch/Const/Compute/Operand/Literal) on the platonic substrate via
+    /// <see cref="PlatonicGliderInterpreter.TryResolveCapability"/>. The blocks ARE the inference
+    /// mechanism here — there is no GRU-constructed plan. Credited platonic (UsedPlatonicQuery), so
+    /// RequirePlatonicForCorrect counts it and the router learns the capability. Abstains (false) for
+    /// anything that is not one of these compact forms — NL flows through the ML path.
+    /// </summary>
+    private bool TryGenerateFromGliderBlock(GenerationRequest request, out GenerationResult result)
+    {
+        result = default!;
+        if (!_glider.TryResolveCapability(request.Input, out var answer, out var capability))
+            return false;
+
+        var tokens = _tokenizer.Encode(answer, addEos: true)
+            .Take(Math.Max(1, request.MaxNewTokens))
+            .ToArray();
+        if (tokens.Length == 0)
+            return false;
+
+        result = new GenerationResult(
+            Output: _tokenizer.Decode(tokens),
+            GeneratedTokens: tokens,
+            UsedPlatonicQuery: true,
+            UsedNeuralFallback: false,
+            DecisionPath: $"platonic-glider-block:{capability}",
+            PlatonicConfidence: 1.0,
+            AppliedBiasCount: 0,
+            AverageBiasMagnitude: 0.0,
+            ChunksGenerated: 1,
+            PlatonicHopCount: 1);
+        return true;
+    }
+
+    /// <summary>
+    /// The GRU-CONSTRUCTED platonic query: the model itself selects the face operation (learned op
+    /// head, face-derived vocabulary, 0 = abstain) and the operand tokens (learned per-token head),
+    /// and the platonic faces execute the query exactly. This is the learned successor to the compact
+    /// arithmetic grammar — it handles framed natural-language arithmetic ("what is 1 + 1") because
+    /// the GRU LEARNED which tokens are operands and which are framing, from the examples' own
+    /// numeric structure. Ordered AFTER the exact compact parser (which stays authoritative for bare
+    /// expressions) and BEFORE the concept-chain. Abstains — returns false — when the op head says
+    /// none, operands don't resolve, or face-decode quality is poor.
+    /// </summary>
+    private bool TryGenerateFromGruQuery(GenerationRequest request, out GenerationResult result)
+    {
+        result = default!;
+        if (string.IsNullOrWhiteSpace(request.Input))
+            return false;
+
+        var tokenIds = _tokenizer.Encode(request.Input);
+        var (opId, opConfidence, flags) = _model.PredictQuery(tokenIds);
+        if (opId <= 0 || opId >= GenesisNova.Model.GenesisNeuralModel.QueryOpCount || flags.Length != tokenIds.Length)
+            return false;
+
+        // Group the SELECTED tokens into operands, in order: adjacent selected digit tokens merge
+        // into one number (the tokenizer's own digit-run convention); selected word tokens resolve
+        // through the LEARNED relation carrier (one -> 1). Unselected tokens are the framing the GRU
+        // learned to ignore.
+        var vocab = _tokenizer.Vocabulary;
+        string TokenText(int index)
+        {
+            var id = tokenIds[index];
+            return id >= 0 && id < vocab.Count ? vocab[id] : string.Empty;
+        }
+        static bool IsDigitText(string s) => s.Length == 1 && s[0] is >= '0' and <= '9';
+
+        var operands = new List<double>();
+        var i = 0;
+        while (i < flags.Length)
+        {
+            if (!flags[i]) { i++; continue; }
+            var text = TokenText(i);
+            // Unary minus: a selected '-' not preceded by a digit, followed by a selected digit, is
+            // the operand's sign (mirrors the signed-run convention the label derivation supervises).
+            var negative = false;
+            if (text == "-"
+                && i + 1 < flags.Length && flags[i + 1] && IsDigitText(TokenText(i + 1))
+                && (i == 0 || !IsDigitText(TokenText(i - 1))))
+            {
+                negative = true;
+                i++;
+                text = TokenText(i);
+            }
+            if (IsDigitText(text))
+            {
+                var runValue = 0.0;
+                while (i < flags.Length && flags[i] && IsDigitText(TokenText(i)))
+                {
+                    runValue = (runValue * 10.0) + (TokenText(i)[0] - '0');
+                    i++;
+                }
+                operands.Add(negative ? -runValue : runValue);
+                continue;
+            }
+            if (text.Any(char.IsLetter) &&
+                TryResolveTokenToNumber(text, out var digit) &&
+                double.TryParse(digit, System.Globalization.NumberStyles.AllowLeadingSign
+                        | System.Globalization.NumberStyles.AllowDecimalPoint,
+                    System.Globalization.CultureInfo.InvariantCulture, out var wordValue))
+            {
+                operands.Add(wordValue);
+            }
+            i++;
+        }
+        if (operands.Count < 2)
+            return false;
+
+        var left = operands[0];
+        var right = operands[1];
+        var additive = opId is 1 or 2;          // poly face: add/sub
+        var sign = opId is 2 or 4 ? -1.0 : 1.0; // negative face for sub/div
+        if (!TryFaceArithmetic(left, right, additive, sign, out var faceValue, out var quality))
+            return false;
+        if (quality <= 0.50)
+            return false; // decode self-consistency gate — same bar as the assist sub-step path.
+
+        var outTokens = _tokenizer.Encode(FormatNumber(faceValue), addEos: true)
+            .Take(Math.Max(1, request.MaxNewTokens))
+            .ToArray();
+        if (outTokens.Length == 0)
+            return false;
+
+        result = new GenerationResult(
+            Output: _tokenizer.Decode(outTokens),
+            GeneratedTokens: outTokens,
+            UsedPlatonicQuery: true,
+            UsedNeuralFallback: false,
+            DecisionPath: "platonic-gru-query",
+            PlatonicConfidence: Math.Min(quality, opConfidence),
+            AppliedBiasCount: 0,
+            AverageBiasMagnitude: 0.0,
+            ChunksGenerated: 1,
+            PlatonicHopCount: 1);
+        return true;
+    }
+
     private bool TryGenerateFromPlatonicPlan(GenerationRequest request, out GenerationResult result)
     {
         result = default!;
-        if (TryResolveArithmeticQuery(request.Input, out var arithmetic))
-        {
-            var queryTokens = _tokenizer.Encode(arithmetic.ResponseText, addEos: true);
-            var bounded = queryTokens.Take(Math.Max(1, request.MaxNewTokens)).ToArray();
-            result = new GenerationResult(
-                Output: _tokenizer.Decode(bounded),
-                GeneratedTokens: bounded,
-                UsedPlatonicQuery: true,
-                UsedNeuralFallback: false,
-                DecisionPath: "platonic-query-slot-decode",
-                PlatonicConfidence: arithmetic.Confidence,
-                AppliedBiasCount: 0,
-                AverageBiasMagnitude: 0.0,
-                ChunksGenerated: 1,
-                PlatonicHopCount: 1);
+        if (TryGenerateFromArithmeticQuery(request, out result))
             return true;
-        }
+        // The GRU-constructed query runs after the exact compact parser (bare expressions stay on the
+        // authoritative path) and before the concept-chain (so framed arithmetic doesn't fall into a
+        // relational text walk).
+        if (TryGenerateFromGruQuery(request, out result))
+            return true;
 
         var anchors = ExtractConceptAnchors(request.Input);
         if (anchors.Count == 0)
@@ -663,7 +855,14 @@ public sealed class GenesisInferenceEngine
         if (string.IsNullOrWhiteSpace(conceptResult.Text))
             return false;
 
-        var tokens = _tokenizer.Encode(conceptResult.Text, addEos: true)
+        // The chain is a SEARCH WALK, not the surface answer: its text concatenates every beam
+        // candidate across every hop ("fruit orange banana grape" for 'apple', "1 0 2 3" for 'one'),
+        // which was the root of the answer-wrapped-in-noise outputs. The platonic-direct ANSWER is
+        // the TOP retrieval — the first selected concept, i.e. the highest-scoring hop-1 candidate —
+        // with the rest of the walk retained as evidence, not emitted as text.
+        var topConcept = conceptResult.Text.Split(
+            (char[]?)null, StringSplitOptions.RemoveEmptyEntries)[0];
+        var tokens = _tokenizer.Encode(topConcept, addEos: true)
             .Take(Math.Max(1, request.MaxNewTokens))
             .ToArray();
         if (tokens.Length == 0)
@@ -719,7 +918,6 @@ public sealed class GenesisInferenceEngine
             IsExplicitExpression: isExplicitArithmeticExpression);
 
         var operationName = ToOperationName(op);
-        _transformLibrary?.RecordSuccess(operationName);
         UpdateAccumulatorFromInference(operationName, input, resolution.ResponseText);
         return true;
     }
@@ -1100,7 +1298,14 @@ public sealed class GenesisInferenceEngine
     {
         var concepts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         AddTokens(inputTokens, concepts);
-        AddTokens(generatedTokens, concepts);
+        // GENERATED tokens are deliberately NOT added. The platonic bias must represent the QUERY's
+        // evidence, not compound on the model's own output: feeding the emitted answer back made its
+        // platonic SIBLINGS the most-boosted tokens (answer "fruit" → boost grape/banana/orange) while
+        // EOS is never biased, so the boosted siblings always outscored the LEARNED stop and decode
+        // cascaded through the neighbourhood instead of terminating ("fruit grape banana orange",
+        // "paris ratio-7", "1023"). The NN learns termination from data (every target ends in EOS);
+        // the bias layer must not override it. (generatedTokens is retained in the signature because
+        // the working-context callers still pass it — it is simply no longer a bias source.)
         if (checkpointContextConcepts is not null)
         {
             foreach (var concept in checkpointContextConcepts)
@@ -1155,7 +1360,12 @@ public sealed class GenesisInferenceEngine
             .Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .Select(t => t.Trim('?', '!', '.', ',', ';', ':', '(', ')', '[', ']', '"', '\''))
             .Select(t => t.ToLowerInvariant())
-            .Where(t => t.Length > 1)
+            // Keep single-char DIGIT tokens as concept anchors: a bare number ("3") is a legitimate
+            // concept with a learned relation to its word, and excluding it sent digit→word to the
+            // neural path. (Earlier reverted because at the DEGENERATE test dim — face 32, no free
+            // region — the concept-chain returned a numeric neighbour; being re-validated at production
+            // face dim where the free region exists.) Stray single letters still dropped; ContainsConcept gates.
+            .Where(t => t.Length > 1 || (t.Length == 1 && char.IsDigit(t[0])))
             .Where(t => _memory.ContainsConcept(t))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .Take(8)

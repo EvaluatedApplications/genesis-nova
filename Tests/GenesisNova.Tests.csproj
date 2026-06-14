@@ -10,12 +10,23 @@
   <ItemGroup>
     <PackageReference Include="coverlet.collector" Version="6.0.0" />
     <PackageReference Include="EvalApp.Consumer" Version="1.0.12" />
+    <!-- CUDA native runtime assets only flow to the test output via a DIRECT package reference (a
+         transitive ProjectReference brings the managed assembly but defaults to the CPU libtorch).
+         Without this, torch.cuda_is_available() is false in the test process and every test trains on
+         CPU despite GenesisNovaConfig defaulting to Backend=Gpu. -->
+    <PackageReference Include="TorchSharp" Version="0.107.0" />
+    <PackageReference Include="TorchSharp-cuda-windows" Version="0.107.0" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.8.0" />
     <PackageReference Include="xunit" Version="2.5.3" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.5.3" />
   </ItemGroup>
   <ItemGroup>
     <Using Include="Xunit" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Each test class is its own collection and owns its model + PlatonicSpaceMemory (no shared
+         state, no disk persistence from raw trainer/model), so collections run fully in parallel. -->
+    <None Update="xunit.runner.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\src\GenesisNova.csproj" />

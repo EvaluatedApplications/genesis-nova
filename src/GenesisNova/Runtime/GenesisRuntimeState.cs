@@ -17,7 +17,12 @@ public sealed class GenesisRuntimeState
         Config = config;
         Tokenizer = new WhitespaceGenesisTokenizer();
         Model = new GenesisNeuralModel(config);
-        Memory = new PlatonicSpaceMemory(faceDimension: Math.Max(4, config.HiddenSize / 2), seed: config.Seed);
+        Memory = new PlatonicSpaceMemory(
+            faceDimension: config.FaceDimension,
+            seed: config.Seed,
+            maxNodes: config.MaxPlatonicNodes,
+            maxRelations: config.MaxPlatonicRelations);
+        GliderInterpreter = new PlatonicGliderInterpreter(Memory);
         Conversation = new GenesisConversationMemory();
         Trainer = new GenesisTrainer(Tokenizer, Model, Memory, config);
         Orchestrator = new GenesisTrainingOrchestrator(Trainer, config);
@@ -27,7 +32,6 @@ public sealed class GenesisRuntimeState
             Memory,
             ResolvePlatonicCheckpointPath,
             Trainer.FoldPathDiscovery,
-            Trainer.TransformLibrary,
             Trainer.TransformAccumulator,
             // Production enables the exact direct face-arithmetic route: when the router selects
             // platonic-direct for a compact arithmetic query, it is answered exactly via the face
@@ -40,6 +44,10 @@ public sealed class GenesisRuntimeState
     public WhitespaceGenesisTokenizer Tokenizer { get; private set; }
     public GenesisNeuralModel Model { get; private set; }
     public PlatonicSpaceMemory Memory { get; private set; }
+    // Reusable glider blocks (Operand/Literal/Hop/Compute/Seq) made first-class in the runtime: the
+    // deterministic interpreter that executes a composition of blocks on the platonic physics. Available
+    // for hand-built or (future) GRU-constructed gliders; see PROJECT_GLIDER.md.
+    public PlatonicGliderInterpreter GliderInterpreter { get; private set; }
     public GenesisConversationMemory Conversation { get; private set; }
     public GenesisTrainer Trainer { get; private set; }
     public GenesisTrainingOrchestrator Orchestrator { get; private set; }
@@ -57,9 +65,14 @@ public sealed class GenesisRuntimeState
         Config = config;
         Tokenizer = tokenizer;
         Model = model;
-        Memory = new PlatonicSpaceMemory(faceDimension: Math.Max(4, config.HiddenSize / 2), seed: config.Seed);
+        Memory = new PlatonicSpaceMemory(
+            faceDimension: config.FaceDimension,
+            seed: config.Seed,
+            maxNodes: config.MaxPlatonicNodes,
+            maxRelations: config.MaxPlatonicRelations);
         if (platonicSpaceSnapshot is not null)
             Memory.ImportSnapshot(platonicSpaceSnapshot);
+        GliderInterpreter = new PlatonicGliderInterpreter(Memory);
         Conversation = new GenesisConversationMemory();
         Trainer = new GenesisTrainer(Tokenizer, Model, Memory, config);
         ImportTrainerLearningState(trainerLearningStateJson);
@@ -72,7 +85,6 @@ public sealed class GenesisRuntimeState
             Memory,
             ResolvePlatonicCheckpointPath,
             Trainer.FoldPathDiscovery,
-            Trainer.TransformLibrary,
             Trainer.TransformAccumulator,
             // Production enables the exact direct face-arithmetic route (see ctor above).
             enableDiagnosticFaceArithmeticShortcut: true);

@@ -254,7 +254,15 @@ internal sealed class PlatonicLattice
             faces.Add((double[])face.Clone());
         }
 
-        _semanticTree = new VPTree(names.ToArray(), faces.ToArray());
+        // FACE-AWARE semantic KNN: compare only the SEMANTIC face [WordFaceStart..dim) so value
+        // proximity (numeric face) and spelling (char face) cannot contaminate relatedness — the genesis
+        // rule that stops "3 is nearest 4" from dominating semantic retrieval. Falls back to the whole
+        // vector when there is no word/semantic face at this dimension.
+        var faceArray = faces.ToArray();
+        var dim = faceArray.Length > 0 ? faceArray[0].Length : 0;
+        var semanticStart = GenesisNova.Core.FaceLayout.WordFaceStart(dim);
+        var rangeStart = (semanticStart > 0 && semanticStart < dim) ? semanticStart : 0;
+        _semanticTree = new VPTree(names.ToArray(), faceArray, rangeStart: rangeStart, rangeEnd: dim);
         _semanticDirty = false;
         _mutationsSinceBuild = 0;
     }

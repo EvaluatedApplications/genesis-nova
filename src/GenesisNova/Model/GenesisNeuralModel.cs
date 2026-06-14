@@ -50,6 +50,22 @@ public class GenesisNeuralModel
     private TorchSharp.Modules.Parameter? _routeWT;
     private TorchSharp.Modules.Parameter? _routeB;
 
+    // Platonic-QUERY construction heads: the GRU learns to CONSTRUCT the platonic query itself
+    // (which face operation, which input tokens are operands) instead of a hardcoded grammar
+    // extracting them. Op vocabulary is face-derived ({poly,log} × {+,−} + abstain), see
+    // GenesisQueryLabel. Operation head reads the final shared-GRU hidden ([hidden, QueryOpCount]);
+    // the operand head scores EVERY per-token hidden ([hidden, 1], sigmoid → "is this an operand").
+    // Lazily initialized on first supervised query label (like the route head); trained by autograd
+    // CE/BCE losses folded into the shared backward pass, so query construction co-shapes the
+    // encoder. Not yet persisted in ModelSnapshot — heads retrain after Import (graceful, like a
+    // fresh route head).
+    public const int QueryOpCount = 5; // 0=none/abstain, 1=add, 2=sub, 3=mul, 4=div
+    private const double QueryLossWeight = 0.25;
+    private TorchSharp.Modules.Parameter? _queryOpWT;      // [hidden, QueryOpCount]
+    private TorchSharp.Modules.Parameter? _queryOpB;       // [QueryOpCount]
+    private TorchSharp.Modules.Parameter? _queryOperandWT; // [hidden, 1]
+    private TorchSharp.Modules.Parameter? _queryOperandB;  // [1]
+
     // Learned edit-head: predicts HOW STRONGLY the platonic space should be edited for a given
     // input context. Shape mirrors the route head but emits a single scalar: _editWT is [hidden, 1]
     // and _editB is [1]; PredictEditMagnitude pools the input embeddings, applies this linear layer
@@ -63,10 +79,13 @@ public class GenesisNeuralModel
     private TorchSharp.Modules.Parameter? _editWT;
     private TorchSharp.Modules.Parameter? _editB;
 
+    private double _currentLearningRate;
+
     public GenesisNeuralModel(GenesisNovaConfig config)
     {
         _config = config;
         _hiddenSize = config.HiddenSize;
+        _currentLearningRate = config.LearningRate;
 
         // Training uses CUDA when the backend allows it; otherwise fall back to CPU.
         _trainingDevice = SelectTrainingDevice(config);
@@ -141,9 +160,10 @@ public class GenesisNeuralModel
         int? disallowToken = null,
         IReadOnlyCollection<int>? penalizedTokens = null,
         double repetitionPenalty = 0.0,
-        IReadOnlyDictionary<int, double>? tokenBiases = null)
+        IReadOnlyDictionary<int, double>? tokenBiases = null,
+        int? stopToken = null)
     {
-        return PredictNextTokenGpu(inputTokens, previousToken, stepIndex, disallowToken, penalizedTokens, repetitionPenalty, tokenBiases);
+        return PredictNextTokenGpu(inputTokens, previousToken, stepIndex, disallowToken, penalizedTokens, repetitionPenalty, tokenBiases, stopToken);
     }
 
     public TrainingLoss TrainExample(
@@ -151,9 +171,10 @@ public class GenesisNeuralModel
         IReadOnlyList<int> targetTokens,
         int bosTokenId,
         double lossScale = 1.0,
-        int? routeLabel = null)
+        int? routeLabel = null,
+        GenesisQueryLabel? queryLabel = null)
     {
-        return TrainExampleGpu(inputTokens, targetTokens, bosTokenId, lossScale, routeLabel);
+        return TrainExampleGpu(inputTokens, targetTokens, bosTokenId, lossScale, routeLabel, queryLabel);
     }
 
     public ModelSnapshot Export()
@@ -214,7 +235,8 @@ public class GenesisNeuralModel
         int? disallowToken,
         IReadOnlyCollection<int>? penalizedTokens,
         double repetitionPenalty,
-        IReadOnlyDictionary<int, double>? tokenBiases)
+        IReadOnlyDictionary<int, double>? tokenBiases,
+        int? stopToken = null)
     {
         EnsureModelInitialized();
         EnsureGruInitialized();
@@ -261,6 +283,20 @@ public class GenesisNeuralModel
             }
         }
 
+        // LEARNED-STOP SOVEREIGNTY: platonic token biases are evidence for choosing CONTENT — they
+        // must refine WHICH token, never WHETHER to stop. The stop token can never receive a bias
+        // (it is not a platonic concept), so once the answer is emitted, biased sibling concepts
+        // would always outscore the never-biased stop and decode would cascade through the
+        // neighbourhood ("fruit grape banana orange") even though the model has LEARNED to stop
+        // (empirically: raw after-answer argmax is EOS 4/4 with biases off). So when the UNBIASED
+        // decoder selects the stop token, return it without applying biases.
+        if (stopToken.HasValue && tokenBiases is not null)
+        {
+            var unbiasedBest = ArgMax(scores);
+            if (unbiasedBest == stopToken.Value)
+                return unbiasedBest;
+        }
+
         if (tokenBiases is not null)
         {
             foreach (var (token, bias) in tokenBiases)
@@ -278,12 +314,17 @@ public class GenesisNeuralModel
         IReadOnlyList<int> targetTokens,
         int bosTokenId,
         double lossScale,
-        int? routeLabel)
+        int? routeLabel,
+        GenesisQueryLabel? queryLabel = null)
     {
         EnsureModelInitialized();
         EnsureGruInitialized();
         if (routeLabel is >= 0 and < NumRoutes)
             EnsureRouteHeadInitialized();
+        var superviseQuery = queryLabel is { OperationId: >= 0 and < QueryOpCount } ql
+            && ql.OperandMask.Length == inputTokens.Count;
+        if (superviseQuery)
+            EnsureQueryHeadsInitialized();
 
         double totalLoss = 0.0;
         var prev = bosTokenId;
@@ -302,7 +343,10 @@ public class GenesisNeuralModel
             // SHARED ENCODER: run the GRU over the INPUT tokens to produce hInput, the single learned
             // representation that both the token decoder (as its initial hidden) and the route head
             // read. All encoder intermediates are tracked in forwardTensors for post-backward disposal.
-            var hInput = EncodeInput(inputTokens, forwardTensors, _trainingDevice);
+            // When query supervision is present, also collect the per-token hidden states for the
+            // operand-selection head.
+            var perTokenStates = superviseQuery ? new List<torch.Tensor>() : null;
+            var hInput = EncodeInput(inputTokens, forwardTensors, _trainingDevice, perTokenStates);
 
             // DECODER: start the recurrence from hInput and step the SAME GRU once per target token,
             // feeding the previous (teacher-forced) token's embedding. Per-step hidden h_t feeds the
@@ -377,6 +421,53 @@ public class GenesisNeuralModel
                 }
             }
 
+            if (superviseQuery && perTokenStates is { Count: > 0 })
+            {
+                var label = queryLabel!.Value;
+
+                // OPERATION head: CE on the final shared-GRU hidden — which face op does this input ask
+                // for? Backprops into the shared encoder alongside the token/route losses.
+                var opLogits = hInput.matmul(_queryOpWT!) + _queryOpB!;
+                forwardTensors.Add(opLogits);
+                var opBatch = opLogits.unsqueeze(0);
+                forwardTensors.Add(opBatch);
+                var opTarget = tensor(new long[] { label.OperationId }, dtype: ScalarType.Int64, device: _trainingDevice);
+                var opLoss = nn.functional.cross_entropy(opBatch, opTarget);
+                opTarget.Dispose();
+                forwardTensors.Add(opLoss);
+
+                // OPERAND head: per-token BCE — is THIS token an operand? Scores each per-token hidden.
+                var operandScores = new torch.Tensor[perTokenStates.Count];
+                for (var t = 0; t < perTokenStates.Count; t++)
+                {
+                    var score = perTokenStates[t].matmul(_queryOperandWT!) + _queryOperandB!;
+                    forwardTensors.Add(score);
+                    operandScores[t] = score;
+                }
+                var scoresVec = cat(operandScores, 0);
+                forwardTensors.Add(scoresVec);
+                var maskTarget = tensor(
+                    label.OperandMask.Select(m => m ? 1.0f : 0.0f).ToArray(),
+                    dtype: ScalarType.Float32, device: _trainingDevice);
+                var operandLoss = nn.functional.binary_cross_entropy_with_logits(scoresVec, maskTarget);
+                maskTarget.Dispose();
+                forwardTensors.Add(operandLoss);
+
+                var opPlusOperand = opLoss + operandLoss;
+                forwardTensors.Add(opPlusOperand);
+                var queryLoss = opPlusOperand * QueryLossWeight;
+                forwardTensors.Add(queryLoss);
+                if (accumulatedLoss is null)
+                {
+                    accumulatedLoss = queryLoss;
+                }
+                else
+                {
+                    accumulatedLoss = accumulatedLoss + queryLoss;
+                    forwardTensors.Add(accumulatedLoss);
+                }
+            }
+
             exStart.Stop();
             var backStart = System.Diagnostics.Stopwatch.StartNew();
             
@@ -423,15 +514,40 @@ public class GenesisNeuralModel
         return new TrainingLoss(totalLoss / Math.Max(1, targetTokens.Count), RouteLoss: routeLossValue);
     }
 
+    /// <summary>
+    /// DIAGNOSTIC TOGGLE — defaults true (production behaviour). When false, <see
+    /// cref="ObserveRouteClassWeight"/> returns 1.0 so the route loss is UNWEIGHTED. Used to test
+    /// whether inverse-frequency class balancing is causally responsible for router-confidence
+    /// erosion under broad training. Counts are still tracked. Not a production switch.
+    /// </summary>
+    internal bool RouteClassBalanceEnabled { get; set; } = true;
+
     private double ObserveRouteClassWeight(int routeLabel)
     {
         lock (_routeClassBalanceLock)
         {
             _routeClassCounts[routeLabel]++;
+            if (!RouteClassBalanceEnabled)
+                return 1.0;
             var total = _routeClassCounts.Sum();
             var classCount = Math.Max(1L, _routeClassCounts[routeLabel]);
             var weight = total / (double)(NumRoutes * classCount);
             return Math.Clamp(weight, 0.25, 4.0);
+        }
+    }
+
+    /// <summary>
+    /// Snapshot of the cumulative SUPERVISED route-label counts (index = route id). Seeded at
+    /// {1,1,1} (Laplace) and incremented only when a training example carried a route label — so
+    /// route 0 (never labelled by <c>ResolveRouteLabel</c>) stays at its seed, and the route-1 vs
+    /// route-2 ratio exposes the class imbalance the balance weight reacts to. Diagnostic only.
+    /// </summary>
+    public IReadOnlyList<long> RouteClassCounts
+    {
+        get
+        {
+            lock (_routeClassBalanceLock)
+                return new[] { _routeClassCounts[0], _routeClassCounts[1], _routeClassCounts[2] };
         }
     }
     
@@ -485,41 +601,68 @@ public class GenesisNeuralModel
     /// 
     /// A full implementation would have 3 separate heads with attention mechanisms.
     /// </summary>
-    public GenesisNova.Inference.PlatonicQuery GenerateQuery(
-        IReadOnlyList<int> inputTokens,
-        int bosTokenId = 0)
+    /// <summary>
+    /// The GRU CONSTRUCTS its own platonic query from the raw input: which face operation the input
+    /// asks for (softmax over the face-derived op vocabulary, 0 = abstain) and which tokens are the
+    /// operands (per-token sigmoid). This replaces the pre-GRU <c>GenerateQuery</c> stub — the learned
+    /// successor to the hardcoded arithmetic grammar. Returns op 0 (abstain) with empty flags until
+    /// the heads have been supervised at least once, so callers degrade gracefully.
+    /// </summary>
+    public (int OperationId, double Confidence, bool[] OperandFlags) PredictQuery(IReadOnlyList<int> inputTokens)
     {
-        using var noGrad = TorchSharp.torch.no_grad();
+        if (_queryOpWT is null || inputTokens.Count == 0)
+            return (0, 0.0, Array.Empty<bool>());
+
         EnsureModelInitialized();
-        
-        // Encode input
-        var inputEmbedding = MeanEmbeddingTensor(inputTokens).detach().cpu().data<float>().ToArray().Select(x => (double)x).ToArray();
-        
-        // Generate operand mask (all tokens are operands for now)
-        var operandMask = Enumerable.Repeat(true, inputTokens.Count).ToArray();
-        
-        // Operand embeddings: just use input embedding repeated
-        var operandEmbeddings = new[] { inputEmbedding };
-        
-        // Operation embedding: normalized input
-        var operationEmbedding = Normalize(inputEmbedding);
-        
-        return new(
-            OperationEmbedding: operationEmbedding,
-            OperationConfidence: 0.5,  // Medium confidence for now
-            OperandMask: operandMask,
-            OperandEmbeddings: operandEmbeddings,
-            PredictedResultEmbedding: inputEmbedding);
+        EnsureGruInitialized();
+        using var noGrad = no_grad();
+
+        var scratch = new List<Tensor>();
+        try
+        {
+            var perTokenStates = new List<Tensor>();
+            var hInput = EncodeInput(inputTokens, scratch, _inferenceDevice, perTokenStates);
+
+            Tensor opW = _queryOpWT, opB = _queryOpB!, owW = _queryOperandWT!, owB = _queryOperandB!;
+            if (_inferenceDevice != _trainingDevice)
+            {
+                opW = _queryOpWT.to(_inferenceDevice); scratch.Add(opW);
+                opB = _queryOpB!.to(_inferenceDevice); scratch.Add(opB);
+                owW = _queryOperandWT!.to(_inferenceDevice); scratch.Add(owW);
+                owB = _queryOperandB!.to(_inferenceDevice); scratch.Add(owB);
+            }
+
+            var opLogits = hInput.matmul(opW) + opB; scratch.Add(opLogits);
+            var opProbs = nn.functional.softmax(opLogits, 0); scratch.Add(opProbs);
+            using var opCpu = opProbs.cpu();
+            var opScores = opCpu.data<float>().ToArray();
+
+            var best = 0;
+            for (var i = 1; i < opScores.Length; i++)
+                if (opScores[i] > opScores[best])
+                    best = i;
+
+            var flags = new bool[perTokenStates.Count];
+            for (var t = 0; t < perTokenStates.Count; t++)
+            {
+                var score = perTokenStates[t].matmul(owW) + owB; scratch.Add(score);
+                var prob = torch.sigmoid(score); scratch.Add(prob);
+                using var probCpu = prob.cpu();
+                flags[t] = probCpu.data<float>()[0] > 0.5f;
+            }
+
+            return (best, opScores.Length > 0 ? opScores[best] : 0.0, flags);
+        }
+        finally
+        {
+            foreach (var t in scratch)
+            {
+                try { t?.Dispose(); } catch { }
+            }
+        }
     }
-    
-    private static double[] Normalize(double[] vector)
-    {
-        var norm = Math.Sqrt(vector.Sum(x => x * x));
-        if (norm < 1e-10)
-            return vector;
-        return vector.Select(x => x / norm).ToArray();
-    }
-    
+
+
     /// <summary>Clone parameters to break computation graph chain after epoch.</summary>
     public void CloneParametersToBreakGraph()
     {
@@ -562,6 +705,27 @@ public class GenesisNeuralModel
                 _editB = new TorchSharp.Modules.Parameter(ebClone, true);
                 try { oldEW.Dispose(); } catch { }
                 try { oldEB.Dispose(); } catch { }
+            }
+
+            // Platonic-query construction heads — clone+detach like the route head (autograd params).
+            if (_queryOpWT is not null)
+            {
+                var qoClone = _queryOpWT.clone().detach().to(_trainingDevice);
+                var qobClone = _queryOpB!.clone().detach().to(_trainingDevice);
+                var qwClone = _queryOperandWT!.clone().detach().to(_trainingDevice);
+                var qwbClone = _queryOperandB!.clone().detach().to(_trainingDevice);
+                var oldQo = _queryOpWT;
+                var oldQob = _queryOpB;
+                var oldQw = _queryOperandWT;
+                var oldQwb = _queryOperandB;
+                _queryOpWT = new TorchSharp.Modules.Parameter(qoClone, true);
+                _queryOpB = new TorchSharp.Modules.Parameter(qobClone, true);
+                _queryOperandWT = new TorchSharp.Modules.Parameter(qwClone, true);
+                _queryOperandB = new TorchSharp.Modules.Parameter(qwbClone, true);
+                try { oldQo.Dispose(); } catch { }
+                try { oldQob!.Dispose(); } catch { }
+                try { oldQw!.Dispose(); } catch { }
+                try { oldQwb!.Dispose(); } catch { }
             }
 
             // SHARED GRU gate weights/biases — clone+detach to break the graph chain, mirroring the
@@ -776,7 +940,11 @@ public class GenesisNeuralModel
     /// appended to <paramref name="scratch"/> for disposal after backward(); the returned tensor is
     /// the live graph leaf into hInput and is NOT disposed here.
     /// </summary>
-    private Tensor EncodeInput(IReadOnlyList<int> inputTokens, List<Tensor> scratch, Device device)
+    private Tensor EncodeInput(
+        IReadOnlyList<int> inputTokens,
+        List<Tensor> scratch,
+        Device device,
+        List<Tensor>? perTokenStates = null)
     {
         EnsureGruInitialized();
         Tensor h = zeros(new long[] { _hiddenSize }, dtype: ScalarType.Float32, device: device);
@@ -787,6 +955,9 @@ public class GenesisNeuralModel
             var emb = GetEmbeddingTensor(tok, device);
             scratch.Add(emb);
             h = GruStep(emb, h, scratch, device);
+            // Per-token hidden states feed the query operand head ("is THIS token an operand?").
+            // They are GruStep outputs already tracked in scratch, so no extra disposal burden.
+            perTokenStates?.Add(h);
         }
 
         return h;
@@ -801,6 +972,22 @@ public class GenesisNeuralModel
             ((rand(new long[] { _hiddenSize, NumRoutes }, device: _trainingDevice) * 2.0) - 1.0) * 0.05, true);
         _routeB = new TorchSharp.Modules.Parameter(
             zeros(new long[] { NumRoutes }, dtype: ScalarType.Float32, device: _trainingDevice), true);
+        RecreateOptimizer();
+    }
+
+    private void EnsureQueryHeadsInitialized()
+    {
+        if (_queryOpWT is not null)
+            return;
+
+        _queryOpWT = new TorchSharp.Modules.Parameter(
+            ((rand(new long[] { _hiddenSize, QueryOpCount }, device: _trainingDevice) * 2.0) - 1.0) * 0.05, true);
+        _queryOpB = new TorchSharp.Modules.Parameter(
+            zeros(new long[] { QueryOpCount }, dtype: ScalarType.Float32, device: _trainingDevice), true);
+        _queryOperandWT = new TorchSharp.Modules.Parameter(
+            ((rand(new long[] { _hiddenSize, 1 }, device: _trainingDevice) * 2.0) - 1.0) * 0.05, true);
+        _queryOperandB = new TorchSharp.Modules.Parameter(
+            zeros(new long[] { 1 }, dtype: ScalarType.Float32, device: _trainingDevice), true);
         RecreateOptimizer();
     }
 
@@ -1076,6 +1263,26 @@ public class GenesisNeuralModel
             try { oldEB?.Dispose(); } catch { }
         }
 
+        // Platonic-query heads are [oldHidden, QueryOpCount]/[oldHidden, 1] — incompatible after a
+        // hidden resize (the runtime auto-scales hidden to VRAM on start). Dispose and null them so
+        // they lazily reinitialize at the new hidden size on the next supervised query label —
+        // leaving the old-shape parameters registered corrupts the optimizer/forward.
+        if (_queryOpWT is not null)
+        {
+            var oldQo = _queryOpWT;
+            var oldQob = _queryOpB;
+            var oldQw = _queryOperandWT;
+            var oldQwb = _queryOperandB;
+            _queryOpWT = null;
+            _queryOpB = null;
+            _queryOperandWT = null;
+            _queryOperandB = null;
+            try { oldQo.Dispose(); } catch { }
+            try { oldQob?.Dispose(); } catch { }
+            try { oldQw?.Dispose(); } catch { }
+            try { oldQwb?.Dispose(); } catch { }
+        }
+
         // SHARED GRU gate weights are [3*oldHidden, oldHidden] — incompatible after a hidden resize;
         // reinitialize a fresh untrained GRU at the new hidden size (same init as EnsureGruInitialized).
         // We do NOT attempt to copy old weights: the gate blocks are stacked [3h,h] so a grow would need
@@ -1120,7 +1327,33 @@ public class GenesisNeuralModel
         if (_gruWhh is not null) parameters.Add(_gruWhh!);
         if (_gruBih is not null) parameters.Add(_gruBih!);
         if (_gruBhh is not null) parameters.Add(_gruBhh!);
-        _optimizer = torch.optim.SGD(parameters, _config.LearningRate);
+        // Platonic-query construction heads — autograd-trained (CE/BCE), unlike the REINFORCE edit head.
+        if (_queryOpWT is not null) parameters.Add(_queryOpWT);
+        if (_queryOpB is not null) parameters.Add(_queryOpB!);
+        if (_queryOperandWT is not null) parameters.Add(_queryOperandWT!);
+        if (_queryOperandB is not null) parameters.Add(_queryOperandB!);
+        _optimizer = torch.optim.SGD(parameters, _currentLearningRate);
+    }
+
+    /// <summary>
+    /// Current SGD step size. Defaults to <c>config.LearningRate</c> but is ADJUSTABLE so a training
+    /// regime can ANNEAL it — the single most important lever against the "reaches ~90% then
+    /// oscillates" failure: a fixed step overshoots the optimum once most examples are right, so the
+    /// last hard ones flip-flop forever. The optimizer is rebuilt every step (CloneParametersToBreakGraph
+    /// → RecreateOptimizer), so a new rate takes effect on the very next step.
+    /// </summary>
+    public double LearningRate
+    {
+        get => _currentLearningRate;
+        set
+        {
+            var clamped = Math.Clamp(value, 1e-6, 10.0);
+            if (Math.Abs(clamped - _currentLearningRate) < 1e-12)
+                return;
+            _currentLearningRate = clamped;
+            if (_optimizer is not null)
+                RecreateOptimizer();
+        }
     }
 
     private void ReplaceModelParameters(
@@ -1159,6 +1392,18 @@ public class GenesisNeuralModel
         try { _editB?.Dispose(); } catch { }
         _editWT = null;
         _editB = null;
+        // Platonic-query construction heads. MUST be torn down with the rest: leaving them alive
+        // across Import (auto-resume restart) registers STALE parameters from the previous session's
+        // graph epoch into the fresh optimizer, corrupting every subsequent training step. They are
+        // not persisted, so they lazily reinitialize on the first supervised query label.
+        try { _queryOpWT?.Dispose(); } catch { }
+        try { _queryOpB?.Dispose(); } catch { }
+        try { _queryOperandWT?.Dispose(); } catch { }
+        try { _queryOperandB?.Dispose(); } catch { }
+        _queryOpWT = null;
+        _queryOpB = null;
+        _queryOperandWT = null;
+        _queryOperandB = null;
         // SHARED GRU gate weights/biases.
         try { _gruWih?.Dispose(); } catch { }
         try { _gruWhh?.Dispose(); } catch { }

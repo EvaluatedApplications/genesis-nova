@@ -1,4 +1,5 @@
 using System;
+using GenesisNova.Cognition;
 using GenesisNova.Core;
 using Xunit;
 using Xunit.Abstractions;
@@ -20,7 +21,7 @@ namespace GenesisNova.Tests;
 /// </summary>
 public sealed class NumericParsingTests
 {
-    private const int Dim = 64;
+    private static readonly int Dim = ProductionDims.FaceDimension;
 
     private readonly ITestOutputHelper _out;
     public NumericParsingTests(ITestOutputHelper output) => _out = output;
@@ -89,5 +90,34 @@ public sealed class NumericParsingTests
         Assert.True(Math.Abs(fiveBad[0]) < 0.05, "'5-' should NOT be numeric");
         Assert.True(Math.Abs(threeHalf[0]) > 0.2, "'3.5' should be numeric");
         Assert.True(Math.Abs(zeroBad[0]) < 0.05, "'0+' should NOT be numeric");
+    }
+}
+
+/// <summary>
+/// The SAME strict-numeric contract, enforced at the OTHER entry point: <see
+/// cref="PlatonicSpaceMemory.TryGetConceptFace"/> (which gates on <c>PlatonicSpaceMemory.TryParseNumber</c>)
+/// must treat a token as numeric iff it is a genuine plain signed decimal. This is a DISTINCT parser
+/// from <see cref="PlatonicFaceComposer"/> above (the composer uses its own NumberStyles parse), so both
+/// are pinned — they must agree, and a regression in either would let "5-" masquerade as a number and
+/// pollute numeric relations / the glider's operand resolve. (Consolidated here from the former
+/// RelationalEquivalenceTests, whose number-word-equivalence experiment was retired — that live carrier
+/// is covered by corenova:number-word-equiv in CoreBootstrapRegimeTests / NumberWordEquivalenceProductionTests.)
+/// </summary>
+public sealed class MemoryNumericGateTests
+{
+    [Theory]
+    [InlineData("0", true)]
+    [InlineData("1", true)]
+    [InlineData("-3", true)]
+    [InlineData("3.5", true)]
+    [InlineData("0+", false)]   // trailing sign — was wrongly parsed as 0 under NumberStyles.Any
+    [InlineData("5-", false)]
+    [InlineData("1+1", false)]  // glued expression — not a number
+    [InlineData("one", false)]
+    public void TryGetConceptFace_TreatsAsNumeric_OnlyForGenuineNumbers(string token, bool expectedNumeric)
+    {
+        var memory = new PlatonicSpaceMemory(faceDimension: ProductionDims.FaceDimension, seed: 1);
+        var isNumeric = memory.TryGetConceptFace(token, out _); // fresh space: true ⟺ parses as a number
+        Assert.Equal(expectedNumeric, isNumeric);
     }
 }

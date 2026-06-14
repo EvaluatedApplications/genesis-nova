@@ -122,6 +122,16 @@ public sealed class GenesisTrainingOrchestrator
         return examples.Take(count).ToList();
     }
 
+    // Anneal step size by proximity to mastery — the curve validated in CoreBootstrapRegime. Keep
+    // FULL steps until success is genuinely high (a sub-target plateau needs more step, not less);
+    // only shrink near the top, where fixed-LR overshoot causes the ~90% oscillation.
+    internal static double AnnealedLearningRateFactor(double successRate) => successRate switch
+    {
+        < 0.92 => 1.00,
+        < 0.97 => 0.30,
+        _ => 0.10,
+    };
+
     public GenesisTrainingReport Train(
         IReadOnlyList<GenesisExample> examples,
         int epochs,
@@ -182,9 +192,27 @@ public sealed class GenesisTrainingOrchestrator
         logger?.Invoke(
             $"[CONFIG] vram_target={targetVramUtilization:F2} reserve_mb={reserveVramMb}");
 
+        // LR ANNEALING — our bootstrap-regime learning applied to the REAL autonomous loop. A fixed
+        // SGD step overshoots once most examples are right, so accuracy plateaus around ~90% and
+        // OSCILLATES (the reported failure). Shrink the step as the round's success rate climbs, but
+        // only NEAR the top — a still-climbing round keeps full steps (annealing a sub-target plateau
+        // starves it and freezes it). Captured here, restored in finally so an annealed rate never
+        // leaks into the next round (the planner re-plans each round at the base rate).
+        var baseLearningRate = _trainer.LearningRate;
+        // CONVERGENCE EARLY-STOP — the regime's StabilityWindow idea applied to the real loop. Once a
+        // round's prompt-answer success holds at mastery, MORE epochs on a mostly-mastered pool just
+        // drift the shared weights (interference) and re-introduce the oscillation; stop instead. The
+        // planner's epoch budget is the give-up bound, not a quota to burn.
+        const double RoundMasterySuccess = 0.97;
+        const int RoundStabilityWindow = 2;
+        var convergedStreak = 0;
+        var epochsRun = 0;
+        try
+        {
         for (var e = 1; e <= Math.Max(1, epochs); e++)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            epochsRun = e; // actual epochs (≤ requested when early-stopped) — drives the report + planner history
             var epochStart = System.Diagnostics.Stopwatch.StartNew();
             var epochSum = 0.0;
             var epochProcessedExampleCount = 0;
@@ -309,6 +337,20 @@ public sealed class GenesisTrainingOrchestrator
                         batchStart = batchEnd;
                         continue;
                     }
+                    if (IsAutogradGraphError(ex))
+                    {
+                        // RESILIENCE for long unattended autonomous runs: a transient TorchSharp autograd
+                        // error ("backward through the graph a second time" / freed saved tensors — seen
+                        // when the edit-head's separate REINFORCE backward coincides with arithmetic-phase
+                        // training) must NOT kill the session. Reset the autograd + optimizer state by
+                        // breaking the graph, skip this batch, and carry on — same policy as the OOM path.
+                        logger?.Invoke(
+                            $"  [BATCH-AUTOGRAD-RECOVER] {batchStart + 1:D3}-{batchEnd:D3} {ex.Message} — resetting graph, skipping batch.");
+                        try { _trainer.CloneParametersToBreakGraph(); } catch { }
+                        RunEmergencyMemoryCleanup(logger);
+                        batchStart = batchEnd;
+                        continue;
+                    }
                     logger?.Invoke($"  [BATCH-ERROR] {batchStart + 1:D3}-{batchEnd:D3} {ex.GetType().Name}: {ex.Message}");
                     throw;
                 }
@@ -343,6 +385,30 @@ public sealed class GenesisTrainingOrchestrator
             var epochSuccessRate = epochPromptAnswer.Length == 0
                 ? 0.0
                 : epochPromptAnswer.Average(x => x.SuccessRate);
+
+            // Anneal for the NEXT epoch by how close this round's prompt-answer success is to mastery.
+            // Pure windowed-text rounds (no prompt-answer examples) report success 0 → full LR, which
+            // is correct: continuous LM loss doesn't have the discrete-accuracy oscillation.
+            if (epochPromptAnswer.Length > 0)
+            {
+                _trainer.LearningRate = baseLearningRate * AnnealedLearningRateFactor(epochSuccessRate);
+                logger?.Invoke($"[ANNEAL] {e}/{epochs} success={epochSuccessRate:P0} lr={_trainer.LearningRate:F4}");
+
+                // Stop once mastery holds — don't overtrain a converged pool into interference drift.
+                if (epochSuccessRate >= RoundMasterySuccess)
+                {
+                    if (++convergedStreak >= RoundStabilityWindow)
+                    {
+                        logger?.Invoke($"[CONVERGED] {e}/{epochs} success={epochSuccessRate:P0} — round mastered, stopping early");
+                        break;
+                    }
+                }
+                else
+                {
+                    convergedStreak = 0;
+                }
+            }
+
             var epochWindowedTokenLoss = epochWindowed.Length == 0
                 ? 0.0
                 : epochWindowed.Average(x => x.AverageTokenLoss);
@@ -350,6 +416,11 @@ public sealed class GenesisTrainingOrchestrator
             logger?.Invoke(
                 $"[EPOCH] {e}/{epochs} prompt_answer_success={epochSuccessRate:P1} " +
                 $"windowed_text_token_loss={epochWindowedTokenLoss:F4}");
+        }
+        }
+        finally
+        {
+            _trainer.LearningRate = baseLearningRate; // never leak an annealed rate to the next round
         }
 
         overallStart.Stop();
@@ -439,7 +510,7 @@ public sealed class GenesisTrainingOrchestrator
         }
 
         return new GenesisTrainingReport(
-            Epochs: Math.Max(1, epochs),
+            Epochs: Math.Max(1, epochsRun),
             ExampleCount: examples.Count,
             AverageLoss: new GenesisStepLoss(
                 TokenLoss: avgTokenLoss,
@@ -567,6 +638,25 @@ public sealed class GenesisTrainingOrchestrator
             current = current.InnerException;
         }
 
+        return false;
+    }
+
+    // A transient TorchSharp autograd error: "Trying to backward through the graph a second time" or
+    // accessing saved tensors after they were freed. Matched by message so the loop can recover (reset
+    // the graph/optimizer) and continue instead of dying mid-run.
+    private static bool IsAutogradGraphError(Exception ex)
+    {
+        for (Exception? e = ex; e is not null; e = e.InnerException)
+        {
+            var m = e.Message;
+            if (string.IsNullOrEmpty(m))
+                continue;
+            if (m.Contains("backward through the graph", StringComparison.OrdinalIgnoreCase) ||
+                m.Contains("second time", StringComparison.OrdinalIgnoreCase) ||
+                m.Contains("have already been freed", StringComparison.OrdinalIgnoreCase) ||
+                (m.Contains("saved", StringComparison.OrdinalIgnoreCase) && m.Contains("freed", StringComparison.OrdinalIgnoreCase)))
+                return true;
+        }
         return false;
     }
 

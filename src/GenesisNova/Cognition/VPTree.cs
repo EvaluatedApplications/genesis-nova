@@ -17,6 +17,10 @@ public sealed class VPTree
     private readonly VPNode? _root;
     private readonly double[][] _points;   // embedding vectors indexed by position
     private readonly string[] _ids;        // concept names indexed by position
+    // FACE-AWARE distance: compare ONLY the dims [_rangeStart.._rangeEnd) so a face-scoped metric (e.g.
+    // the semantic face) shields the numeric/char faces from contaminating the comparison. -1 = to end.
+    private readonly int _rangeStart;
+    private readonly int _rangeEnd;
 
     /// <summary>
     /// Build a tree from parallel arrays of concept names and their face embeddings.
@@ -25,10 +29,13 @@ public sealed class VPTree
     /// <param name="names">Concept name per position.</param>
     /// <param name="embeddings">Face embedding per position (same length as <paramref name="names"/>).</param>
     /// <param name="seed">Deterministic vantage-point selection seed (matches source default of 42).</param>
-    public VPTree(string[] names, double[][] embeddings, int seed = 42)
+    public VPTree(string[] names, double[][] embeddings, int seed = 42, int rangeStart = 0, int rangeEnd = -1)
     {
         if (names.Length != embeddings.Length)
             throw new ArgumentException("names and embeddings must be the same length");
+
+        _rangeStart = Math.Max(0, rangeStart);
+        _rangeEnd = rangeEnd;
 
         if (names.Length == 0)
         {
@@ -180,11 +187,16 @@ public sealed class VPTree
             RangeSearch(node.Right, query, radius, results);
     }
 
-    private static double EuclideanDistance(double[] a, double[] b)
+    // Face-scoped Euclidean distance: only dims [_rangeStart .. min(_rangeEnd, len)) contribute, so the
+    // tree is built AND queried in the same face subspace (e.g. the semantic face), excluding the
+    // numeric/char faces that would otherwise dominate by magnitude / cluster by value or spelling.
+    private double EuclideanDistance(double[] a, double[] b)
     {
         var n = Math.Min(a.Length, b.Length);
+        var end = _rangeEnd < 0 ? n : Math.Min(_rangeEnd, n);
+        var start = Math.Min(_rangeStart, end);
         var sum = 0.0;
-        for (var i = 0; i < n; i++)
+        for (var i = start; i < end; i++)
         {
             var d = a[i] - b[i];
             sum += d * d;

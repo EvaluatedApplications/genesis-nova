@@ -119,24 +119,9 @@ public sealed class GenesisTrainer
     private double? _cachedQualityLoss;
     private int _lastRelationCountForQuality;
     private int _lastQualityComputationStep = int.MinValue;
-    
-    // Phase 1: BridgeConfidence metric (Theory validation)
-    private const int BridgeConfidenceScopeLimit = 64;
-    private const int BridgeConfidenceNeighborLimit = 8;
-    private BridgeConfidenceMetric? _bridgeConfidence;
-    private readonly Dictionary<string, double> _bridgeConfidenceByConcept = new(StringComparer.OrdinalIgnoreCase);
-    
-    // Phase 2: Concept graph (Symbolic structure)
-    private ConceptGraph? _conceptGraph;
-    
-    // Phase 3: Complement pairs (Conservation law)
-    private ComplementPairManager? _complements;
-    
-    // Phase 4: Hypothesis tracking (Epistemic self-awareness)
-    private HypothesisTracker? _hypotheses;
-    
-    // Phase 5: Transform library (Observable capabilities)
-    private TransformLibrary? _transforms;
+    // Per-component glider-block route labeling: lets ResolveRouteLabel recognise the compact block
+    // capabilities (compare/larger/scale) and supervise them as platonic-direct. See PROJECT_GLIDER.md §6.
+    private readonly PlatonicGliderInterpreter _gliderInterpreter;
 
     public GenesisTrainer(
         IGenesisTokenizer tokenizer,
@@ -148,6 +133,7 @@ public sealed class GenesisTrainer
         _tokenizer = tokenizer;
         _model = model;
         _platonicSpace = platonicSpace;
+        _gliderInterpreter = new PlatonicGliderInterpreter(platonicSpace);
         var runtimeConfig = config ?? new GenesisNovaConfig();
         _foldPathDiscovery = new FoldPathDiscovery();
         _transformAccumulator = new TransformAccumulator(Math.Max(4, _platonicSpace.FaceDimension));
@@ -164,34 +150,12 @@ public sealed class GenesisTrainer
             ConservationWeight: 0.1,
             MemoryWeight: 0.05);
         
-        // Initialize all platonic reasoning phases
-        InitializeGenesissPlatonicPhases();
         _inferencePolicy = new GenesisInferenceEngine(
             tokenizer,
             model,
             platonicSpace,
             foldPathDiscovery: _foldPathDiscovery,
-            transformLibrary: _transforms,
             transformAccumulator: _transformAccumulator);
-    }
-    
-    private void InitializeGenesissPlatonicPhases()
-    {
-        // Phase 1: BridgeConfidence metric - initialize with empty graph
-        var emptyGraph = ImmutableDictionary<string, ImmutableHashSet<string>>.Empty;
-        _bridgeConfidence = new BridgeConfidenceMetric(emptyGraph, _ => Array.Empty<(string, double)>());
-        
-        // Phase 2: Concept graph (symbolic structure)
-        _conceptGraph = new ConceptGraph();
-        
-        // Phase 3: Complement pairs (conservation law)
-        _complements = new ComplementPairManager();
-        
-        // Phase 4: Hypothesis tracking (epistemic self-awareness)
-        _hypotheses = new HypothesisTracker();
-        
-        // Phase 5: Transform library (observable capabilities)
-        _transforms = new TransformLibrary();
     }
 
     public int[] EncodeInput(string input)
@@ -204,9 +168,32 @@ public sealed class GenesisTrainer
 
     public FoldPathDiscovery FoldPathDiscovery => _foldPathDiscovery;
     public TransformAccumulator TransformAccumulator => _transformAccumulator;
-    public TransformLibrary? TransformLibrary => _transforms;
     public int TickPatternPromotions => _tickPatternPromotions;
     public int HiddenSize => _model.HiddenSize;
+
+    /// <summary>Current SGD step size — settable so a regime can anneal it (see CoreBootstrapRegime).</summary>
+    public double LearningRate
+    {
+        get => _model.LearningRate;
+        set => _model.LearningRate = value;
+    }
+
+    /// <summary>
+    /// PUNISH NEURAL: when true (default), a prompt-answer example that is output-correct ONLY via the
+    /// NEURAL path (not the platonic tools) does NOT count as correct — so it is not skipped (it keeps
+    /// getting trained, weakness-prioritised) and its creator's success stays low (so the autonomous
+    /// curriculum won't advance it). The mission is to USE the platonic space, not memorise answers
+    /// neurally. Set false to credit any correct output regardless of path.
+    /// </summary>
+    public bool RequirePlatonicForCorrect { get; set; } = true;
+
+    /// <summary>
+    /// PROBE/design toggle: when true, face-computable arithmetic examples do NOT create relational
+    /// operand↔result edges — the face homomorphism already represents the computation. Stops an
+    /// operand like "3" from accumulating dozens of arithmetic co-occurrence relations (3↔-1, 3↔4 …)
+    /// that drown genuine equivalence/retrieval relations (3↔three). Default false = legacy coupling.
+    /// </summary>
+    public bool SuppressArithmeticOperandRelations { get; set; }
     public InferenceTelemetryHint InferenceTelemetryHint => _inferenceTelemetryHint;
     public int SpaceToolParseFailureCount => _spaceToolParseFailureCount;
     public int PendingInferenceIntrospectionCount => _pendingInferenceIntrospection.Count;
@@ -362,7 +349,8 @@ public sealed class GenesisTrainer
             targetTokens,
             _tokenizer.BosTokenId,
             lossScale: weight,
-            routeLabel: ResolveRouteLabel(example));
+            routeLabel: ResolveRouteLabel(example),
+            queryLabel: ResolveQueryLabel(inputTokens, example.Output));
         
         // Break computation graph after training
         _model.CloneParametersToBreakGraph();
@@ -405,7 +393,8 @@ public sealed class GenesisTrainer
             targetTokens,
             _tokenizer.BosTokenId,
             lossScale: weight,
-            routeLabel: ResolveRouteLabel(example));
+            routeLabel: ResolveRouteLabel(example),
+            queryLabel: ResolveQueryLabel(inputTokens, example.Output));
          
         // Break computation graph after each example to allow sequential training
         _model.CloneParametersToBreakGraph();
@@ -563,7 +552,8 @@ public sealed class GenesisTrainer
                    targetTokens,
                    _tokenizer.BosTokenId,
                    lossScale: effectiveWeight,
-                   routeLabel: ResolveRouteLabel(example));
+                   routeLabel: ResolveRouteLabel(example),
+            queryLabel: ResolveQueryLabel(inputTokens, example.Output));
                 totalTokenLoss += loss.TokenLoss * targetTokens.Length * effectiveWeight;
                 totalTokenWeight += targetTokens.Length * effectiveWeight;
              }
@@ -579,14 +569,14 @@ public sealed class GenesisTrainer
                 targetTokens,
                 _tokenizer.BosTokenId,
                 lossScale: effectiveWeight,
-                routeLabel: ResolveRouteLabel(example));
+                routeLabel: ResolveRouteLabel(example),
+            queryLabel: ResolveQueryLabel(inputTokens, example.Output));
              totalTokenLoss += loss.TokenLoss * targetTokens.Length * effectiveWeight;
              totalTokenWeight += targetTokens.Length * effectiveWeight;
           }
                   
           _trainStepCount++;
           MaybeInterleaveMasteredRehearsal();
-          RewardEditHead(example, loss.TokenLoss);
 
           var consistencyLoss = EstimatePlatonicConsistency(concepts, IsNegativeText(example.Output));
           var conservationLoss = EstimateConservationDrift(inputTokens);
@@ -621,6 +611,11 @@ public sealed class GenesisTrainer
           }
 
           _model.CloneParametersToBreakGraph();
+          // Edit-head REINFORCE backward runs AFTER the main autograd graph is broken, so the two
+          // backwards never share graph state — the "backward through the graph a second time" trigger
+          // that surfaced at the arithmetic phase of long autonomous runs. ReinforceEditHead re-encodes a
+          // detached snapshot internally, so it doesn't need the (now freed) main graph.
+          RewardEditHead(example, loss.TokenLoss);
        }
 
        var avgTokenLoss = totalTokenLoss / Math.Max(1.0, totalTokenWeight);
@@ -671,7 +666,23 @@ public sealed class GenesisTrainer
         var predicted = preview.GeneratedTokens
            .Where(t => t != _tokenizer.BosTokenId && t != _tokenizer.EosTokenId && t != _tokenizer.PadTokenId)
            .ToArray();
-        var isCorrect = predicted.Length == expected.Length && predicted.SequenceEqual(expected);
+        // FACE-AWARE return grading: compare by platonic VALUE, not raw tokens, so a digit and its
+        // number-word are both correct ("2" ≡ "two") — honouring the learned equivalence at the gate.
+        // Decode folds digit-run tokens ("1","8" → "18"); the oracle (AnswerEquivalence) uses ground
+        // truth, so it never lets the model self-grade. Non-numeric answers still require exact match.
+        var isCorrect = AnswerEquivalence.Equivalent(_tokenizer.Decode(predicted), _tokenizer.Decode(expected));
+
+        // PUNISH NEURAL: a prompt-answer that's right only via the NEURAL path is NOT counted correct.
+        // It then isn't skipped (keeps training) and doesn't credit the creator's success — pressing
+        // the model to answer via the platonic tools. Windowed-text has no platonic path, so it is
+        // exempt. (A platonic answer sets UsedPlatonicQuery and clears UsedNeuralFallback.)
+        if (isCorrect
+            && RequirePlatonicForCorrect
+            && example.TrainingKind == GenesisTrainingExampleKind.PromptAnswer
+            && !(preview.UsedPlatonicQuery && !preview.UsedNeuralFallback))
+        {
+            isCorrect = false;
+        }
 
         return isCorrect;
     }
@@ -958,6 +969,16 @@ public sealed class GenesisTrainer
             return bareNumberOut ? 1 : 2;
         }
 
+        // Per-component glider-block capabilities (compare/larger/scale): answered by running a hand-built
+        // block composition on the substrate. Exact and space-independent (face arithmetic), so this is a
+        // clean DIRECT (route 1) label from step 0 whenever it reproduces the target — which teaches the
+        // router to send the capability to platonic-direct. See PROJECT_GLIDER.md §6.
+        if (_gliderInterpreter.TryResolveCapability(example.Input ?? string.Empty, out var blockAnswer, out _)
+            && string.Equals(blockAnswer.Trim(), (example.Output ?? string.Empty).Trim(), StringComparison.OrdinalIgnoreCase))
+        {
+            return 1;
+        }
+
         // General (non-arithmetic) modality: the universal platonic op is RETRIEVAL. Label the
         // platonic route whenever the space reproduces the target for this input — relational,
         // functional, lookup, etc. Cheap deterministic space queries only (no generation).
@@ -1018,6 +1039,76 @@ public sealed class GenesisTrainer
         return null;
     }
 
+    /// <summary>
+    /// Derives supervision for the GRU's platonic-query construction heads from the example's OWN
+    /// numeric structure — no surface grammar. The tokenizer emits each digit as its own token, so
+    /// operands are MAXIMAL DIGIT RUNS in the input token sequence. With exactly two runs (L, R) and
+    /// a numeric output O, the operation is whichever single face op satisfies op(L, R) == O
+    /// (add/sub/mul/div). Framing tokens ("what", "is", "plus", "?") are operand-head negatives —
+    /// which is precisely how the GRU LEARNS to ignore irrelevant text. Ambiguous (multiple ops
+    /// match) or non-conforming examples return null: unsupervised, costs nothing.
+    /// </summary>
+    internal GenesisQueryLabel? ResolveQueryLabel(IReadOnlyList<int> inputTokens, string? output)
+    {
+        if (inputTokens.Count == 0 || string.IsNullOrWhiteSpace(output))
+            return null;
+        if (!double.TryParse(output.Trim(), System.Globalization.NumberStyles.AllowLeadingSign
+                | System.Globalization.NumberStyles.AllowDecimalPoint,
+                System.Globalization.CultureInfo.InvariantCulture, out var target))
+            return null;
+
+        var vocab = _tokenizer.Vocabulary;
+        bool IsDigitToken(int id) =>
+            id >= 0 && id < vocab.Count && vocab[id].Length == 1 && vocab[id][0] is >= '0' and <= '9';
+        bool IsMinusToken(int id) => id >= 0 && id < vocab.Count && vocab[id] == "-";
+
+        // Maximal SIGNED digit runs → operand values + their token index ranges. A '-' immediately
+        // before a digit run is UNARY (part of the operand) when it is not itself preceded by a digit
+        // — so "5 + -3" yields operands (5, −3) and stays an ADD, keeping the surface operator and
+        // the supervised face op consistent. (Without this, generator examples with negative second
+        // operands get value-relabelled as the opposite op and the op head learns surface noise.)
+        var runs = new List<(int Start, int End, double Value)>();
+        var i = 0;
+        while (i < inputTokens.Count)
+        {
+            var negative = false;
+            var start = i;
+            if (IsMinusToken(inputTokens[i])
+                && i + 1 < inputTokens.Count && IsDigitToken(inputTokens[i + 1])
+                && (i == 0 || !IsDigitToken(inputTokens[i - 1])))
+            {
+                negative = true;
+                i++;
+            }
+            if (i >= inputTokens.Count || !IsDigitToken(inputTokens[i])) { i = start + 1; continue; }
+            var value = 0.0;
+            while (i < inputTokens.Count && IsDigitToken(inputTokens[i]))
+            {
+                value = (value * 10.0) + (vocab[inputTokens[i]][0] - '0');
+                i++;
+            }
+            runs.Add((start, i, negative ? -value : value));
+        }
+        if (runs.Count != 2)
+            return null;
+
+        var (l, r) = (runs[0].Value, runs[1].Value);
+        var matches = new List<int>();
+        if (Math.Abs((l + r) - target) < 1e-9) matches.Add(1);
+        if (Math.Abs((l - r) - target) < 1e-9) matches.Add(2);
+        if (Math.Abs((l * r) - target) < 1e-9) matches.Add(3);
+        if (Math.Abs(r) > 1e-12 && Math.Abs((l / r) - target) < 1e-9) matches.Add(4);
+        if (matches.Count != 1)
+            return null; // ambiguous (e.g. 2+2 == 2*2) or no face op fits — leave unsupervised.
+
+        var mask = new bool[inputTokens.Count];
+        foreach (var run in runs)
+            for (var t = run.Start; t < run.End; t++)
+                mask[t] = true;
+
+        return new GenesisQueryLabel(matches[0], mask);
+    }
+
     private static IReadOnlyList<string> TokenizeForRouteMatch(string text)
     {
         if (string.IsNullOrWhiteSpace(text))
@@ -1041,48 +1132,6 @@ public sealed class GenesisTrainer
     {
         var weight = 1.0;
         var concepts = ResolveConceptsReadOnly(example);
-        
-        // PHASE 1: BridgeConfidence metric (replaces arbitrary weights with ionization energy)
-        if (_bridgeConfidence != null && concepts.Count > 0 && _conceptGraph != null)
-        {
-            RefreshBridgeConfidenceMetricForConcepts(concepts);
-            var avgBridgeConfidence = concepts
-                .Select(GetBridgeConfidenceForConcept)
-                .DefaultIfEmpty(0.5)
-                .Average();
-            var ionizationEnergy = _bridgeConfidence.ComputeIonizationEnergyFromConfidence(avgBridgeConfidence);
-            
-            // Weight based on how much this concept needs practice (high ionization = low confidence = needs training)
-            // TUNED: Reduced from 3.0 to 0.1 - phases should be subtle, not dominant
-            weight += 0.1 * ionizationEnergy;
-        }
-
-        // PHASE 4: Use hypothesis tracking to boost weight on uncertain concepts
-        if (_hypotheses != null && concepts.Count > 0)
-        {
-            var uncertainConcepts = concepts
-                .Where(c => _hypotheses.GetHypothesisStatus(c) == HypothesisStatus.Conjecture)
-                .Count();
-            if (uncertainConcepts > 0)
-            {
-                // TUNED: Reduced from 0.5 to 0.1
-                weight += 0.1 * ((double)uncertainConcepts / concepts.Count);
-            }
-        }
-
-        // PHASE 3: Apply complement boost for conservation training
-        if (_complements != null && IsNegativeText(example.Output))
-        {
-            // TUNED: Reduced from 1.0 to 0.2
-            weight += 0.2;
-        }
-
-        // PHASE 5: Boost weight when learning new transforms
-        if (_transforms != null && _transforms.Count < 20)
-        {
-            // TUNED: Reduced from 0.3 to 0.1
-            weight += 0.1;
-        }
 
         if (IsNegativeText(example.Output))
             weight += 1.0;
@@ -1097,45 +1146,6 @@ public sealed class GenesisTrainer
 
         return Math.Clamp(weight, 0.5, 4.0);
     }
-
-    private void RefreshBridgeConfidenceMetricForConcepts(IReadOnlyList<string> concepts)
-    {
-        if (_bridgeConfidence is null || _conceptGraph is null)
-            return;
-        if (concepts.Count == 0)
-            return;
-
-        var scopedGraph = _conceptGraph.GetScopedSnapshot(concepts, BridgeConfidenceScopeLimit);
-        if (scopedGraph.Count == 0)
-            return;
-
-        var scopedConcepts = scopedGraph.Keys.ToArray();
-        _bridgeConfidence = new BridgeConfidenceMetric(
-            scopedGraph,
-            symbol => _platonicSpace.GetNearestConcepts(
-                symbol,
-                scopedConcepts,
-                maxNeighbors: BridgeConfidenceNeighborLimit,
-                maxCandidates: BridgeConfidenceScopeLimit));
-
-        var affected = new HashSet<string>(concepts, StringComparer.OrdinalIgnoreCase);
-        foreach (var concept in concepts)
-        {
-            if (!scopedGraph.TryGetValue(concept, out var neighbors))
-                continue;
-
-            foreach (var neighbor in neighbors)
-                affected.Add(neighbor);
-        }
-
-        foreach (var concept in affected)
-            _bridgeConfidenceByConcept[concept] = _bridgeConfidence.ComputeForConcept(concept);
-    }
-
-    private double GetBridgeConfidenceForConcept(string concept)
-        => _bridgeConfidenceByConcept.TryGetValue(concept, out var confidence)
-            ? confidence
-            : 0.5;
 
     private static bool IsNegativeText(string text)
         => text.TrimStart().StartsWith("not ", StringComparison.OrdinalIgnoreCase);
@@ -1321,24 +1331,6 @@ public sealed class GenesisTrainer
             }
         }
 
-        if (_conceptGraph != null && concepts.Count > 0)
-        {
-            _conceptGraph.ObserveExample(concepts, concepts);
-            RefreshBridgeConfidenceMetricForConcepts(concepts);
-        }
-
-        if (_hypotheses != null && concepts.Count > 0)
-        {
-            foreach (var concept in concepts)
-                _hypotheses.ConfirmHypothesis(concept, example.Output);
-        }
-
-        if (_complements != null && concepts.Count > 0)
-        {
-            foreach (var concept in concepts)
-                _ = _complements.GetComplement(concept);
-        }
-
         return concepts;
     }
 
@@ -1419,19 +1411,6 @@ public sealed class GenesisTrainer
         var inputEmbedding = InputEmbeddingComposer.ComposeInput(example.Input, mode, dim);
         var outputEmbedding = InputEmbeddingComposer.GetInputEmbedding(example.Output, dim);
         _transformAccumulator.Learn(arithmetic.OperationConcept, inputEmbedding, outputEmbedding);
-
-        RegisterTransformCapability(arithmetic.OperationConcept);
-    }
-
-    private void RegisterTransformCapability(string operation)
-    {
-        if (_transforms is null)
-            return;
-        if (!_transformAccumulator.TryGetTransform(operation, out var transform))
-            return;
-
-        var vector = transform.Vector.Select(v => (float)v).ToArray();
-        _transforms.RegisterTransform(operation, tensor(vector));
     }
 
     private void RunTickPatternLoop(GenesisExample example, IReadOnlyList<string> concepts)
@@ -1620,7 +1599,7 @@ public sealed class GenesisTrainer
         if (existing is not null)
             return existing.Id;
 
-        var baseConfidence = GetBridgeConfidenceForConcept(symbol);
+        var baseConfidence = 0.5;
         var kindBias = kind == ElementKind.Function ? 0.1 : 0.0;
 
         var element = new PlatonicElement(
@@ -1651,7 +1630,8 @@ public sealed class GenesisTrainer
         if (concepts.Count == 0)
             return;
 
-        if (TryExtractArithmeticObservation(example, out var arithmetic))
+        var hasArithmetic = TryExtractArithmeticObservation(example, out var arithmetic);
+        if (hasArithmetic)
             ObserveArithmeticFaces(arithmetic);
 
         var isNegative = IsNegativeText(example.Output);
@@ -1679,6 +1659,11 @@ public sealed class GenesisTrainer
         // input→output pair IS the genuine relationship and is what should dominate. (The planner still
         // runs once per example upstream for its concept set / telemetry — only the COUPLING source
         // changes here.)
+        // Face-computable arithmetic: the homomorphism + operation→face coupling already represent it;
+        // skip the relational input→output (operand↔result) coupling that would overload operands.
+        if (SuppressArithmeticOperandRelations && hasArithmetic)
+            return;
+
         var inputConcepts = ExtractMirrorConcepts(example.Input, string.Empty);
         var outputConcepts = ExtractMirrorConcepts(example.Output, string.Empty);
         if (inputConcepts.Count == 0 || outputConcepts.Count == 0)
@@ -1820,10 +1805,15 @@ public sealed class GenesisTrainer
             _platonicSpace.ObserveContradiction(arithmetic.OperationConcept, "face:log", 0.05);
         }
 
-        // Tighten arithmetic links when equation is numerically correct.
-        var accuracyContradiction = Clamp01(arithmetic.AbsoluteError <= 1e-6 ? 0.05 : 0.6);
-        _platonicSpace.ObserveContradiction(arithmetic.LeftToken, arithmetic.ResultToken, accuracyContradiction);
-        _platonicSpace.ObserveContradiction(arithmetic.RightToken, arithmetic.ResultToken, accuracyContradiction);
+        // Tighten arithmetic links when equation is numerically correct — operand↔result relational
+        // edges. These overload operands (3↔-1, 3↔4 …) and the face homomorphism already represents
+        // the computation, so they are suppressible.
+        if (!SuppressArithmeticOperandRelations)
+        {
+            var accuracyContradiction = Clamp01(arithmetic.AbsoluteError <= 1e-6 ? 0.05 : 0.6);
+            _platonicSpace.ObserveContradiction(arithmetic.LeftToken, arithmetic.ResultToken, accuracyContradiction);
+            _platonicSpace.ObserveContradiction(arithmetic.RightToken, arithmetic.ResultToken, accuracyContradiction);
+        }
     }
 
     private static bool TryExtractArithmeticObservation(GenesisExample example, out ArithmeticObservation observation)

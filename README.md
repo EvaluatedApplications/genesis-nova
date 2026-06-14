@@ -134,6 +134,42 @@ They are capability/stability demonstrations on focused tasks, **not** benchmark
 **Engineering:** 109 automated tests; deterministic substrate (seeded); checkpoint save/load; decision-path
 telemetry on every answer.
 
+### 4.1 Head-to-head vs a transformer (equal budget)
+
+A console harness (`bench/RaceBench`) races nova against a best-effort decoder-only transformer under a fair,
+equal budget: **same tokenizer, same data, same epochs, matched parameter count.** The transformer is
+competently configured (pre-LN blocks, multi-head attention, GELU, Adam, loss masked to the answer span —
+all of which *help* it). Footprint, measured by the transparent formula `params × bytes` (nova SGD =
+8 B/param: weights+grads; transformer Adam = 16 B/param: weights+grads+two moments):
+
+> nova ≈ **1.69M params / ~13 MB** · transformer ≈ **1.64M params / ~25 MB** — **equal parameters, nova ~half the VRAM.**
+
+**Full curriculum** (number-word equivalence, category retrieval, add/sub/mul/div), 20 flat epochs,
+in-distribution held-out:
+
+| | train | held-out |
+|---|---|---|
+| nova | 93% | **85%** |
+| transformer | **99%** | 75% |
+
+The transformer fits the training set *better* (99% vs 93%) but **generalises worse** (75% vs 85%) — nova
+has the smaller train→held-out gap, at half the VRAM. On this in-distribution mix it is a near-match, not a
+blow-out — that is the honest result.
+
+**Arithmetic, extrapolation** (operands 21–40, never trained — a structural generalization test):
+
+| | held-out (interp.) | extrapolation |
+|---|---|---|
+| nova | ~100% | **~99%** |
+| transformer | ~9%* | ~3% |
+
+Here the gap is decisive and *structural*: nova computes via the homomorphism so it extrapolates exactly;
+the transformer interpolates statistics and fails outside the training range — a well-documented transformer
+weakness that **more training does not fix**. (\*Under equal epochs the transformer is still under-trained on
+interpolation; given many more epochs it would climb on in-range held-out — but **not** on extrapolation.)
+
+**Reproduce:** `dotnet run --project bench/RaceBench/RaceBench.csproj -c Release`.
+
 ---
 
 ## 5. Limitations — what has NOT been shown
@@ -142,9 +178,10 @@ Deliberately blunt; this is the honest scope of the prototype.
 
 - **Scale.** Everything above is at 512 dimensions, small vocabularies, short inputs. There is **no evidence
   the approach holds at large scale**, on real language, or on long-context reasoning.
-- **No competitive benchmark.** The system has **not** been compared against a transformer (or any baseline)
-  of equivalent size on the same tasks. Data-efficiency is architecturally motivated, not yet measured
-  against an alternative. **This is the single most important gap.**
+- **Benchmark is small-scale and partial.** There is now a head-to-head (§4.1) vs an equal-budget transformer,
+  but only at 512-dim on the focused curriculum. On in-distribution tasks it is a near-match (nova generalises
+  a bit better at half the VRAM); the decisive, structural win is **arithmetic extrapolation**. This needs to
+  be repeated at larger scale and on more tasks before the data-efficiency thesis is established.
 - **Narrow tasks.** The demonstrated tasks (exact arithmetic, equivalence, category lookup, simple learned
   functions) validate *mechanisms*; they are not, by themselves, a product.
 - **Thesis unproven.** That a learned interface beats end-to-end neural on a metric anyone cares about is a

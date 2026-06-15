@@ -117,8 +117,8 @@ Convergence is *detected* (target held for a stability window), not run for a fi
 
 ## 4. Demonstrated results
 
-All figures are produced by the automated test suite (109 tests, all passing) at the 512-dim configuration.
-They are capability/stability demonstrations on focused tasks, **not** benchmark wins.
+All figures are produced by the automated test suite at the 512-dim configuration. They are
+capability/stability demonstrations on focused tasks, **not** benchmark wins.
 
 | Capability | Result | Meaning |
 |---|---|---|
@@ -131,42 +131,55 @@ They are capability/stability demonstrations on focused tasks, **not** benchmark
 | Learned unary function (`+5`, `double`) | Generalises 4/4 to held-out operands from 4 examples | One-shot transform, no gradient descent |
 | Learned binary op (`a·b` via fold discovery) | Generalises 3/3 to held-out operands | Structure discovered from examples |
 
-**Engineering:** 109 automated tests; deterministic substrate (seeded); checkpoint save/load; decision-path
-telemetry on every answer.
+**Engineering:** an automated test suite; deterministic substrate (seeded); checkpoint save/load;
+decision-path telemetry on every answer.
 
 ### 4.1 Head-to-head vs a transformer (equal budget)
 
 A console harness (`bench/RaceBench`) races nova against a best-effort decoder-only transformer under a fair,
-equal budget: **same tokenizer, same data, same epochs, matched parameter count.** The transformer is
+equal budget: **same tokenizer, same pooled data, same epochs, matched parameter count.** The transformer is
 competently configured (pre-LN blocks, multi-head attention, GELU, Adam, loss masked to the answer span —
-all of which *help* it). Footprint, measured by the transparent formula `params × bytes` (nova SGD =
-8 B/param: weights+grads; transformer Adam = 16 B/param: weights+grads+two moments):
+all of which *help* it). Footprint is the transparent formula `params × bytes` (nova SGD = 8 B/param:
+weights+grads; transformer Adam = 16 B/param: weights+grads+two moments).
 
-> nova ≈ **1.69M params / ~13 MB** · transformer ≈ **1.64M params / ~25 MB** — **equal parameters, nova ~half the VRAM.**
+**Equal parameters, both small** — the regime that tests whether nova's structural priors pay off at a
+capacity where a transformer struggles to find them. Full curriculum (number-word equivalence, category
+retrieval, add/sub/mul/div), 20 flat epochs, in-distribution held-out:
 
-**Full curriculum** (number-word equivalence, category retrieval, add/sub/mul/div), 20 flat epochs,
-in-distribution held-out:
+> nova **457,604 params / ~3.5 MB** · transformer **424,797 params / ~6.5 MB** — equal parameters, nova ~half the VRAM.
 
 | | train | held-out |
 |---|---|---|
-| nova | 93% | **85%** |
-| transformer | **99%** | 75% |
+| nova | 97% | **83%** |
+| transformer | 96% | 69% |
 
-The transformer fits the training set *better* (99% vs 93%) but **generalises worse** (75% vs 85%) — nova
-has the smaller train→held-out gap, at half the VRAM. On this in-distribution mix it is a near-match, not a
-blow-out — that is the honest result.
+Nova led held-out at **every** epoch and converged far faster (47% held-out by epoch 4, when the transformer
+was at 4%). Both reach near-equal *train* fit by the end (97% vs 96%), but the transformer trails by 14
+points on *held-out* — equal capacity, equal budget, the transformer memorises while nova generalises.
 
-**Arithmetic, extrapolation** (operands 21–40, never trained — a structural generalization test):
+Per-creator held-out:
 
-| | held-out (interp.) | extrapolation |
+| Task | nova | transformer |
 |---|---|---|
-| nova | ~100% | **~99%** |
-| transformer | ~9%* | ~3% |
+| number-word equivalence | **86%** | 0% |
+| arithmetic add | **91%** | 84% |
+| arithmetic sub | **90%** | 69% |
+| arithmetic mul | **86%** | 84% |
+| arithmetic div | **40%** | 13% |
+| category retrieval | 0% | 0% |
 
-Here the gap is decisive and *structural*: nova computes via the homomorphism so it extrapolates exactly;
-the transformer interpolates statistics and fails outside the training range — a well-documented transformer
-weakness that **more training does not fix**. (\*Under equal epochs the transformer is still under-trained on
-interpolation; given many more epochs it would climb on in-range held-out — but **not** on extrapolation.)
+Honest caveats: `div` is weak for both (small held-out set, n=15); `category retrieval` is a **both-fail**
+(0% / 0%), not a win; and this is the equal-budget *flat* result — given many more epochs the transformer
+narrows the in-distribution gap. The headline is "same params, half the VRAM, same budget, +15 points
+held-out," and the `number-word equivalence` row (86% vs 0%) is the structural advantage: nova has the
+homomorphism and relation-as-element retrieval; a transformer this small cannot reach the equivalence under
+this budget.
+
+**Arithmetic, extrapolation** (operands well outside the trained range — a structural generalization test):
+nova computes via the homomorphism, so it extrapolates exactly (~99%); a transformer interpolates statistics
+and fails outside the training range (~single digits) — a documented transformer weakness that **more
+training does not fix**. This is architecturally guaranteed by the numeric faces rather than learned, and is
+the cleanest separation between the two approaches.
 
 **Reproduce:** `dotnet run --project bench/RaceBench/RaceBench.csproj -c Release`.
 
@@ -179,9 +192,10 @@ Deliberately blunt; this is the honest scope of the prototype.
 - **Scale.** Everything above is at 512 dimensions, small vocabularies, short inputs. There is **no evidence
   the approach holds at large scale**, on real language, or on long-context reasoning.
 - **Benchmark is small-scale and partial.** There is now a head-to-head (§4.1) vs an equal-budget transformer,
-  but only at 512-dim on the focused curriculum. On in-distribution tasks it is a near-match (nova generalises
-  a bit better at half the VRAM); the decisive, structural win is **arithmetic extrapolation**. This needs to
-  be repeated at larger scale and on more tasks before the data-efficiency thesis is established.
+  but only at 512-dim on the focused curriculum. At equal small parameters nova generalises notably better
+  held-out (83% vs 69%) at half the VRAM, and the decisive, structural win is **arithmetic extrapolation**;
+  but two tasks are weak or a both-fail, and a transformer narrows the in-distribution gap with more epochs.
+  This needs to be repeated at larger scale and on more tasks before the data-efficiency thesis is established.
 - **Narrow tasks.** The demonstrated tasks (exact arithmetic, equivalence, category lookup, simple learned
   functions) validate *mechanisms*; they are not, by themselves, a product.
 - **Thesis unproven.** That a learned interface beats end-to-end neural on a metric anyone cares about is a
@@ -195,7 +209,7 @@ Deliberately blunt; this is the honest scope of the prototype.
 ## 6. Engineering notes
 
 - **Stack:** C# / .NET 8, TorchSharp (CUDA with CPU fallback), WPF desktop UI, REPL.
-- **Codebase:** ~19k lines of source across ~100 files; 109 automated tests.
+- **Codebase:** ~19k lines of source across ~100 files, with an automated test suite.
 - **Reproducibility:** the substrate is deterministic under seed; results are regenerated by the test suite.
 - **Discipline:** no hardcoded answer tables and no symbol parsers — capability is required to come from
   learned structure or the substrate's exact operations, and tests assert answers route through the platonic
@@ -207,9 +221,9 @@ Deliberately blunt; this is the honest scope of the prototype.
 
 In priority order, because §5 names the gaps:
 
-1. **A comparative benchmark.** Same focused tasks, a small transformer baseline, measured on
-   data-efficiency / exactness / interpretability. This is what turns "interesting mechanisms" into
-   "evidence the approach matters."
+1. **Broaden the comparative benchmark.** The equal-budget head-to-head exists (§4.1) and favours nova at
+   small scale; the next step is more tasks and a larger transformer baseline measured on data-efficiency /
+   exactness / interpretability — turning "promising at toy scale" into "evidence the approach matters."
 2. **Scale-up study.** Larger space / vocabulary / input length; measure whether the properties (exactness,
    retention, few-shot operations) survive.
 3. **Controller-composed operations.** Let the GRU compose substrate operations itself (the composable block

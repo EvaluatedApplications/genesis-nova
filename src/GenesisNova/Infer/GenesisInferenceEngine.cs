@@ -24,6 +24,14 @@ public sealed class GenesisInferenceEngine
     // Learned BINARY ops: a discovered fold/log-linear structure (e.g. mul = fold of add; c = a^α·b^β),
     // applied in the learned-function route's two-operand case. Optional (null → binary route off).
     private readonly FoldPathDiscovery? _foldPathDiscovery;
+    // The learned composer's executor: the GRU's plan head selects a composition shape and this runs the
+    // corresponding block tree (Compare/Branch/...) on the substrate. The blocks are the vocabulary; the
+    // GRU is the composer; nothing is hardcoded per token. The interpreter carries the SHAPE REGISTRY'S
+    // library so Ref blocks resolve recursively against shapes-as-Function-elements (no inline gliders).
+    private readonly PlatonicGliderInterpreter _glider;
+    // Named, reusable shapes as Function elements of the space (the Ref vocabulary). Built from the block
+    // alphabet, not premade answers; the GRU selects which shape, the substrate executes it.
+    private readonly PlatonicShapeRegistry _shapeRegistry;
     private readonly Func<string?>? _platonicFilePathProvider;
     private readonly int _maxPlatonicAssistInvocations;
     private readonly object _platonicFileCacheLock = new();
@@ -51,6 +59,8 @@ public sealed class GenesisInferenceEngine
         _tokenizer = tokenizer;
         _model = model;
         _memory = memory;
+        _shapeRegistry = new PlatonicShapeRegistry(memory);
+        _glider = new PlatonicGliderInterpreter(memory, _shapeRegistry.Library);
         _platonicFilePathProvider = platonicFilePathProvider;
         _transformAccumulator = transformAccumulator;
         _foldPathDiscovery = foldPathDiscovery;
@@ -735,12 +745,144 @@ public sealed class GenesisInferenceEngine
         return true;
     }
 
+    /// <summary>
+    /// LEARNED-COMPOSER route. The GRU's plan head (<see cref="GenesisNeuralModel.PredictPlan"/>) selects a
+    /// block-composition SHAPE; this assembles the corresponding glider and runs it on the substrate. The
+    /// blocks are the vocabulary, the GRU is the composer — no hardcoded per-token resolver. Increment 1
+    /// wires PlanKind=Predicate: a Compare→Branch tree over the two numeric operands → greater/less/equal,
+    /// computed element-natively (the difference's sign) and generalizing to unseen operands. Other plan
+    /// kinds (arithmetic/retrieval) are served by their existing routes. Abstains otherwise.
+    /// </summary>
+    private bool TryGenerateFromGliderPlan(GenerationRequest request, out GenerationResult result)
+    {
+        result = default!;
+        if (string.IsNullOrWhiteSpace(request.Input))
+            return false;
+        var tokenIds = _tokenizer.Encode(request.Input);
+        var (planKind, conf) = _model.PredictPlan(tokenIds);
+        // Execute the shapes the dedicated routes DON'T serve: predicate (2), arithmetic→word (4),
+        // fold-sum (5), fold-product (6), seq (7), ref (8). Digit-arithmetic (1) defers to GruQuery,
+        // retrieval (3) to relation-first — keeping their decision paths intact. Each shape's WORK is on
+        // the substrate (R2 compose / homomorphism / relation hop / composition-of-compositions).
+        if (planKind is not (2 or 4 or 5 or 6 or 7 or 8))
+            return false;
+
+        const System.Globalization.NumberStyles ns =
+            System.Globalization.NumberStyles.AllowLeadingSign | System.Globalization.NumberStyles.AllowDecimalPoint;
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
+        var operands = request.Input.Trim().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)
+            .Where(t => double.TryParse(t, ns, inv, out _)).ToArray();
+        if (operands.Length < 2)
+            return false;
+
+        // The interpreter carries the shape registry's library, so Ref blocks resolve recursively against
+        // the shapes-as-Function-elements — no per-call inline glider construction.
+        var interp = _glider;
+        GliderBlock root;
+        switch (planKind)
+        {
+            case 2: // Predicate: Compare→Branch over the two operands (element-native difference-sign).
+                root = new Branch(
+                    new Compare(CompareOp.Greater, new Operand(0), new Operand(1)),
+                    new Literal("greater"),
+                    new Branch(new Compare(CompareOp.Less, new Operand(0), new Operand(1)),
+                        new Literal("less"), new Literal("equal")));
+                break;
+            case 5: // Fold-sum: variadic reduce of + over ALL operands (one N-way R2 compose).
+                root = new Fold(GliderOp.Add, 0);
+                break;
+            case 6: // Fold-product: variadic reduce of × over ALL operands.
+                root = new Fold(GliderOp.Multiply, 0);
+                break;
+            case 7: // SEQ — Concatenate-Composition: a scaffold chunk RETRIEVED from the chunk-element store
+                // (mined from graded-correct outputs — NOT a literal baked in here) bound to a substrate-
+                // computed value. The COMPUTE part is substrate-native (Fold(Add) → one R2 compose over all
+                // operands / the homomorphism); the assembly is the interpreter's Seq block (concatenation =
+                // CompositionMode.Concatenate). Abstain until a scaffold has been learned.
+                if (!_memory.TryGetTopChunk(PlatonicSpaceMemory.SeqScaffoldTag, out var scaffold))
+                    return false;
+                root = new Seq(new GliderBlock[]
+                {
+                    new Literal(scaffold),
+                    new Fold(GliderOp.Add, 0),
+                });
+                break;
+            case 8: // REF — higher-order glider-of-gliders, retrieved from the shape registry (a Function
+                // element referencing the "larger" Function element). The substrate executes it by traversing
+                // + composing the referenced shapes: 2·max(a,b) = Compute(Multiply, Ref("larger"), Const(2)).
+                // No inline construction — the shape is selected, not built here.
+                if (!_shapeRegistry.TryGet(PlatonicShapeRegistry.TwiceLargerShape, out var refShape))
+                    return false;
+                root = refShape.Root;
+                break;
+            default: // planKind == 4: arithmetic FORMATTED AS A WORD — Hop(Compute(op,operands), Word).
+                var (opId, _, _) = _model.PredictQuery(tokenIds);
+                var gop = opId switch
+                {
+                    1 => GliderOp.Add,
+                    2 => GliderOp.Subtract,
+                    3 => GliderOp.Multiply,
+                    4 => GliderOp.Divide,
+                    _ => (GliderOp?)null
+                };
+                if (gop is null)
+                    return false;
+                root = new Hop(new Compute(gop.Value, new GliderBlock[] { new Operand(0), new Operand(1) }), HopTarget.Word);
+                break;
+        }
+
+        string answer;
+        try
+        {
+            answer = interp.Execute(new PlatonicGlider("plan", root), operands);
+        }
+        catch (InvalidOperationException)
+        {
+            return false; // unresolvable on the substrate (e.g. no learned digit→word edge) — fall through
+        }
+        if (string.IsNullOrEmpty(answer))
+            return false;
+
+        var outTokens = _tokenizer.Encode(answer, addEos: true)
+            .Take(Math.Max(1, request.MaxNewTokens))
+            .ToArray();
+        if (outTokens.Length == 0)
+            return false;
+        result = new GenerationResult(
+            Output: _tokenizer.Decode(outTokens),
+            GeneratedTokens: outTokens,
+            UsedPlatonicQuery: true,
+            UsedNeuralFallback: false,
+            DecisionPath: "platonic-glider-plan:" + planKind switch
+            {
+                2 => "predicate",
+                4 => "arith-word",
+                5 => "fold-sum",
+                6 => "fold-product",
+                7 => "seq",
+                8 => "ref",
+                _ => "shape" + planKind
+            },
+            PlatonicConfidence: conf,
+            AppliedBiasCount: 0,
+            AverageBiasMagnitude: 0.0,
+            ChunksGenerated: 1,
+            PlatonicHopCount: 1);
+        return true;
+    }
+
     private bool TryGenerateFromPlatonicPlan(GenerationRequest request, out GenerationResult result)
     {
         result = default!;
         // Arithmetic = the GRU-constructed query (op classified from context + operand selection), then
         // the homomorphism computes. No hardcoded compact symbol parser (removed 2026-06-14). Runs before
         // the concept-chain so framed/compact arithmetic doesn't fall into a relational text walk.
+        // LEARNED-COMPOSER first: the GRU plan head selects a block-composition shape (predicate; or
+        // arithmetic→word, which the digit-only GruQuery below cannot format). It ABSTAINS (returns false)
+        // whenever the plan head is untrained or the shape isn't a wired one, so every route below — and
+        // every existing test — is unaffected.
+        if (TryGenerateFromGliderPlan(request, out result))
+            return true;
         if (TryGenerateFromGruQuery(request, out result))
             return true;
         // LEARNED-FUNCTION: apply a function learned as a transform-element by COMPOSITION, the function

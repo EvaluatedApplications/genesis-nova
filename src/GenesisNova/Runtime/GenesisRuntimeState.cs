@@ -22,7 +22,6 @@ public sealed class GenesisRuntimeState
             seed: config.Seed,
             maxNodes: config.MaxPlatonicNodes,
             maxRelations: config.MaxPlatonicRelations);
-        GliderInterpreter = new PlatonicGliderInterpreter(Memory);
         Conversation = new GenesisConversationMemory();
         Trainer = new GenesisTrainer(Tokenizer, Model, Memory, config);
         Orchestrator = new GenesisTrainingOrchestrator(Trainer, config);
@@ -40,10 +39,6 @@ public sealed class GenesisRuntimeState
     public WhitespaceGenesisTokenizer Tokenizer { get; private set; }
     public GenesisNeuralModel Model { get; private set; }
     public PlatonicSpaceMemory Memory { get; private set; }
-    // Reusable glider blocks (Operand/Literal/Hop/Compute/Seq) made first-class in the runtime: the
-    // deterministic interpreter that executes a composition of blocks on the platonic physics. Available
-    // for hand-built or (future) GRU-constructed gliders; see PROJECT_GLIDER.md.
-    public PlatonicGliderInterpreter GliderInterpreter { get; private set; }
     public GenesisConversationMemory Conversation { get; private set; }
     public GenesisTrainer Trainer { get; private set; }
     public GenesisTrainingOrchestrator Orchestrator { get; private set; }
@@ -68,7 +63,6 @@ public sealed class GenesisRuntimeState
             maxRelations: config.MaxPlatonicRelations);
         if (platonicSpaceSnapshot is not null)
             Memory.ImportSnapshot(platonicSpaceSnapshot);
-        GliderInterpreter = new PlatonicGliderInterpreter(Memory);
         Conversation = new GenesisConversationMemory();
         Trainer = new GenesisTrainer(Tokenizer, Model, Memory, config);
         ImportTrainerLearningState(trainerLearningStateJson);

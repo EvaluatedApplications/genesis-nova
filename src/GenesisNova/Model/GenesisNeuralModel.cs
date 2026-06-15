@@ -66,6 +66,19 @@ public class GenesisNeuralModel
     private TorchSharp.Modules.Parameter? _queryOperandWT; // [hidden, 1]
     private TorchSharp.Modules.Parameter? _queryOperandB;  // [1]
 
+    // PLAN head — the learned composer's SHAPE selector. From the input it classifies which block-
+    // composition to assemble + run on the substrate (the op/operand heads supply the arguments; this
+    // supplies the shape). Lazily initialised + autograd-trained (CE) exactly like the query op head.
+    // Increment 1 wires PlanKind.Predicate (Compare→Branch); more shapes extend PlanKindCount.
+    // 0=none, 1=arithmetic, 2=predicate, 3=retrieval, 4=arithmetic→word, 5=fold-sum, 6=fold-product,
+    // 7=seq (Concatenate-Composition: Literal scaffold + Compute → "the answer is N"),
+    // 8=ref (higher-order: a Ref glider invokes another named glider then scales it → 2·max(a,b)).
+    // Each shape the GRU can SELECT; the substrate executes it (R2 compose / homomorphism / relations).
+    public const int PlanKindCount = 9;
+    private const double PlanLossWeight = 0.25;
+    private TorchSharp.Modules.Parameter? _planWT; // [hidden, PlanKindCount]
+    private TorchSharp.Modules.Parameter? _planB;  // [PlanKindCount]
+
     // Learned edit-head: predicts HOW STRONGLY the platonic space should be edited for a given
     // input context. Shape mirrors the route head but emits a single scalar: _editWT is [hidden, 1]
     // and _editB is [1]; PredictEditMagnitude pools the input embeddings, applies this linear layer
@@ -172,9 +185,10 @@ public class GenesisNeuralModel
         int bosTokenId,
         double lossScale = 1.0,
         int? routeLabel = null,
-        GenesisQueryLabel? queryLabel = null)
+        GenesisQueryLabel? queryLabel = null,
+        int? planLabel = null)
     {
-        return TrainExampleGpu(inputTokens, targetTokens, bosTokenId, lossScale, routeLabel, queryLabel);
+        return TrainExampleGpu(inputTokens, targetTokens, bosTokenId, lossScale, routeLabel, queryLabel, planLabel);
     }
 
     public ModelSnapshot Export()
@@ -315,7 +329,8 @@ public class GenesisNeuralModel
         int bosTokenId,
         double lossScale,
         int? routeLabel,
-        GenesisQueryLabel? queryLabel = null)
+        GenesisQueryLabel? queryLabel = null,
+        int? planLabel = null)
     {
         EnsureModelInitialized();
         EnsureGruInitialized();
@@ -323,8 +338,9 @@ public class GenesisNeuralModel
             EnsureRouteHeadInitialized();
         var superviseQuery = queryLabel is { OperationId: >= 0 and < QueryOpCount } ql
             && ql.OperandMask.Length == inputTokens.Count;
-        if (superviseQuery)
-            EnsureQueryHeadsInitialized();
+        var supervisePlan = planLabel is >= 0 and < PlanKindCount;
+        if (superviseQuery || supervisePlan)
+            EnsureQueryHeadsInitialized(); // creates the query + plan heads together
 
         double totalLoss = 0.0;
         var prev = bosTokenId;
@@ -464,6 +480,29 @@ public class GenesisNeuralModel
                 else
                 {
                     accumulatedLoss = accumulatedLoss + queryLoss;
+                    forwardTensors.Add(accumulatedLoss);
+                }
+            }
+
+            // PLAN head: CE on the final shared-GRU hidden — which composition SHAPE does this input ask
+            // for (arithmetic / predicate / retrieval)? Backprops into the shared encoder like the op head.
+            if (supervisePlan)
+            {
+                var planLogits = hInput.matmul(_planWT!) + _planB!;
+                forwardTensors.Add(planLogits);
+                var planBatch = planLogits.unsqueeze(0);
+                forwardTensors.Add(planBatch);
+                var planTarget = tensor(new long[] { planLabel!.Value }, dtype: ScalarType.Int64, device: _trainingDevice);
+                var planLoss = nn.functional.cross_entropy(planBatch, planTarget) * PlanLossWeight;
+                planTarget.Dispose();
+                forwardTensors.Add(planLoss);
+                if (accumulatedLoss is null)
+                {
+                    accumulatedLoss = planLoss;
+                }
+                else
+                {
+                    accumulatedLoss = accumulatedLoss + planLoss;
                     forwardTensors.Add(accumulatedLoss);
                 }
             }
@@ -662,6 +701,48 @@ public class GenesisNeuralModel
         }
     }
 
+    /// <summary>
+    /// The GRU classifies which block-COMPOSITION SHAPE the input asks for — the learned composer's shape
+    /// selector: 0=none/abstain, 1=arithmetic, 2=predicate, 3=retrieval. Softmax over the plan-kind head.
+    /// Returns (0, 0) until the head has been supervised, so callers degrade gracefully.
+    /// </summary>
+    public (int PlanKind, double Confidence) PredictPlan(IReadOnlyList<int> inputTokens)
+    {
+        if (_planWT is null || inputTokens.Count == 0)
+            return (0, 0.0);
+
+        EnsureModelInitialized();
+        EnsureGruInitialized();
+        using var noGrad = no_grad();
+
+        var scratch = new List<Tensor>();
+        try
+        {
+            var hInput = EncodeInput(inputTokens, scratch, _inferenceDevice);
+            Tensor pW = _planWT, pB = _planB!;
+            if (_inferenceDevice != _trainingDevice)
+            {
+                pW = _planWT.to(_inferenceDevice); scratch.Add(pW);
+                pB = _planB!.to(_inferenceDevice); scratch.Add(pB);
+            }
+            var logits = hInput.matmul(pW) + pB; scratch.Add(logits);
+            var probs = nn.functional.softmax(logits, 0); scratch.Add(probs);
+            using var cpu = probs.cpu();
+            var scores = cpu.data<float>().ToArray();
+            var best = 0;
+            for (var i = 1; i < scores.Length; i++)
+                if (scores[i] > scores[best]) best = i;
+            return (best, scores.Length > 0 ? scores[best] : 0.0);
+        }
+        finally
+        {
+            foreach (var t in scratch)
+            {
+                try { t?.Dispose(); } catch { }
+            }
+        }
+    }
+
 
     /// <summary>Clone parameters to break computation graph chain after epoch.</summary>
     public void CloneParametersToBreakGraph()
@@ -726,6 +807,19 @@ public class GenesisNeuralModel
                 try { oldQob!.Dispose(); } catch { }
                 try { oldQw!.Dispose(); } catch { }
                 try { oldQwb!.Dispose(); } catch { }
+            }
+
+            // PLAN head — clone+detach like the query heads (autograd param).
+            if (_planWT is not null)
+            {
+                var pwClone = _planWT.clone().detach().to(_trainingDevice);
+                var pbClone = _planB!.clone().detach().to(_trainingDevice);
+                var oldPw = _planWT;
+                var oldPb = _planB;
+                _planWT = new TorchSharp.Modules.Parameter(pwClone, true);
+                _planB = new TorchSharp.Modules.Parameter(pbClone, true);
+                try { oldPw.Dispose(); } catch { }
+                try { oldPb!.Dispose(); } catch { }
             }
 
             // SHARED GRU gate weights/biases — clone+detach to break the graph chain, mirroring the
@@ -988,6 +1082,10 @@ public class GenesisNeuralModel
             ((rand(new long[] { _hiddenSize, 1 }, device: _trainingDevice) * 2.0) - 1.0) * 0.05, true);
         _queryOperandB = new TorchSharp.Modules.Parameter(
             zeros(new long[] { 1 }, dtype: ScalarType.Float32, device: _trainingDevice), true);
+        _planWT = new TorchSharp.Modules.Parameter(
+            ((rand(new long[] { _hiddenSize, PlanKindCount }, device: _trainingDevice) * 2.0) - 1.0) * 0.05, true);
+        _planB = new TorchSharp.Modules.Parameter(
+            zeros(new long[] { PlanKindCount }, dtype: ScalarType.Float32, device: _trainingDevice), true);
         RecreateOptimizer();
     }
 
@@ -1283,6 +1381,18 @@ public class GenesisNeuralModel
             try { oldQwb?.Dispose(); } catch { }
         }
 
+        // PLAN head is [oldHidden, PlanKindCount] — incompatible after a hidden resize; null it so it
+        // lazily reinitializes at the new hidden size (same graceful degradation as the query heads).
+        if (_planWT is not null)
+        {
+            var oldPw = _planWT;
+            var oldPb = _planB;
+            _planWT = null;
+            _planB = null;
+            try { oldPw.Dispose(); } catch { }
+            try { oldPb?.Dispose(); } catch { }
+        }
+
         // SHARED GRU gate weights are [3*oldHidden, oldHidden] — incompatible after a hidden resize;
         // reinitialize a fresh untrained GRU at the new hidden size (same init as EnsureGruInitialized).
         // We do NOT attempt to copy old weights: the gate blocks are stacked [3h,h] so a grow would need
@@ -1332,6 +1442,8 @@ public class GenesisNeuralModel
         if (_queryOpB is not null) parameters.Add(_queryOpB!);
         if (_queryOperandWT is not null) parameters.Add(_queryOperandWT!);
         if (_queryOperandB is not null) parameters.Add(_queryOperandB!);
+        if (_planWT is not null) parameters.Add(_planWT);
+        if (_planB is not null) parameters.Add(_planB!);
         _optimizer = torch.optim.SGD(parameters, _currentLearningRate);
     }
 
@@ -1347,7 +1459,7 @@ public class GenesisNeuralModel
         {
             _embT, _wOutT, _bOutT, _routeWT, _routeB,
             _gruWih, _gruWhh, _gruBih, _gruBhh,
-            _queryOpWT, _queryOpB, _queryOperandWT, _queryOperandB, _editWT, _editB
+            _queryOpWT, _queryOpB, _queryOperandWT, _queryOperandB, _planWT, _planB, _editWT, _editB
         })
             if (p is not null) n += p.numel();
         return n;
@@ -1422,6 +1534,10 @@ public class GenesisNeuralModel
         _queryOpB = null;
         _queryOperandWT = null;
         _queryOperandB = null;
+        try { _planWT?.Dispose(); } catch { }
+        try { _planB?.Dispose(); } catch { }
+        _planWT = null;
+        _planB = null;
         // SHARED GRU gate weights/biases.
         try { _gruWih?.Dispose(); } catch { }
         try { _gruWhh?.Dispose(); } catch { }

@@ -334,11 +334,13 @@ public sealed class GenesisTrainer
             _tokenizer.BosTokenId,
             lossScale: weight,
             routeLabel: ResolveRouteLabel(example),
-            queryLabel: ResolveQueryLabel(inputTokens, example.Output));
+            queryLabel: ResolveQueryLabel(inputTokens, example.Output),
+            planLabel: ResolvePlanLabel(example.Input, example.Output));
         
         // Break computation graph after training
         _model.CloneParametersToBreakGraph();
 
+        MineComposerShapes(example.Input, example.Output);
         var concepts = ObserveLearningSignals(example);
         RewardEditHead(example, baseLoss.TokenLoss);
 
@@ -378,11 +380,13 @@ public sealed class GenesisTrainer
             _tokenizer.BosTokenId,
             lossScale: weight,
             routeLabel: ResolveRouteLabel(example),
-            queryLabel: ResolveQueryLabel(inputTokens, example.Output));
+            queryLabel: ResolveQueryLabel(inputTokens, example.Output),
+            planLabel: ResolvePlanLabel(example.Input, example.Output));
          
         // Break computation graph after each example to allow sequential training
         _model.CloneParametersToBreakGraph();
 
+        MineComposerShapes(example.Input, example.Output);
         var concepts = ObserveLearningSignals(example);
         RewardEditHead(example, baseLoss.TokenLoss);
 
@@ -537,7 +541,8 @@ public sealed class GenesisTrainer
                    _tokenizer.BosTokenId,
                    lossScale: effectiveWeight,
                    routeLabel: ResolveRouteLabel(example),
-            queryLabel: ResolveQueryLabel(inputTokens, example.Output));
+            queryLabel: ResolveQueryLabel(inputTokens, example.Output),
+            planLabel: ResolvePlanLabel(example.Input, example.Output));
                 totalTokenLoss += loss.TokenLoss * targetTokens.Length * effectiveWeight;
                 totalTokenWeight += targetTokens.Length * effectiveWeight;
              }
@@ -554,7 +559,8 @@ public sealed class GenesisTrainer
                 _tokenizer.BosTokenId,
                 lossScale: effectiveWeight,
                 routeLabel: ResolveRouteLabel(example),
-            queryLabel: ResolveQueryLabel(inputTokens, example.Output));
+            queryLabel: ResolveQueryLabel(inputTokens, example.Output),
+            planLabel: ResolvePlanLabel(example.Input, example.Output));
              totalTokenLoss += loss.TokenLoss * targetTokens.Length * effectiveWeight;
              totalTokenWeight += targetTokens.Length * effectiveWeight;
           }
@@ -953,6 +959,41 @@ public sealed class GenesisTrainer
             return bareNumberOut ? 1 : 2;
         }
 
+        // Predicate modality (comparison answers): the Compare/Branch glider computes it on the substrate,
+        // exact and space-independent → platonic-direct (route 1). The plan head learns to route it there.
+        var predOut = (example.Output ?? string.Empty).Trim().ToLowerInvariant();
+        if (predOut is "greater" or "less" or "equal")
+            return 1;
+
+        // Arithmetic→word (numeric operands, number-word output): the glider plan computes the value and
+        // Hop-formats it to its word via the learned digit↔word edge — platonic-direct (route 1).
+        var rawArithToks = (example.Input ?? string.Empty).Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        var numOpsForWord = rawArithToks.Count(t => double.TryParse(t,
+            System.Globalization.NumberStyles.AllowLeadingSign | System.Globalization.NumberStyles.AllowDecimalPoint,
+            System.Globalization.CultureInfo.InvariantCulture, out _));
+        if (numOpsForWord >= 2 && GenesisNova.Core.NumberWordVocabulary.WordToValue.ContainsKey(predOut))
+            return 1;
+
+        // Fold (variadic reduce ≥3 operands whose sum/product equals the output): the substrate reduces
+        // them via R2 compose → platonic-direct (route 1).
+        var foldNs = System.Globalization.NumberStyles.AllowLeadingSign | System.Globalization.NumberStyles.AllowDecimalPoint;
+        var foldInv = System.Globalization.CultureInfo.InvariantCulture;
+        if (numOpsForWord >= 3 && double.TryParse(predOut, foldNs, foldInv, out var foldRouteV))
+        {
+            var fv = rawArithToks.Where(t => double.TryParse(t, foldNs, foldInv, out _))
+                                 .Select(t => double.Parse(t, foldNs, foldInv)).ToList();
+            if (Math.Abs(fv.Sum() - foldRouteV) < 1e-6 || Math.Abs(fv.Aggregate(1.0, (s, v) => s * v) - foldRouteV) < 1e-6)
+                return 1;
+        }
+
+        // SEQ (Concatenate-Composition) and REF (higher-order) shapes: the glider plan assembles + runs them
+        // on the substrate (Literal∘Compute / Ref→larger ×2), exact and space-independent → platonic-direct
+        // (route 1). Same structure detectors the plan-label uses, so route + plan agree.
+        if (numOpsForWord >= 2 && TrySeqSegments(rawArithToks, predOut, out _))
+            return 1;
+        if (numOpsForWord == 2 && IsTwiceLarger(rawArithToks, predOut))
+            return 1;
+
         // General (non-arithmetic) modality: the universal platonic op is RETRIEVAL. Label the
         // platonic route whenever the space reproduces the target for this input — relational,
         // functional, lookup, etc. Cheap deterministic space queries only (no generation).
@@ -1011,6 +1052,128 @@ public sealed class GenesisTrainer
         // space learns to reproduce these inputs, and platonic routes already fall back to neural
         // gracefully when a tool yields nothing — so under-labelling platonic costs nothing.
         return null;
+    }
+
+    /// <summary>
+    /// Derives the PLAN-head label (which block-composition SHAPE) from the example's OWN structure — no
+    /// surface grammar: 1=arithmetic (≥2 numeric operands → numeric output), 2=predicate (comparison output
+    /// greater/less/equal), 3=retrieval (non-numeric concept input → non-numeric output), 0=none. The GRU
+    /// learns to predict this so the learned composer assembles the right glider; null = don't supervise.
+    /// </summary>
+    /// <summary>
+    /// Element-native mining: training targets are graded-correct by construction, so a Seq-structured output
+    /// (scaffold words + the operands' sum) contributes its scaffold to the platonic CHUNK-ELEMENT STORE. The
+    /// Seq composer later RETRIEVES the most-reinforced scaffold from the space — the cache/binding idea done
+    /// element-natively — instead of a literal hardcoded in inference. Only Seq examples mine; others no-op.
+    /// </summary>
+    private void MineComposerShapes(string? input, string? output)
+    {
+        if (string.IsNullOrWhiteSpace(input) || string.IsNullOrWhiteSpace(output))
+            return;
+        var toks = input.Trim().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        var outT = output.Trim().ToLowerInvariant();
+        if (TrySeqSegments(toks, outT, out var scaffold) && !string.IsNullOrWhiteSpace(scaffold))
+            _platonicSpace.MineChunk(PlatonicSpaceMemory.SeqScaffoldTag, scaffold);
+    }
+
+    private int? ResolvePlanLabel(string? input, string? output)
+    {
+        if (string.IsNullOrWhiteSpace(input) || string.IsNullOrWhiteSpace(output))
+            return null;
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
+        const System.Globalization.NumberStyles ns =
+            System.Globalization.NumberStyles.AllowLeadingSign | System.Globalization.NumberStyles.AllowDecimalPoint;
+        var outT = output.Trim().ToLowerInvariant();
+        var toks = input.Trim().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        var numericOperands = toks.Count(t => double.TryParse(t, ns, inv, out _));
+        var outIsNumber = double.TryParse(outT, ns, inv, out _);
+
+        if (outT is "greater" or "less" or "equal") return 2;        // predicate
+        // Fold (variadic reduce): ≥3 numeric operands whose sum/product equals the numeric output.
+        if (numericOperands >= 3 && double.TryParse(outT, ns, inv, out var foldOut))
+        {
+            var vals = toks.Where(t => double.TryParse(t, ns, inv, out _)).Select(t => double.Parse(t, ns, inv)).ToList();
+            if (Math.Abs(vals.Sum() - foldOut) < 1e-6) return 5;                          // fold-sum
+            if (Math.Abs(vals.Aggregate(1.0, (s, v) => s * v) - foldOut) < 1e-6) return 6; // fold-product
+        }
+        if (numericOperands >= 2 && GenesisNova.Core.NumberWordVocabulary.WordToValue.ContainsKey(outT))
+            return 4;                                                // arithmetic → word-formatted result
+
+        // SEQ (plan-kind 7) — a Concatenate-Composition: a scaffold chunk bound to a computed value. The
+        // OUTPUT'S OWN STRUCTURE is "<scaffold> <number>" where the number == sum of the ≥2 numeric operands
+        // (the computed segment). Derived, not surface-matched on the input: ANY scaffold word(s) trailed by
+        // the operands' sum is a Seq (Literal scaffold ∘ Compute(Add)). The GRU selects the shape; the
+        // substrate concatenates a cached chunk with an R2-composed value.
+        if (numericOperands >= 2 && TrySeqSegments(toks, outT, out _))
+            return 7;
+
+        // REF (plan-kind 8) — higher-order: 2·max(a,b), a Ref to a "larger" glider (Compare→Branch) scaled
+        // ×2. Derived from structure: exactly two numeric operands and output == 2·max of them (and NOT a
+        // plain arithmetic identity like a+b/a*b that the digit-arithmetic shape already owns).
+        if (numericOperands == 2 && outIsNumber && IsTwiceLarger(toks, outT))
+            return 8;
+
+        if (numericOperands >= 2 && outIsNumber) return 1;           // arithmetic (digit)
+        if (numericOperands == 0 && toks.Length >= 1 && !outIsNumber) return 3; // retrieval
+        return 0;                                                    // none/abstain
+    }
+
+    /// <summary>
+    /// SEQ structure detector: is the output a scaffold chunk (one+ non-numeric words) followed by a single
+    /// number equal to the SUM of the input's numeric operands? If so, returns the scaffold words (the cached
+    /// chunk a Literal emits) and reports a match. This is the Concatenate-Composition signature — a known
+    /// text chunk bound to a computed value — derived from the example's own structure, NOT a surface rule on
+    /// the input phrasing (so the GRU learns to select Seq from any prompt whose answer has this shape).
+    /// </summary>
+    private static bool TrySeqSegments(IReadOnlyList<string> inputToks, string output, out string scaffold)
+    {
+        scaffold = string.Empty;
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
+        const System.Globalization.NumberStyles ns =
+            System.Globalization.NumberStyles.AllowLeadingSign | System.Globalization.NumberStyles.AllowDecimalPoint;
+        var outToks = output.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        if (outToks.Length < 2)
+            return false; // need scaffold + a computed segment
+        var last = outToks[^1];
+        if (!double.TryParse(last, ns, inv, out var tail))
+            return false; // final segment must be the computed number
+        // The leading segment(s) must be non-numeric scaffold words.
+        for (var k = 0; k < outToks.Length - 1; k++)
+            if (double.TryParse(outToks[k], ns, inv, out _))
+                return false;
+        var operands = inputToks.Where(t => double.TryParse(t, ns, inv, out _))
+                                .Select(t => double.Parse(t, ns, inv)).ToList();
+        if (operands.Count < 2)
+            return false;
+        if (Math.Abs(operands.Sum() - tail) > 1e-6)
+            return false; // computed segment must equal the operands' sum (the Compute(Add) part)
+        scaffold = string.Join(' ', outToks.Take(outToks.Length - 1));
+        return true;
+    }
+
+    /// <summary>
+    /// REF structure detector: exactly two numeric operands and output == 2·max(a,b). Excludes the cases the
+    /// plain digit-arithmetic shape already owns (output also equal to a+b or a·b) so the label is the
+    /// genuine higher-order shape (Ref→larger, scaled ×2), not an arithmetic identity.
+    /// </summary>
+    private static bool IsTwiceLarger(IReadOnlyList<string> inputToks, string output)
+    {
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
+        const System.Globalization.NumberStyles ns =
+            System.Globalization.NumberStyles.AllowLeadingSign | System.Globalization.NumberStyles.AllowDecimalPoint;
+        var operands = inputToks.Where(t => double.TryParse(t, ns, inv, out _))
+                                .Select(t => double.Parse(t, ns, inv)).ToList();
+        if (operands.Count != 2)
+            return false;
+        if (!double.TryParse(output, ns, inv, out var target))
+            return false;
+        var (a, b) = (operands[0], operands[1]);
+        if (Math.Abs(2.0 * Math.Max(a, b) - target) > 1e-6)
+            return false;
+        // Don't claim an arithmetic identity the digit shape would also satisfy (ambiguous supervision).
+        if (Math.Abs((a + b) - target) < 1e-6 || Math.Abs((a * b) - target) < 1e-6)
+            return false;
+        return true;
     }
 
     /// <summary>

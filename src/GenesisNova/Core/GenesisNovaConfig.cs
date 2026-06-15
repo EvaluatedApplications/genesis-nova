@@ -28,16 +28,20 @@ public sealed record GenesisNovaConfig(
     int TrainingTickMultiplier = 16,
     // Upper bound on mid-generation platonic tool invocations for the platonic-assisted
     // reasoning route (route 2). Bounds the interleave so it cannot run away. Default 3.
-    int MaxPlatonicAssistInvocations = 3)
+    int MaxPlatonicAssistInvocations = 3,
+    // DECOUPLED platonic face width. 0 (default) = track HiddenSize (legacy behaviour). When > 0, the
+    // platonic substrate width is FIXED to this value INDEPENDENT of the GRU controller width — because
+    // the model has zero face-dimension-sized parameters (face↔GRU bridge is by NAME, not vector
+    // alignment, see FaceDimension), so the substrate (and its exact homomorphism) can stay full-size
+    // while the controller (HiddenSize) shrinks. This is the "fixed substrate, variable controller" knob.
+    int FaceDimensionOverride = 0)
 {
     /// <summary>
-    /// THE single source of truth for the platonic face (embedding) width = the FULL model width.
-    /// The old "/2" was a dangling experiment with no structural basis — the neural model has zero
-    /// face-dimension-sized parameters (the face space and the GRU hidden are bridged by
-    /// concept→token-bias by name, not by vector alignment), so halving only threw away platonic
-    /// capacity (the word/free region, whose layout offsets are absolute). The face now uses the full
-    /// width, giving the space its full capacity for semantic spread. Runtime (GenesisRuntimeState) and
-    /// tests (ProductionDims) both derive from here, so this ratio is defined exactly once.
+    /// Platonic face (embedding) width. By default equals the GRU width (HiddenSize); when
+    /// <see cref="FaceDimensionOverride"/> &gt; 0 it is pinned to that fixed value independent of the
+    /// controller width. Independence is sound because the neural model has zero face-dimension-sized
+    /// parameters — the face space and the GRU hidden are bridged by concept→token-bias BY NAME, not by
+    /// vector alignment — so the substrate width can be chosen separately from the controller capacity.
     /// </summary>
-    public int FaceDimension => Math.Max(4, HiddenSize);
+    public int FaceDimension => Math.Max(4, FaceDimensionOverride > 0 ? FaceDimensionOverride : HiddenSize);
 }

@@ -291,6 +291,105 @@ public sealed class PlatonicSpaceMemory
         return found;
     }
 
+    // ─── Function-element registry (realizes the dormant ElementKind.Function) ────────────────────────
+    // Shapes (gliders) are represented as first-class FUNCTION elements of the space, stored in their own
+    // keyed index — exactly as _nodes indexes Object-elements and _relationIndex indexes Relation-elements.
+    // Each carries a composed embedding (so it is POSITIONED) and a RelatedTo list pointing at the OTHER
+    // shape-elements it references (higher-order: a shape-of-shapes). The executable block definition lives
+    // in PlatonicShapeRegistry; THIS is the element's existence in the substrate. Kept out of _nodes so it
+    // never contaminates concept retrieval.
+    private readonly List<Core.PlatonicElement> _functionElements = new();
+    private readonly Dictionary<string, int> _functionIndex = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The Function-elements registered in the space (shapes-as-elements).</summary>
+    public IReadOnlyList<Core.PlatonicElement> FunctionElements => _functionElements;
+
+    /// <summary>
+    /// Register (idempotently) a shape as a positioned <see cref="Core.ElementKind.Function"/> element of the
+    /// space. <paramref name="references"/> are the names of OTHER registered shape-elements this one composes
+    /// (its RelatedTo), so a Ref shape literally becomes a Function element whose RelatedTo points at the
+    /// shape-elements it traverses. Returns the existing element if already registered.
+    /// </summary>
+    public Core.PlatonicElement RegisterFunctionElement(string name, IReadOnlyList<string>? references = null)
+    {
+        var key = Normalize(name);
+        if (_functionIndex.TryGetValue(key, out var existing))
+            return _functionElements[existing];
+
+        var related = System.Collections.Immutable.ImmutableArray.CreateBuilder<int>();
+        if (references is not null)
+            foreach (var r in references)
+            {
+                if (string.IsNullOrWhiteSpace(r))
+                    continue;
+                if (_functionIndex.TryGetValue(Normalize(r), out var refId))
+                    related.Add(refId);
+            }
+
+        var element = new Core.PlatonicElement(
+            Id: _functionElements.Count,
+            Kind: Core.ElementKind.Function,
+            Embedding: Core.PlatonicFaceComposer.Compose(key, _faceDimension),
+            Symbol: key,
+            GeneratedAtTick: 0,
+            RelatedTo: related.ToImmutable(),
+            GenerationPath: "shape:function");
+        _functionElements.Add(element);
+        _functionIndex[key] = element.Id;
+        return element;
+    }
+
+    public bool TryGetFunctionElement(string name, out Core.PlatonicElement element)
+    {
+        if (_functionIndex.TryGetValue(Normalize(name), out var id))
+        {
+            element = _functionElements[id];
+            return true;
+        }
+        element = default!;
+        return false;
+    }
+
+    // ─── Chunk-element store (Seq scaffolds mined from graded-correct outputs) ─────────────────────────
+    // A keyed frequency store of TEXT CHUNKS observed in correct outputs, grouped by a tag (the shape they
+    // scaffold). The Seq shape binds the most-reinforced chunk to a substrate-computed value — the cache/
+    // binding idea done element-natively: the scaffold is LEARNED from positive results, NOT a premade
+    // template string baked into inference. Kept out of _nodes (frequency, not geometry) so it never
+    // perturbs concept retrieval; GetChunkElements projects to positioned elements for introspection.
+    private readonly Dictionary<string, Dictionary<string, int>> _chunkStore =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The canonical tag under which the Seq composer mines/looks-up its scaffold chunk.</summary>
+    public const string SeqScaffoldTag = "⟨seq-scaffold⟩";
+
+    /// <summary>Record one observation of <paramref name="chunk"/> as a scaffold for <paramref name="tag"/>.</summary>
+    public void MineChunk(string tag, string chunk)
+    {
+        if (string.IsNullOrWhiteSpace(tag) || string.IsNullOrWhiteSpace(chunk))
+            return;
+        var t = Normalize(tag);
+        var c = chunk.Trim();
+        if (!_chunkStore.TryGetValue(t, out var counts))
+        {
+            counts = new Dictionary<string, int>(StringComparer.Ordinal);
+            _chunkStore[t] = counts;
+        }
+        counts[c] = counts.TryGetValue(c, out var n) ? n + 1 : 1;
+    }
+
+    /// <summary>The most-reinforced chunk mined for <paramref name="tag"/> (false if none yet).</summary>
+    public bool TryGetTopChunk(string tag, out string chunk)
+    {
+        chunk = string.Empty;
+        if (!_chunkStore.TryGetValue(Normalize(tag), out var counts) || counts.Count == 0)
+            return false;
+        chunk = counts
+            .OrderByDescending(kv => kv.Value)
+            .ThenBy(kv => kv.Key, StringComparer.Ordinal)
+            .First().Key;
+        return true;
+    }
+
     public PlatonicMemorySnapshot ExportSnapshot()
     {
         return new PlatonicMemorySnapshot(
@@ -318,6 +417,9 @@ public sealed class PlatonicSpaceMemory
                    r.SuccessCount,
                    r.FailureCount,
                    r.LastUsedStep))
+               .ToArray(),
+            Chunks: _chunkStore
+               .SelectMany(tag => tag.Value.Select(c => new PlatonicChunkSnapshot(tag.Key, c.Key, c.Value)))
                .ToArray());
     }
 
@@ -637,6 +739,26 @@ public sealed class PlatonicSpaceMemory
             _relationIndex[key] = conceptRelation;
             IndexRelation(conceptRelation);
         }
+
+        // Chunk-element store is restored ADDITIVELY (counts merged, not replaced): ImportSnapshot is also
+        // the rebuild step for ApplyMaintenance, whose pruned snapshot carries no chunks — merging means a
+        // maintenance pass never wipes the mined scaffolds, while a checkpoint load (fresh memory) restores
+        // them exactly. Function-elements are not snapshotted: they are deterministic and re-registered by
+        // the shape registry when the inference engine is (re)constructed.
+        if (snapshot.Chunks is { Length: > 0 })
+            foreach (var chunk in snapshot.Chunks)
+            {
+                if (string.IsNullOrWhiteSpace(chunk.Tag) || string.IsNullOrWhiteSpace(chunk.Chunk))
+                    continue;
+                var t = Normalize(chunk.Tag);
+                if (!_chunkStore.TryGetValue(t, out var counts))
+                {
+                    counts = new Dictionary<string, int>(StringComparer.Ordinal);
+                    _chunkStore[t] = counts;
+                }
+                counts[chunk.Chunk] = (counts.TryGetValue(chunk.Chunk, out var n) ? n : 0) + Math.Max(1, chunk.Count);
+            }
+
         _utilityStep = Math.Max(
             _nodes.Values.Select(n => n.LastUsedStep).DefaultIfEmpty(0).Max(),
             _relationIndex.Values.Select(r => r.LastUsedStep).DefaultIfEmpty(0).Max());

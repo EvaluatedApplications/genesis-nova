@@ -22,7 +22,14 @@ public sealed record PlatonicRelationSnapshot(
     int FailureCount = 0,
     long LastUsedStep = 0);
 
+/// <summary>One mined scaffold chunk and how many graded-correct outputs reinforced it, grouped by tag.</summary>
+public sealed record PlatonicChunkSnapshot(
+    string Tag,
+    string Chunk,
+    int Count);
+
 public sealed record PlatonicMemorySnapshot(
     int FaceDimension,
     PlatonicNodeSnapshot[] Nodes,
-    PlatonicRelationSnapshot[] Relations);
+    PlatonicRelationSnapshot[] Relations,
+    PlatonicChunkSnapshot[]? Chunks = null);

@@ -33,8 +33,9 @@ End-to-end networks spend capacity re-learning things that are not statistical (
 composition) and store facts rather than structure. **Hypothesis:** a network that learns to *use* a
 structured interface — compress into it, retrieve from it, compute with it — can be more data-efficient,
 interpretable, and exact where it matters, because structure comes from the substrate rather than from data.
-This document reports the mechanisms built to test that and the small-scale evidence so far. It does **not**
-claim the hypothesis is validated (see §5–§7).
+This document reports the mechanisms built to test that and the small-scale evidence so far — including a
+measured equal-budget win over a transformer (§4.1). It does **not** claim the hypothesis is validated **at
+scale** (see §5–§7).
 
 ---
 
@@ -117,8 +118,9 @@ Convergence is *detected* (target held for a stability window), not run for a fi
 
 ## 4. Demonstrated results
 
-All figures are produced by the automated test suite at the 512-dim configuration. They are
-capability/stability demonstrations on focused tasks, **not** benchmark wins.
+The table below is produced by the automated test suite at the 512-dim configuration — capability/stability
+demonstrations on focused tasks. §4.1 adds a measured head-to-head against an equal-budget transformer, which
+nova wins at small scale.
 
 | Capability | Result | Meaning |
 |---|---|---|
@@ -198,8 +200,10 @@ Deliberately blunt; this is the honest scope of the prototype.
   This needs to be repeated at larger scale and on more tasks before the data-efficiency thesis is established.
 - **Narrow tasks.** The demonstrated tasks (exact arithmetic, equivalence, category lookup, simple learned
   functions) validate *mechanisms*; they are not, by themselves, a product.
-- **Thesis unproven.** That a learned interface beats end-to-end neural on a metric anyone cares about is a
-  hypothesis with toy-scale support only (§2).
+- **Thesis supported only at small scale.** At equal budget and small parameters, nova measurably beat a
+  best-effort transformer on held-out accuracy (§4.1, 83% vs 69%, half the VRAM) and decisively on arithmetic
+  extrapolation — real comparative evidence, but at 512-dim toy scale. Whether the advantage holds at large
+  scale, on real language and long context, is unproven (§2).
 - **Generality bounds are real.** The learned-operation route generalises numeric/affine/structural
   operations, not arbitrary symbolic functions.
 - **Prototype stack.** Single-process .NET / TorchSharp; not a hardened or distributed training system.

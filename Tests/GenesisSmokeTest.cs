@@ -25,7 +25,9 @@ public sealed class GenesisSmokeTest
         var tokens = tokenizer.Encode("Hello   WORLD", addBos: true, addEos: true);
         var decoded = tokenizer.Decode(tokens);
 
-        Assert.Equal("hello world", decoded);
+        // Case-folded vocab (so "Find"=="find"), but the learned casing model restores the surface spelling;
+        // the run of whitespace collapses to a single learned space.
+        Assert.Equal("Hello WORLD", decoded);
         Assert.True(tokenizer.VocabularySize >= 5);
     }
 
@@ -57,7 +59,7 @@ public sealed class GenesisSmokeTest
         var config = new GenesisNovaConfig(HiddenSize: ProductionDims.HiddenSize, LearningRate: 0.05);
         var tokenizer = new WhitespaceGenesisTokenizer();
         var model = new GenesisNeuralModel(config);
-        var memory = new PlatonicSpaceMemory(faceDimension: config.HiddenSize / 2, seed: 7);
+        var memory = new PlatonicSpaceMemory(faceDimension: config.FaceDimension, seed: 7);
         var trainer = new GenesisTrainer(tokenizer, model, memory);
 
         // Train so the GRU + every head are initialized and non-trivial (else there's nothing to lose).

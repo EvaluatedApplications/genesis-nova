@@ -26,7 +26,7 @@ public sealed class LearnedFunctionRouteTests
     private readonly ITestOutputHelper _out;
     public LearnedFunctionRouteTests(ITestOutputHelper o) => _out = o;
 
-    [Fact]
+    [SlowFact]
     public void LearnedFunction_GeneralisesToHeldOutOperands_ViaCompositionAndRelationalSelection()
     {
         var config = new GenesisNovaConfig(HiddenSize: ProductionDims.HiddenSize, LearningRate: 0.05);
@@ -114,7 +114,7 @@ public sealed class LearnedFunctionRouteTests
         Assert.True(viaRoute >= probes.Length - 1, $"answers must come via the learned-function route; only {viaRoute}/{probes.Length}.");
     }
 
-    [Fact]
+    [SlowFact]
     public void LearnedBinaryOp_DiscoveredStructure_GeneralisesToHeldOutOperands_ViaTheRoute()
     {
         var config = new GenesisNovaConfig(HiddenSize: ProductionDims.HiddenSize, LearningRate: 0.05);

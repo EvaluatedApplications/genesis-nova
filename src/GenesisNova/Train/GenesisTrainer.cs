@@ -1,4 +1,4 @@
-using GenesisNova.Axioms;
+﻿using GenesisNova.Axioms;
 using GenesisNova.Cognition;
 using GenesisNova.Core;
 using GenesisNova.Data;
@@ -30,20 +30,31 @@ public sealed class GenesisTrainer
     private readonly GenesisCompositeObjective _objective;
     private readonly FoldPathDiscovery _foldPathDiscovery;
     private readonly TransformAccumulator _transformAccumulator;
+    private readonly GenesisLabelResolver _labelResolver;
     private readonly Queue<SpacePolicyTransition> _spacePolicyTrajectory = new();
     private int _spacePolicyStepCounter;
     private int _priorSpaceActionId;
     private int _trainStepCount;
+    // Speed throttles: the per-example concept-planner GENERATION and the edit-head REINFORCE are the dominant
+    // per-example costs. The planner's output is mostly discarded by the coupling (the deterministic mirror
+    // dominates — see ObservePlatonicSpace), so run it only every Nth example; reinforce the edit head every
+    // Nth example. Both subsystems still contribute, at a fraction of the cost.
+    private int _conceptPlanTick;
+    private const int ConceptPlanStride = 8;       // run the NN concept-planner 1-in-N examples (else use mirror)
+    private const int EditHeadReinforceStride = 4; // reinforce the edit head 1-in-N examples
     // Model-driven edit-head wiring: ObservePlatonicSpace stashes the (explored) magnitude it
     // requested from _model.PredictEditMagnitude (plus the tokens it conditioned on); the surrounding
     // train step then rewards the head via _model.ReinforceEditHead with a CAUSAL, space-state-
     // dependent outcome (does the platonic space now retrieve the correct output for this input?).
     private IReadOnlyList<int>? _pendingEditTokens;
     private double _pendingEditMagnitude;
+    private double[]? _pendingEditPerception; // the space-perception vector the edit head conditioned on this step
     private double _cachedConservationLoss;
-    // Per-example baseline of the EDIT-HEAD OUTCOME metric (space-retrieval quality, not token loss),
-    // used as the REINFORCE baseline so reward = outcome − last-seen-outcome (first sighting → 0).
-    private readonly Dictionary<string, double> _exampleOutcomeBaseline = new(StringComparer.Ordinal);
+    // Retrievability of the current example's target BEFORE this step's space writes, snapshotted by
+    // ObservePlatonicSpace and consumed by RewardEditHead so the edit head is rewarded by the CAUSAL DELTA
+    // its write produced (post − pre) in the same step — dense, immediate, and order-invariant. (Replaces a
+    // per-(input+output)-string baseline that the answer-order shuffling defeated → reward was ~always 0.)
+    private double _pendingPreEditOutcome;
     private readonly Dictionary<string, int> _conceptCoverageCounts = new(StringComparer.OrdinalIgnoreCase);
     private readonly SpaceDecisionJournal _spaceDecisionJournal = new(MaxSpaceDecisionJournalEntries);
     private readonly Queue<MasteredRehearsalExample> _masteredRehearsalRing = new();
@@ -125,6 +136,7 @@ public sealed class GenesisTrainer
         GenesisCompositeObjective? objective = null)
     {
         _tokenizer = tokenizer;
+        _labelResolver = new GenesisLabelResolver(tokenizer);
         _model = model;
         _platonicSpace = platonicSpace;
         var runtimeConfig = config ?? new GenesisNovaConfig();
@@ -177,6 +189,34 @@ public sealed class GenesisTrainer
     /// neurally. Set false to credit any correct output regardless of path.
     /// </summary>
     public bool RequirePlatonicForCorrect { get; set; } = true;
+
+    /// <summary>
+    /// SPACE-AWARE EDITING (SPACE_AWARE_GRU.md §B/§F): before writing the cue→answer edge, READ the anchor's
+    /// current nearest neighbour; if a NON-target concept is winning (a distractor / a prior bad write), REPEL
+    /// it so the answer can become nearest. This is the read-before-write policy — it lets the controller UNDO a
+    /// bad write, which the blind (attract-only) edit cannot (measured: blind poison-recovery stalls ~63%).
+    /// On by default (all runtimes, incl. the ClaudeMemory daemon): the read-repel is part of every training run;
+    /// the learned <see cref="PerceptionEdit"/> magnitude scales it. Set false for legacy attract-only behaviour.
+    /// </summary>
+    public bool SpaceAwareEdit { get; set; } = true;
+
+    /// <summary>
+    /// LEARNED space-awareness (SPACE_AWARE_GRU.md §A/§E): the edit head conditions its magnitude on a perceived
+    /// space-state vector (rank-of-target / distractor-winning / nearest-is-target) and that magnitude scales the
+    /// distractor REPULSION — so the GRU can LEARN (via the within-step reward) when/how hard to undo a bad write,
+    /// rather than the magnitude being hand-coded. On by default (all runtimes): the perception-conditioned edit
+    /// head is trained on every run (the within-step reward updates _editPerceptionW). Set false for token-only.
+    /// </summary>
+    public bool PerceptionEdit { get; set; } = true;
+
+    /// <summary>
+    /// POINTER-over-neighbourhood (SPACE_AWARE_GRU.md §D): how many of the anchor's nearest NON-target
+    /// neighbours to repel when space-aware editing, instead of only the single nearest. >1 lets the controller
+    /// clear several competing distractors at once. Default 3: with <see cref="PerceptionEdit"/> on, the learned
+    /// magnitude m chooses HOW MANY of the top-k (1..RepelNeighbors) to clear, so the pointer head can clear
+    /// several competitors when its read says to (and stays at 1 when it doesn't). Default 3 (all runtimes).
+    /// </summary>
+    public int RepelNeighbors { get; set; } = 3;
 
     public InferenceTelemetryHint InferenceTelemetryHint => _inferenceTelemetryHint;
     public int SpaceToolParseFailureCount => _spaceToolParseFailureCount;
@@ -343,6 +383,7 @@ public sealed class GenesisTrainer
         MineComposerShapes(example.Input, example.Output);
         var concepts = ObserveLearningSignals(example);
         RewardEditHead(example, baseLoss.TokenLoss);
+        MaybeReinforceRoute(example, inputTokens);
 
         var consistencyLoss = EstimatePlatonicConsistency(concepts, IsNegativeText(outputText));
         var conservationLoss = EstimateConservationDrift(inputTokens);
@@ -389,6 +430,7 @@ public sealed class GenesisTrainer
         MineComposerShapes(example.Input, example.Output);
         var concepts = ObserveLearningSignals(example);
         RewardEditHead(example, baseLoss.TokenLoss);
+        MaybeReinforceRoute(example, inputTokens);
 
         var consistencyLoss = EstimatePlatonicConsistency(concepts, IsNegativeText(example.Output));
         var conservationLoss = EstimateConservationDrift(inputTokens);
@@ -605,7 +647,12 @@ public sealed class GenesisTrainer
           // backwards never share graph state — the "backward through the graph a second time" trigger
           // that surfaced at the arithmetic phase of long autonomous runs. ReinforceEditHead re-encodes a
           // detached snapshot internally, so it doesn't need the (now freed) main graph.
-          RewardEditHead(example, loss.TokenLoss);
+          // SPEED: it's a second forward/backward per example — reinforce only 1-in-N examples.
+          if (_trainStepCount % EditHeadReinforceStride == 0)
+          {
+             RewardEditHead(example, loss.TokenLoss);
+             MaybeReinforceRoute(example, inputTokens);
+          }
        }
 
        var avgTokenLoss = totalTokenLoss / Math.Max(1.0, totalTokenWeight);
@@ -791,6 +838,10 @@ public sealed class GenesisTrainer
     private IReadOnlyList<string> ResolveConcepts(string input, string output)
     {
         var mirror = ExtractMirrorConcepts(input, output);
+        // SPEED: the concept-planner below is a full per-example generation whose result the coupling mostly
+        // discards (the mirror dominates). Run it only 1-in-N examples; use the deterministic mirror otherwise.
+        if (mirror.Count > 0 && (++_conceptPlanTick % ConceptPlanStride) != 0)
+            return mirror;
         var prompt = BuildConceptPlanPrompt(input, output, mirror);
         var maxTokens = Math.Clamp(8 + (mirror.Count * 2), 8, 48);
         var generated = GenerateAndObserveInference(
@@ -908,13 +959,18 @@ public sealed class GenesisTrainer
         return parsed;
     }
 
-    private static IReadOnlyList<string> ExtractMirrorConcepts(string input, string output)
+    // Instance (not static) so it can consult the space's op-token registry: an op-token (e.g. "find") is a
+    // ROUTE TRIGGER, never a relation concept — dropping it here keeps it out of input→output coupling AND out
+    // of the retrieval anchor (inputConcepts[0]), so it can never overload a target and collapse retrieval to
+    // one key. The route head still learns it from the raw input tokens. (See PlatonicSpaceMemory op-tokens.)
+    private IReadOnlyList<string> ExtractMirrorConcepts(string input, string output)
     {
         var words = $"{input} {output}"
             .ToLowerInvariant()
             .Split(' ', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
             .Select(NormalizeConceptToken)
             .Where(static w => w.Length > 0)
+            .Where(w => !_platonicSpace.IsOperationToken(w))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .Take(MaxConceptCount)
             .ToArray();
@@ -989,9 +1045,9 @@ public sealed class GenesisTrainer
         // SEQ (Concatenate-Composition) and REF (higher-order) shapes: the glider plan assembles + runs them
         // on the substrate (Literal∘Compute / Ref→larger ×2), exact and space-independent → platonic-direct
         // (route 1). Same structure detectors the plan-label uses, so route + plan agree.
-        if (numOpsForWord >= 2 && TrySeqSegments(rawArithToks, predOut, out _))
+        if (numOpsForWord >= 2 && GenesisLabelResolver.TrySeqSegments(rawArithToks, predOut, out _))
             return 1;
-        if (numOpsForWord == 2 && IsTwiceLarger(rawArithToks, predOut))
+        if (numOpsForWord == 2 && GenesisLabelResolver.IsTwiceLarger(rawArithToks, predOut))
             return 1;
 
         // General (non-arithmetic) modality: the universal platonic op is RETRIEVAL. Label the
@@ -1021,8 +1077,9 @@ public sealed class GenesisTrainer
             var chainCoverage = TokenCoverage(outputTokens, chainTokens);
             if (chainCoverage >= 0.999)
                 return outputTokens.Count <= 1 ? 1 : 2;
-            if (chainCoverage >= 0.5)
-                return 2; // partial relational reconstruction → assisted.
+            if (chainCoverage >= 0.35)
+                return 2; // partial relational reconstruction → assisted (warmed: supervise platonic earlier,
+                          // as the relation builds, instead of waiting for near-complete reconstruction).
         }
 
         // (b) Nearest-concept retrieval: is the target's concept the nearest neighbour of the
@@ -1070,111 +1127,12 @@ public sealed class GenesisTrainer
     {
         if (string.IsNullOrWhiteSpace(input) || string.IsNullOrWhiteSpace(output))
             return;
-        var toks = input.Trim().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
-        var outT = output.Trim().ToLowerInvariant();
-        if (TrySeqSegments(toks, outT, out var scaffold) && !string.IsNullOrWhiteSpace(scaffold))
+        if (_labelResolver.TryGetSeqScaffold(input, output, out var scaffold) && !string.IsNullOrWhiteSpace(scaffold))
             _platonicSpace.MineChunk(PlatonicSpaceMemory.SeqScaffoldTag, scaffold);
     }
 
     private int? ResolvePlanLabel(string? input, string? output)
-    {
-        if (string.IsNullOrWhiteSpace(input) || string.IsNullOrWhiteSpace(output))
-            return null;
-        var inv = System.Globalization.CultureInfo.InvariantCulture;
-        const System.Globalization.NumberStyles ns =
-            System.Globalization.NumberStyles.AllowLeadingSign | System.Globalization.NumberStyles.AllowDecimalPoint;
-        var outT = output.Trim().ToLowerInvariant();
-        var toks = input.Trim().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
-        var numericOperands = toks.Count(t => double.TryParse(t, ns, inv, out _));
-        var outIsNumber = double.TryParse(outT, ns, inv, out _);
-
-        if (outT is "greater" or "less" or "equal") return 2;        // predicate
-        // Fold (variadic reduce): ≥3 numeric operands whose sum/product equals the numeric output.
-        if (numericOperands >= 3 && double.TryParse(outT, ns, inv, out var foldOut))
-        {
-            var vals = toks.Where(t => double.TryParse(t, ns, inv, out _)).Select(t => double.Parse(t, ns, inv)).ToList();
-            if (Math.Abs(vals.Sum() - foldOut) < 1e-6) return 5;                          // fold-sum
-            if (Math.Abs(vals.Aggregate(1.0, (s, v) => s * v) - foldOut) < 1e-6) return 6; // fold-product
-        }
-        if (numericOperands >= 2 && GenesisNova.Core.NumberWordVocabulary.WordToValue.ContainsKey(outT))
-            return 4;                                                // arithmetic → word-formatted result
-
-        // SEQ (plan-kind 7) — a Concatenate-Composition: a scaffold chunk bound to a computed value. The
-        // OUTPUT'S OWN STRUCTURE is "<scaffold> <number>" where the number == sum of the ≥2 numeric operands
-        // (the computed segment). Derived, not surface-matched on the input: ANY scaffold word(s) trailed by
-        // the operands' sum is a Seq (Literal scaffold ∘ Compute(Add)). The GRU selects the shape; the
-        // substrate concatenates a cached chunk with an R2-composed value.
-        if (numericOperands >= 2 && TrySeqSegments(toks, outT, out _))
-            return 7;
-
-        // REF (plan-kind 8) — higher-order: 2·max(a,b), a Ref to a "larger" glider (Compare→Branch) scaled
-        // ×2. Derived from structure: exactly two numeric operands and output == 2·max of them (and NOT a
-        // plain arithmetic identity like a+b/a*b that the digit-arithmetic shape already owns).
-        if (numericOperands == 2 && outIsNumber && IsTwiceLarger(toks, outT))
-            return 8;
-
-        if (numericOperands >= 2 && outIsNumber) return 1;           // arithmetic (digit)
-        if (numericOperands == 0 && toks.Length >= 1 && !outIsNumber) return 3; // retrieval
-        return 0;                                                    // none/abstain
-    }
-
-    /// <summary>
-    /// SEQ structure detector: is the output a scaffold chunk (one+ non-numeric words) followed by a single
-    /// number equal to the SUM of the input's numeric operands? If so, returns the scaffold words (the cached
-    /// chunk a Literal emits) and reports a match. This is the Concatenate-Composition signature — a known
-    /// text chunk bound to a computed value — derived from the example's own structure, NOT a surface rule on
-    /// the input phrasing (so the GRU learns to select Seq from any prompt whose answer has this shape).
-    /// </summary>
-    private static bool TrySeqSegments(IReadOnlyList<string> inputToks, string output, out string scaffold)
-    {
-        scaffold = string.Empty;
-        var inv = System.Globalization.CultureInfo.InvariantCulture;
-        const System.Globalization.NumberStyles ns =
-            System.Globalization.NumberStyles.AllowLeadingSign | System.Globalization.NumberStyles.AllowDecimalPoint;
-        var outToks = output.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
-        if (outToks.Length < 2)
-            return false; // need scaffold + a computed segment
-        var last = outToks[^1];
-        if (!double.TryParse(last, ns, inv, out var tail))
-            return false; // final segment must be the computed number
-        // The leading segment(s) must be non-numeric scaffold words.
-        for (var k = 0; k < outToks.Length - 1; k++)
-            if (double.TryParse(outToks[k], ns, inv, out _))
-                return false;
-        var operands = inputToks.Where(t => double.TryParse(t, ns, inv, out _))
-                                .Select(t => double.Parse(t, ns, inv)).ToList();
-        if (operands.Count < 2)
-            return false;
-        if (Math.Abs(operands.Sum() - tail) > 1e-6)
-            return false; // computed segment must equal the operands' sum (the Compute(Add) part)
-        scaffold = string.Join(' ', outToks.Take(outToks.Length - 1));
-        return true;
-    }
-
-    /// <summary>
-    /// REF structure detector: exactly two numeric operands and output == 2·max(a,b). Excludes the cases the
-    /// plain digit-arithmetic shape already owns (output also equal to a+b or a·b) so the label is the
-    /// genuine higher-order shape (Ref→larger, scaled ×2), not an arithmetic identity.
-    /// </summary>
-    private static bool IsTwiceLarger(IReadOnlyList<string> inputToks, string output)
-    {
-        var inv = System.Globalization.CultureInfo.InvariantCulture;
-        const System.Globalization.NumberStyles ns =
-            System.Globalization.NumberStyles.AllowLeadingSign | System.Globalization.NumberStyles.AllowDecimalPoint;
-        var operands = inputToks.Where(t => double.TryParse(t, ns, inv, out _))
-                                .Select(t => double.Parse(t, ns, inv)).ToList();
-        if (operands.Count != 2)
-            return false;
-        if (!double.TryParse(output, ns, inv, out var target))
-            return false;
-        var (a, b) = (operands[0], operands[1]);
-        if (Math.Abs(2.0 * Math.Max(a, b) - target) > 1e-6)
-            return false;
-        // Don't claim an arithmetic identity the digit shape would also satisfy (ambiguous supervision).
-        if (Math.Abs((a + b) - target) < 1e-6 || Math.Abs((a * b) - target) < 1e-6)
-            return false;
-        return true;
-    }
+        => _labelResolver.ResolvePlanLabel(input, output);
 
     /// <summary>
     /// Derives supervision for the GRU's platonic-query construction heads from the example's OWN
@@ -1186,65 +1144,7 @@ public sealed class GenesisTrainer
     /// match) or non-conforming examples return null: unsupervised, costs nothing.
     /// </summary>
     internal GenesisQueryLabel? ResolveQueryLabel(IReadOnlyList<int> inputTokens, string? output)
-    {
-        if (inputTokens.Count == 0 || string.IsNullOrWhiteSpace(output))
-            return null;
-        if (!double.TryParse(output.Trim(), System.Globalization.NumberStyles.AllowLeadingSign
-                | System.Globalization.NumberStyles.AllowDecimalPoint,
-                System.Globalization.CultureInfo.InvariantCulture, out var target))
-            return null;
-
-        var vocab = _tokenizer.Vocabulary;
-        bool IsDigitToken(int id) =>
-            id >= 0 && id < vocab.Count && vocab[id].Length == 1 && vocab[id][0] is >= '0' and <= '9';
-        bool IsMinusToken(int id) => id >= 0 && id < vocab.Count && vocab[id] == "-";
-
-        // Maximal SIGNED digit runs → operand values + their token index ranges. A '-' immediately
-        // before a digit run is UNARY (part of the operand) when it is not itself preceded by a digit
-        // — so "5 + -3" yields operands (5, −3) and stays an ADD, keeping the surface operator and
-        // the supervised face op consistent. (Without this, generator examples with negative second
-        // operands get value-relabelled as the opposite op and the op head learns surface noise.)
-        var runs = new List<(int Start, int End, double Value)>();
-        var i = 0;
-        while (i < inputTokens.Count)
-        {
-            var negative = false;
-            var start = i;
-            if (IsMinusToken(inputTokens[i])
-                && i + 1 < inputTokens.Count && IsDigitToken(inputTokens[i + 1])
-                && (i == 0 || !IsDigitToken(inputTokens[i - 1])))
-            {
-                negative = true;
-                i++;
-            }
-            if (i >= inputTokens.Count || !IsDigitToken(inputTokens[i])) { i = start + 1; continue; }
-            var value = 0.0;
-            while (i < inputTokens.Count && IsDigitToken(inputTokens[i]))
-            {
-                value = (value * 10.0) + (vocab[inputTokens[i]][0] - '0');
-                i++;
-            }
-            runs.Add((start, i, negative ? -value : value));
-        }
-        if (runs.Count != 2)
-            return null;
-
-        var (l, r) = (runs[0].Value, runs[1].Value);
-        var matches = new List<int>();
-        if (Math.Abs((l + r) - target) < 1e-9) matches.Add(1);
-        if (Math.Abs((l - r) - target) < 1e-9) matches.Add(2);
-        if (Math.Abs((l * r) - target) < 1e-9) matches.Add(3);
-        if (Math.Abs(r) > 1e-12 && Math.Abs((l / r) - target) < 1e-9) matches.Add(4);
-        if (matches.Count != 1)
-            return null; // ambiguous (e.g. 2+2 == 2*2) or no face op fits — leave unsupervised.
-
-        var mask = new bool[inputTokens.Count];
-        foreach (var run in runs)
-            for (var t = run.Start; t < run.End; t++)
-                mask[t] = true;
-
-        return new GenesisQueryLabel(matches[0], mask);
-    }
+        => _labelResolver.ResolveQueryLabel(inputTokens, output);
 
     private static IReadOnlyList<string> TokenizeForRouteMatch(string text)
     {
@@ -1552,10 +1452,35 @@ public sealed class GenesisTrainer
     // read by inference; its only effect was a telemetry counter. The one USEFUL tick capability (R2
     // Compose) is adapted directly by the glider blocks (PlatonicGlider via TickExecutor.ExecuteTick).
 
+    // The space-PERCEPTION vector the edit head reads (SPACE_AWARE_GRU.md §A,§C): how the target currently sits
+    // in the anchor's neighbourhood. A richer readout than rank alone — the learned perception weight (§C) reads
+    // over: [rankNorm (0=nearest,1=far/absent), distractor-winning, nearest-is-target, target-closeness,
+    // nearest-distractor-closeness, bias]. A poisoned anchor reads high rankNorm + distractor-winning + high
+    // distractor-closeness → the head can learn to repel hard.
+    private double[] ComputeEditPerception(IReadOnlyList<string> inputConcepts, IReadOnlyList<string> outputConcepts)
+    {
+        var anchor = inputConcepts.FirstOrDefault(c => !IsNumericConcept(c)) ?? inputConcepts[0];
+        var targetSet = new HashSet<string>(outputConcepts.Select(c => c.ToLowerInvariant()), StringComparer.OrdinalIgnoreCase);
+        var near = _platonicSpace.GetNearestConcepts(anchor, candidates: null, maxNeighbors: 8);
+        var rank = -1; var targetDist = double.NaN;
+        for (var i = 0; i < near.Count; i++)
+            if (targetSet.Contains(near[i].Symbol)) { rank = i; targetDist = near[i].Distance; break; }
+        var nearestIsTarget = near.Count > 0 && targetSet.Contains(near[0].Symbol) ? 1.0 : 0.0;
+        var distractorWinning = near.Count > 0 && !targetSet.Contains(near[0].Symbol) ? 1.0 : 0.0;
+        var rankNorm = rank < 0 ? 1.0 : Math.Clamp(rank / 8.0, 0.0, 1.0);
+        var targetCloseness = double.IsNaN(targetDist) ? 0.0 : 1.0 / (1.0 + Math.Max(0.0, targetDist));
+        var nearestCloseness = near.Count > 0 ? 1.0 / (1.0 + Math.Max(0.0, near[0].Distance)) : 0.0;
+        return new[] { rankNorm, distractorWinning, nearestIsTarget, targetCloseness, nearestCloseness, 1.0 };
+    }
+
     private void ObservePlatonicSpace(GenesisExample example, IReadOnlyList<string> concepts)
     {
         if (concepts.Count == 0)
             return;
+
+        // Snapshot how retrievable the target is BEFORE this step's writes, so RewardEditHead rewards the
+        // DELTA those writes cause (a dense, immediately-causal signal for the space-BUILDING edit head).
+        _pendingPreEditOutcome = ComputeEditOutcome(example);
 
         var hasArithmetic = TryExtractArithmeticObservation(example, out var arithmetic);
         if (hasArithmetic)
@@ -1613,6 +1538,22 @@ public sealed class GenesisTrainer
             return;
         }
 
+        // LEARNED space-awareness: recompute the edit magnitude CONDITIONED on a perceived space-state vector
+        // (rank-of-target / distractor-winning / nearest-is-target), so the head learns a read-before-write
+        // policy; that magnitude then scales the distractor repulsion below.
+        if (PerceptionEdit)
+        {
+            _pendingEditPerception = ComputeEditPerception(inputConcepts, outputConcepts);
+            var pm = Math.Clamp(_model.PredictEditMagnitude(editTokens, _pendingEditPerception), 0.0, 1.0);
+            m = Math.Clamp(pm + DeterministicEditExplorationNoise(_trainStepCount + 1), 0.0, 1.0);
+            _pendingEditMagnitude = m;
+            contradiction = isNegative ? (0.5 + (0.5 * m)) : (0.5 - (0.5 * m));
+        }
+        else
+        {
+            _pendingEditPerception = null;
+        }
+
         // Academic coupling: link each output concept to its SINGLE nearest input concept (the
         // genuinely-related pair, found via the lattice), NOT the full input×output mesh — and drop
         // output↔output coupling entirely (co-occurrence is not a relationship). This is the
@@ -1624,6 +1565,36 @@ public sealed class GenesisTrainer
         // and those spurious word↔number edges make the GRU treat "what" as an operand (measured: framed
         // arithmetic collapsed to 0/5). A single-token input ("one"→"1") IS a genuine number-word
         // equivalence and is still coupled. (PLATONIC_SPACE.md §6.2: arithmetic writes no relation edges.)
+        // SPACE-AWARE READ-BEFORE-WRITE: read each anchor's CURRENT nearest neighbour; if a non-target concept
+        // is winning (a distractor or a prior bad write), repel it (high contradiction = push apart) so the
+        // target can take the nearest slot. This is what lets the controller UNDO a bad write — the blind
+        // attract-only path below cannot (it never looks at what's already there). Positive examples only.
+        if ((SpaceAwareEdit || PerceptionEdit) && !isNegative)
+        {
+            // Repel strength: hand-coded (SpaceAwareEdit oracle) vs LEARNED from the perception-conditioned
+            // magnitude m (PerceptionEdit) — the GRU learns, via reward, how hard to push the distractor away.
+            var repel = PerceptionEdit ? Math.Clamp(0.5 + (0.5 * m), 0.5, 1.0) : 0.9;
+            var targetSet = new HashSet<string>(outputConcepts.Select(c => c.ToLowerInvariant()), StringComparer.OrdinalIgnoreCase);
+            // LEARNED POINTER COUNT (§D): when perception-driven, the GRU's magnitude m decides HOW MANY of the
+            // nearest distractors to clear (1..RepelNeighbors) — not a fixed count. Hand-coded mode uses the cap.
+            var k = PerceptionEdit
+                ? Math.Clamp(1 + (int)Math.Round(m * (RepelNeighbors - 1)), 1, Math.Max(1, RepelNeighbors))
+                : Math.Max(1, RepelNeighbors);
+            foreach (var anchor in inputConcepts)
+            {
+                if (IsNumericConcept(anchor)) continue;
+                // POINTER over the neighbourhood: repel the top-k nearest NON-target concepts (distractors), not
+                // just the single nearest — clears multiple competitors so the target can take the nearest slot.
+                var near = _platonicSpace.GetNearestConcepts(anchor, candidates: null, maxNeighbors: k);
+                foreach (var n in near)
+                {
+                    if (targetSet.Contains(n.Symbol) || IsNumericConcept(n.Symbol)
+                        || n.Symbol.Equals(anchor, StringComparison.OrdinalIgnoreCase)) continue;
+                    _platonicSpace.ObserveContradiction(anchor, n.Symbol, repel); // repel a winning distractor
+                }
+            }
+        }
+
         var outputComputed = inputConcepts.Count > 1;
         foreach (var output in outputConcepts)
         {
@@ -1662,6 +1633,23 @@ public sealed class GenesisTrainer
     // This nudges PredictEditMagnitude toward the write strength that genuinely improves retrieval,
     // and the exploration noise added to m (in ObservePlatonicSpace) prevents the m->0 fixed point.
     // tokenLoss is retained in the signature (callers pass it) but no longer drives the reward.
+    // PERCEPTION ROUTING (SPACE_AWARE_GRU.md §I): teach the route head to route platonic from PERCEIVED
+    // retrievability. We reinforce the route-perception weight TOWARD the resolved route label (which the space's
+    // retrievability determines) given the TARGET-AGNOSTIC route perception of the anchor — so at inference, a
+    // query whose anchor "looks answerable" gets routed platonic. No-op unless the model has PerceptionRouting on.
+    private void MaybeReinforceRoute(GenesisExample example, IReadOnlyList<int> inputTokens)
+    {
+        if (!_model.PerceptionRouting)
+            return;
+        if (ResolveRouteLabel(example) is not int routeLabel)
+            return;
+        var inputConcepts = ExtractMirrorConcepts(example.Input, string.Empty);
+        if (inputConcepts.Count == 0)
+            return;
+        var anchor = inputConcepts.FirstOrDefault(c => !IsNumericConcept(c)) ?? inputConcepts[0];
+        _model.ReinforceRouteHead(inputTokens, _platonicSpace.ComputeRoutePerception(anchor), routeLabel, 1.0);
+    }
+
     private void RewardEditHead(GenesisExample example, double tokenLoss)
     {
         _ = tokenLoss; // no longer causally relevant to the edit-head reward
@@ -1670,25 +1658,21 @@ public sealed class GenesisTrainer
         if (pending is null || pending.Count == 0)
             return;
 
-        var outcome = ComputeEditOutcome(example);
-
-        var key = (example.Input ?? string.Empty) + "" + (example.Output ?? string.Empty);
-        var reward = _exampleOutcomeBaseline.TryGetValue(key, out var prev)
-            ? outcome - prev     // positive when retrieval improved vs the last sighting of this example
-            : 0.0;               // first sighting → neutral
-        _exampleOutcomeBaseline[key] = outcome;
-
-        // Bound the baseline map so it cannot grow without limit across a long run.
-        if (_exampleOutcomeBaseline.Count > 50_000)
-            _exampleOutcomeBaseline.Clear();
-
-        _model.ReinforceEditHead(pending, _pendingEditMagnitude, reward);
+        // WITHIN-STEP CAUSAL REWARD: how much THIS step's writes improved the (contrastive, bidirectional)
+        // retrievability of the target (post vs the pre snapshot). + helped, - hurt; order-invariant, so the
+        // answer-order shuffling no longer zeroes it and multi-answer sets finally get a building signal.
+        var post = ComputeEditOutcome(example);
+        var reward = post - _pendingPreEditOutcome;
+        _model.ReinforceEditHead(pending, _pendingEditPerception, _pendingEditMagnitude, reward);
+        _pendingEditPerception = null;
     }
 
-    // Space-state-dependent outcome in [0,1]: does the platonic space now retrieve/produce the correct
-    // output for this input? Retrieval is the universal op (generalizes across modalities). Scored by
-    // whether the target output concept is the nearest / in the top-K neighbours of the primary input
-    // concept, graded by rank and distance; arithmetic correctness is credited via the face path.
+    // Space-state-dependent outcome in [0,1]: how COHESIVELY the space holds the input↔output association.
+    // CONTRASTIVE — the target must out-rank ALL other concepts (candidates: null → distractors compete), not
+    // merely be close in isolation, so a write that SEPARATES the pair from confusers scores higher (attacks
+    // the "disjointed space"). BIDIRECTIONAL — scored both cue→answer and answer→cue and averaged, so the
+    // association is a mutual neighbour (a real lattice edge), not a one-way coincidence. Arithmetic is credited
+    // via the face path. Used both to reward the edit head (pre/post delta) and to warm the route label.
     private double ComputeEditOutcome(GenesisExample example)
     {
         // Arithmetic: credit numerical correctness directly (already mirrored into the space's faces
@@ -1706,31 +1690,28 @@ public sealed class GenesisTrainer
         if (inputConcepts.Count == 0 || outputConcepts.Count == 0)
             return 0.0;
 
+        var inputSet = new HashSet<string>(inputConcepts.Select(c => c.ToLowerInvariant()), StringComparer.OrdinalIgnoreCase);
+        var outputSet = new HashSet<string>(outputConcepts.Select(c => c.ToLowerInvariant()), StringComparer.OrdinalIgnoreCase);
+
+        var forward = DirectedRetrievalScore(inputConcepts[0], outputSet);   // cue → answer
+        var backward = DirectedRetrievalScore(outputConcepts[0], inputSet);  // answer → cue
+        return Clamp01((0.5 * forward) + (0.5 * backward));
+    }
+
+    // Contrastive directed retrieval: how high the target ranks among ALL of `from`'s nearest neighbours
+    // (distractors included). Nearest-among-everything → ~1; buried under confusers / absent → ~0.
+    private double DirectedRetrievalScore(string from, HashSet<string> targetSymbols)
+    {
         const int maxNeighbors = 8;
-        var primaryInput = inputConcepts[0];
-        var nearest = _platonicSpace.GetNearestConcepts(
-            primaryInput,
-            candidates: outputConcepts,
-            maxNeighbors: maxNeighbors);
-        if (nearest.Count == 0)
-            return 0.0;
-
-        var outputConceptSet = new HashSet<string>(
-            outputConcepts.Select(c => c.ToLowerInvariant()),
-            StringComparer.OrdinalIgnoreCase);
-
+        var nearest = _platonicSpace.GetNearestConcepts(from, candidates: null, maxNeighbors: maxNeighbors);
         for (var rank = 0; rank < nearest.Count; rank++)
         {
-            if (!outputConceptSet.Contains(nearest[rank].Symbol))
+            if (!targetSymbols.Contains(nearest[rank].Symbol))
                 continue;
-
-            // Graded by rank (nearest = best) AND by distance (closer = better); combine so the
-            // single nearest exact hit scores ~1 and deeper/farther hits decay toward 0.
             var rankScore = 1.0 / (1.0 + rank);
             var distanceScore = 1.0 / (1.0 + Math.Max(0.0, nearest[rank].Distance));
             return Clamp01((0.5 * rankScore) + (0.5 * distanceScore));
         }
-
         return 0.0;
     }
 

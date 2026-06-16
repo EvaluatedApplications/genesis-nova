@@ -1,0 +1,13 @@
+# ClaudeMemory fallback truth table (used when no --index / $CLAUDE_MEMORY_FILE is given).
+# Format:  cue => response   (teach a one-way association)   |   a <=> b   (relate both ways)
+# This is the SOURCE OF TRUTH for the associations below — edit it and run `rebuild` to recompute.
+# Tool locations under claude/ are auto-derived from the live repo, so they need not be listed here.
+
+genesis nova => platonic interface trainer
+diagnostic => GenesisInspect
+inspect model => GenesisInspect
+memory index => ClaudeMemory
+benchmark => RaceBench
+race => RaceBench
+arithmetic routing <=> router erosion
+forgetting <=> retention

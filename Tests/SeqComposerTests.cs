@@ -26,7 +26,7 @@ public sealed class SeqComposerTests
     private readonly ITestOutputHelper _out;
     public SeqComposerTests(ITestOutputHelper o) => _out = o;
 
-    [Fact]
+    [SlowFact]
     public void Seq_ComposerEmerges_ScaffoldPlusComputed_ViaPlanHead_AndGeneralises()
     {
         var config = new GenesisNovaConfig(HiddenSize: ProductionDims.HiddenSize, LearningRate: 0.05);

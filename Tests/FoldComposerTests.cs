@@ -25,7 +25,7 @@ public sealed class FoldComposerTests
     private readonly ITestOutputHelper _out;
     public FoldComposerTests(ITestOutputHelper o) => _out = o;
 
-    [Fact]
+    [SlowFact]
     public void Fold_ComposerEmerges_ReducesVariadically_ViaPlanHead()
     {
         var config = new GenesisNovaConfig(HiddenSize: ProductionDims.HiddenSize, LearningRate: 0.05);

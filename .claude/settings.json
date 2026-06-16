@@ -1,0 +1,21 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell",
+            "args": [
+              "-NoProfile",
+              "-ExecutionPolicy",
+              "Bypass",
+              "-File",
+              "C:\\Users\\dongy\\genesis-nova\\claude\\start-memory-daemon.ps1"
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

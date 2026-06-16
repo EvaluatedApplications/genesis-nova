@@ -52,7 +52,7 @@ public sealed class SpaceGeometryTests
             new[] { "sa", "si", "su" },
         };
 
-        for (var epoch = 0; epoch < 40; epoch++)
+        for (var epoch = 0; epoch < 200; epoch++)
             foreach (var c in clusters)
                 for (var i = 0; i + 1 < c.Length; i++)
                     m.ObserveContradiction(c[i], c[i + 1], 0.1); // low contradiction = agree → attract

@@ -22,7 +22,7 @@ void P(string s) { Console.WriteLine(s); log.WriteLine(s); }
 void Rule() => P(new string('═', 86));
 
 var dev = cuda.is_available() ? CUDA : CPU;
-const int HIDDEN = 256, EPOCHS = 20, SEED = 7;  // SMALL: nova keeps all faces (poly/log/char/word); the
+const int HIDDEN = 256, SEED = 7;  // SMALL: nova keeps all faces (poly/log/char/word); the
                                                 // question is whether a transformer this size has the capacity
 var rng = new Random(SEED);
 
@@ -81,13 +81,15 @@ P("  GENESIS-NOVA  vs  TRANSFORMER    —    FULL CURRICULUM (every creator), eq
 Rule();
 P($"  device      : {dev.type}");
 P($"  curriculum  : {string.Join(", ", creators.Select(c => c.Name))}");
-P($"  data        : train {train.Count}   held-out {heldAll.Count}   epochs {EPOCHS}   tokenizer shared");
+P($"  data        : train {train.Count}   held-out {heldAll.Count}   tokenizer shared   (runs until a key is pressed)");
 P($"  nova        : {novaParams,10:N0} params   ~{NovaMB,5:F1} MB   (GRU controller + platonic substrate, SGD)");
 P($"  transformer : {xf.ParameterCount,10:N0} params   ~{XfMB,5:F1} MB   (d={best.d} L={best.L} h={best.h}, Adam)");
 P($"  budget      : EQUAL PARAMETERS, both SMALL — nova's structure needs little capacity; can a transformer this size find it?");
 Rule();
-P("  epoch │  NOVA  train   held-out   │  TRANSFORMER  train   held-out");
-P("  ──────┼──────────────────────────┼──────────────────────────────");
+P("  ASYNC RACE — each model trains in its own task and posts a line the moment it finishes an epoch.");
+P("  (GPU kernels are serialized on the single CUDA stream; the race is per-epoch throughput — faster pulls ahead.)");
+P("  >>> PRESS ANY KEY to stop the race and print the final per-creator breakdown. <<<");
+P("  ──────────────────────────────────────────────────────────────────────────────────────────────────────────");
 
 double Acc(Func<string, string> gen, List<(string Input, string Output)> data)
 {
@@ -97,24 +99,68 @@ double Acc(Func<string, string> gen, List<(string Input, string Output)> data)
 }
 string NovaGen(string i) => inference.Generate(new GenerationRequest(i, 8)).Output.Trim();
 
-for (var ep = 1; ep <= EPOCHS; ep++)
+// Two locks: `gpu` serializes ALL GPU/model work (one CUDA stream — concurrent kernel launches are unsafe),
+// `outLock` serializes console+log output. Each model runs its OWN epoch loop in its OWN task and reports the
+// instant it finishes an epoch, so the faster model gets through the GPU lock more often and pulls ahead.
+var gpu = new object();
+var outLock = new object();
+var swRace = System.Diagnostics.Stopwatch.StartNew();
+double lastNovaHeld = 0, lastXfHeld = 0;
+const int CHUNK = 32; // GPU-lock granularity: hand the GPU back every CHUNK examples so the two tasks interleave
+
+void Post(string who, ConsoleColor color, int ep, double tr, double held, double otherHeld)
 {
-    var order = train.OrderBy(_ => rng.Next()).ToList();
-    foreach (var (i, o) in order) novaTrainer.TrainStep(new GenesisExample(i, o));
-    for (var b = 0; b < order.Count; b += 32)
-        xf.TrainBatch(order.Skip(b).Take(32).ToList());
-
-    var nt = Acc(NovaGen, evalTrain); var nh = Acc(NovaGen, evalHeld);
-    var tt = Acc(xf.Generate, evalTrain); var th = Acc(xf.Generate, evalHeld);
-
-    log.WriteLine($"  {ep,4}  │  NOVA  {nt,6:P0} {nh,9:P0}   │  XF       {tt,6:P0} {th,9:P0}");
-    Console.Write($"  {ep,4}  │  NOVA  ");
-    void Cell(double v, double other) { Console.ForegroundColor = v > other + 1e-9 ? ConsoleColor.Green : ConsoleColor.Gray; Console.Write($"{v,6:P0}"); Console.ResetColor(); }
-    Cell(nt, tt); Console.Write("  "); Cell(nh, th);
-    Console.Write("   │  XF      ");
-    Cell(tt, nt); Console.Write("  "); Cell(th, nh);
-    Console.WriteLine();
+    var lead = held > otherHeld + 1e-9 ? "▲ ahead" : held < otherHeld - 1e-9 ? "▼ behind" : "= even";
+    var line = $"  {who,-11} ep {ep,3}   train {tr,5:P0}   held-out {held,5:P0}   {lead,-8} (t {swRace.Elapsed.TotalSeconds,6:F1}s)";
+    lock (outLock)
+    {
+        log.WriteLine(line);
+        Console.ForegroundColor = color; Console.WriteLine(line); Console.ResetColor();
+    }
 }
+
+// Run until the user presses a key (interactive console). A safety cap bounds non-interactive/piped runs.
+const int SAFETYCAP = 100_000;
+var cts = new System.Threading.CancellationTokenSource();
+var keyWatcher = Task.Run(() =>
+{
+    if (Console.IsInputRedirected) return; // no interactive key (piped/redirected) — run to the safety cap
+    Console.ReadKey(intercept: true);
+    cts.Cancel();
+    lock (outLock) { Console.WriteLine(); Console.WriteLine("  ⏹  stop requested — each model finishes its current epoch, then the final breakdown…"); }
+});
+
+var novaTask = Task.Run(() =>
+{
+    var rngN = new Random(SEED + 11);
+    for (var ep = 1; ep <= SAFETYCAP && !cts.IsCancellationRequested; ep++)
+    {
+        var order = train.OrderBy(_ => rngN.Next()).ToList();
+        for (var b = 0; b < order.Count; b += CHUNK)
+            lock (gpu) { foreach (var (i, o) in order.Skip(b).Take(CHUNK)) novaTrainer.TrainStep(new GenesisExample(i, o)); }
+        double nt, nh;
+        lock (gpu) { nt = Acc(NovaGen, evalTrain); nh = Acc(NovaGen, evalHeld); }
+        lastNovaHeld = nh;
+        Post("NOVA", ConsoleColor.Cyan, ep, nt, nh, lastXfHeld);
+    }
+});
+
+var xfTask = Task.Run(() =>
+{
+    var rngX = new Random(SEED + 22);
+    for (var ep = 1; ep <= SAFETYCAP && !cts.IsCancellationRequested; ep++)
+    {
+        var order = train.OrderBy(_ => rngX.Next()).ToList();
+        for (var b = 0; b < order.Count; b += CHUNK)
+            lock (gpu) { xf.TrainBatch(order.Skip(b).Take(CHUNK).ToList()); }
+        double tt, th;
+        lock (gpu) { tt = Acc(xf.Generate, evalTrain); th = Acc(xf.Generate, evalHeld); }
+        lastXfHeld = th;
+        Post("TRANSFORMER", ConsoleColor.Yellow, ep, tt, th, lastNovaHeld);
+    }
+});
+
+await Task.WhenAll(novaTask, xfTask);
 
 Rule();
 P("  FINAL held-out accuracy per creator (full held-out sets):");
@@ -130,7 +176,7 @@ var novaAll = Acc(NovaGen, heldAll); var xfAll = Acc(xf.Generate, heldAll);
 Rule();
 P($"  OVERALL held-out : nova {novaAll:P1}  vs  transformer {xfAll:P1}");
 P($"  footprint        : nova ~{NovaMB:F1} MB   transformer ~{XfMB:F1} MB   (equal params; nova half the VRAM)");
-P($"  note             : both trained FLAT for {EPOCHS} epochs (nova's mastery-gated regime not used here);");
+P($"  note             : both trained FLAT until stopped (nova's mastery-gated regime not used here);");
 P($"                     a transformer needs far more epochs to fit train — this is the equal-budget result.");
 Rule();
 Console.WriteLine($"\n(log written to {logPath})");

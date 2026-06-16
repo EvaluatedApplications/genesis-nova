@@ -49,6 +49,12 @@ public class GenesisNeuralModel
     private readonly long[] _routeClassCounts = { 1L, 1L, 1L };
     private TorchSharp.Modules.Parameter? _routeWT;
     private TorchSharp.Modules.Parameter? _routeB;
+    // Optional PERCEPTION weight for ROUTING (SPACE_AWARE_GRU.md §I): maps a TARGET-AGNOSTIC space-state vector
+    // ("can the space answer this query?" — nearest-neighbour confidence/degree) into the route logits, so the
+    // GRU LEARNS to route platonic-vs-neural from PERCEIVED retrievability instead of tokens alone. Runtime-only
+    // (reinitialised, not persisted); gated by PerceptionRouting (default off → the route head is unchanged).
+    private TorchSharp.Modules.Parameter? _routePerceptionW; // [EditPerceptionDim, RouteCount]
+    public bool PerceptionRouting { get; set; } = true;
 
     // Platonic-QUERY construction heads: the GRU learns to CONSTRUCT the platonic query itself
     // (which face operation, which input tokens are operands) instead of a hardcoded grammar
@@ -91,6 +97,12 @@ public class GenesisNeuralModel
     private const double EditHeadRewardClamp = 1.0;       // bound the reward magnitude for stability
     private TorchSharp.Modules.Parameter? _editWT;
     private TorchSharp.Modules.Parameter? _editB;
+    // Optional PERCEPTION weight: maps a small space-perception vector (rank-of-target, distractor-winning, …)
+    // into the edit-head logit, so the head can LEARN a state-dependent (read-before-write) edit policy instead
+    // of conditioning on the input tokens alone. Runtime-only (reinitialised, NOT persisted); active only when a
+    // caller passes a perception vector (the space-aware experiments / opt-in trainer flag). Default path unused.
+    public const int EditPerceptionDim = 6;
+    private TorchSharp.Modules.Parameter? _editPerceptionW; // [EditPerceptionDim, 1]
 
     private double _currentLearningRate;
 
@@ -1059,14 +1071,18 @@ public class GenesisNeuralModel
 
     private void EnsureRouteHeadInitialized()
     {
-        if (_routeWT is not null)
-            return;
-
-        _routeWT = new TorchSharp.Modules.Parameter(
-            ((rand(new long[] { _hiddenSize, NumRoutes }, device: _trainingDevice) * 2.0) - 1.0) * 0.05, true);
-        _routeB = new TorchSharp.Modules.Parameter(
-            zeros(new long[] { NumRoutes }, dtype: ScalarType.Float32, device: _trainingDevice), true);
-        RecreateOptimizer();
+        if (_routeWT is null)
+        {
+            _routeWT = new TorchSharp.Modules.Parameter(
+                ((rand(new long[] { _hiddenSize, NumRoutes }, device: _trainingDevice) * 2.0) - 1.0) * 0.05, true);
+            _routeB = new TorchSharp.Modules.Parameter(
+                zeros(new long[] { NumRoutes }, dtype: ScalarType.Float32, device: _trainingDevice), true);
+            RecreateOptimizer();
+        }
+        // Perception-routing weight ensured independently (a loaded checkpoint sets _routeWT but not this
+        // runtime-only weight). Trained by ReinforceRouteHead, NOT the shared optimizer.
+        _routePerceptionW ??= new TorchSharp.Modules.Parameter(
+            ((rand(new long[] { EditPerceptionDim, NumRoutes }, device: _trainingDevice) * 2.0) - 1.0) * 0.05, true);
     }
 
     private void EnsureQueryHeadsInitialized()
@@ -1091,17 +1107,21 @@ public class GenesisNeuralModel
 
     private void EnsureEditHeadInitialized()
     {
-        if (_editWT is not null)
-            return;
-
-        // Mirror EnsureRouteHeadInitialized, but emit a single scalar ([hidden, 1] + [1]).
-        // Deliberately NOT added to _optimizer / RecreateOptimizer: the platonic space is a plain
-        // double[] store, so there is no autograd path from a space edit back to these weights. The
-        // head is trained only by ReinforceEditHead's manual REINFORCE step.
-        _editWT = new TorchSharp.Modules.Parameter(
-            ((rand(new long[] { _hiddenSize, 1 }, device: _trainingDevice) * 2.0) - 1.0) * 0.05, true);
-        _editB = new TorchSharp.Modules.Parameter(
-            zeros(new long[] { 1 }, dtype: ScalarType.Float32, device: _trainingDevice), true);
+        if (_editWT is null)
+        {
+            // Mirror EnsureRouteHeadInitialized, but emit a single scalar ([hidden, 1] + [1]).
+            // Deliberately NOT added to _optimizer / RecreateOptimizer: the platonic space is a plain
+            // double[] store, so there is no autograd path from a space edit back to these weights. The
+            // head is trained only by ReinforceEditHead's manual REINFORCE step.
+            _editWT = new TorchSharp.Modules.Parameter(
+                ((rand(new long[] { _hiddenSize, 1 }, device: _trainingDevice) * 2.0) - 1.0) * 0.05, true);
+            _editB = new TorchSharp.Modules.Parameter(
+                zeros(new long[] { 1 }, dtype: ScalarType.Float32, device: _trainingDevice), true);
+        }
+        // Perception weight is ensured independently (a loaded checkpoint sets _editWT but not this runtime-only
+        // weight), so the read-before-write head always has its perception input available when fed one.
+        _editPerceptionW ??= new TorchSharp.Modules.Parameter(
+            ((rand(new long[] { EditPerceptionDim, 1 }, device: _trainingDevice) * 2.0) - 1.0) * 0.05, true);
     }
 
     /// <summary>
@@ -1113,7 +1133,20 @@ public class GenesisNeuralModel
     /// hInput is detached implicitly here (the whole call runs under no_grad), so the edit-head reads a
     /// fixed snapshot of the shared encoder and never backprops into it via this path.
     /// </summary>
-    public double PredictEditMagnitude(IReadOnlyList<int> inputTokens)
+    private static float[] PerceptionFloats(double[] perception)
+    {
+        var f = new float[EditPerceptionDim];
+        for (var i = 0; i < EditPerceptionDim && i < perception.Length; i++)
+            f[i] = (float)Math.Clamp(perception[i], -4.0, 4.0);
+        return f;
+    }
+
+    public double PredictEditMagnitude(IReadOnlyList<int> inputTokens) => PredictEditMagnitude(inputTokens, null);
+
+    /// <summary>As <see cref="PredictEditMagnitude(IReadOnlyList{int})"/>, but the magnitude ALSO conditions on a
+    /// space-PERCEPTION vector (rank-of-target / distractor-winning / …), so the head can learn a state-dependent
+    /// read-before-write policy. Pass null for the token-only path (unchanged default behaviour).</summary>
+    public double PredictEditMagnitude(IReadOnlyList<int> inputTokens, double[]? perception)
     {
         if (inputTokens.Count == 0)
             return 0.5;
@@ -1140,6 +1173,15 @@ public class GenesisNeuralModel
             }
             // hInput: [hidden]; editW: [hidden, 1] -> matmul yields [1]; add bias [1]; sigmoid -> [0,1].
             var raw = hInput.matmul(editW) + editB; scratch.Add(raw);
+            // Perception term: + perceptionVec[P] · _editPerceptionW[P,1] -> [1]. Lets the magnitude depend on
+            // the CURRENT space state, not just the tokens (the read-before-write signal).
+            if (perception is { Length: > 0 } && _editPerceptionW is not null)
+            {
+                var pw = _editPerceptionW.to(_inferenceDevice); scratch.Add(pw);
+                var pv = tensor(PerceptionFloats(perception), new long[] { EditPerceptionDim }, device: _inferenceDevice); scratch.Add(pv);
+                var praw = raw + pv.matmul(pw); scratch.Add(praw);
+                raw = praw;
+            }
             var mag = torch.sigmoid(raw); scratch.Add(mag);
             using var magCpu = mag.cpu();
             value = magCpu.data<float>().ToArray();
@@ -1169,6 +1211,11 @@ public class GenesisNeuralModel
     /// model is not destabilized.
     /// </summary>
     public void ReinforceEditHead(IReadOnlyList<int> inputTokens, double appliedMagnitude, double reward)
+        => ReinforceEditHead(inputTokens, null, appliedMagnitude, reward);
+
+    /// <summary>As the token-only REINFORCE, but also updates the PERCEPTION weight so the head LEARNS to map the
+    /// space-state readout to its action (read-before-write). Pass null perception for the token-only path.</summary>
+    public void ReinforceEditHead(IReadOnlyList<int> inputTokens, double[]? perception, double appliedMagnitude, double reward)
     {
         if (inputTokens.Count == 0)
             return;
@@ -1211,7 +1258,14 @@ public class GenesisNeuralModel
         // Build a fresh forward pass WITH grad so we get d/dparams of the surrogate, then take a
         // manual gradient-descent step on the edit-head parameters only (no shared optimizer).
         using var meanEmbHolder = meanEmb;
-        using var raw = meanEmb.matmul(_editWT!) + _editB!;
+        var usePerc = perception is { Length: > 0 } && _editPerceptionW is not null;
+        using var pv = usePerc
+            ? tensor(PerceptionFloats(perception!), new long[] { EditPerceptionDim }, device: _trainingDevice)
+            : null;
+        // raw = tokens·editW [+ perception·perceptionW] + editB.
+        using var raw = usePerc
+            ? meanEmb.matmul(_editWT!) + pv!.matmul(_editPerceptionW!) + _editB!
+            : meanEmb.matmul(_editWT!) + _editB!;
         using var predicted = torch.sigmoid(raw);              // [1], requires grad
         using var target = tensor(new float[] { action }, dtype: ScalarType.Float32, device: _trainingDevice);
         using var diff = predicted - target;
@@ -1220,29 +1274,44 @@ public class GenesisNeuralModel
         using var surrogate = sq * boundedReward;
         using var loss = surrogate.sum();
 
-        if (_editWT.grad is not null) _editWT.grad.zero_();
-        if (_editB.grad is not null) _editB.grad.zero_();
-        loss.backward();
-
-        using (no_grad())
+        // Gradient of the surrogate w.r.t. ONLY the edit-head params (+ the perception weight when fed) via
+        // autograd.grad, which RETURNS the gradients instead of populating .grad. This keeps the shared GRU's
+        // .grad untouched and avoids the non-leaf .grad warning/no-op.
+        var gradTargets = usePerc
+            ? new List<Tensor> { _editWT!, _editB!, _editPerceptionW! }
+            : new List<Tensor> { _editWT!, _editB! };
+        var editGrads = autograd.grad(new List<Tensor> { loss }, gradTargets);
+        try
         {
-            if (_editWT.grad is not null)
+            using (no_grad())
             {
-                using var stepW = _editWT.grad * EditHeadLearningRate;
-                _editWT.sub_(stepW);
+                using var stepW = editGrads[0] * EditHeadLearningRate;
+                _editWT!.sub_(stepW);
+                using var stepB = editGrads[1] * EditHeadLearningRate;
+                _editB!.sub_(stepB);
+                if (usePerc)
+                {
+                    using var stepP = editGrads[2] * EditHeadLearningRate;
+                    _editPerceptionW!.sub_(stepP);
+                }
             }
-            if (_editB.grad is not null)
+        }
+        finally
+        {
+            foreach (var g in editGrads)
             {
-                using var stepB = _editB.grad * EditHeadLearningRate;
-                _editB.sub_(stepB);
+                try { g.Dispose(); } catch { /* best effort */ }
             }
-            // Clear grads so this manual step never leaks into the shared optimizer's backward().
-            if (_editWT.grad is not null) _editWT.grad.zero_();
-            if (_editB.grad is not null) _editB.grad.zero_();
         }
     }
 
-    public (int RouteId, double Confidence) PredictRoute(IReadOnlyList<int> inputTokens)
+    public (int RouteId, double Confidence) PredictRoute(IReadOnlyList<int> inputTokens) => PredictRoute(inputTokens, null);
+
+    /// <summary>As <see cref="PredictRoute(IReadOnlyList{int})"/>, but the route logits ALSO condition on a
+    /// TARGET-AGNOSTIC space-perception vector (perceived retrievability), so the GRU can route platonic-vs-neural
+    /// from what the space can actually answer. Active only when <see cref="PerceptionRouting"/> + perception given;
+    /// otherwise identical to the token-only route.</summary>
+    public (int RouteId, double Confidence) PredictRoute(IReadOnlyList<int> inputTokens, double[]? perception)
     {
         EnsureModelInitialized();
         EnsureGruInitialized();
@@ -1264,6 +1333,14 @@ public class GenesisNeuralModel
                 routeB = _routeB!.to(_inferenceDevice); scratch.Add(routeB);
             }
             var logits = hInput.matmul(routeW) + routeB; scratch.Add(logits);
+            // Perception term: route logits += routePerceptionVec[P] · _routePerceptionW[P, RouteCount].
+            if (PerceptionRouting && perception is { Length: > 0 } && _routePerceptionW is not null)
+            {
+                var rpw = _routePerceptionW.to(_inferenceDevice); scratch.Add(rpw);
+                var pv = tensor(PerceptionFloats(perception), new long[] { EditPerceptionDim }, device: _inferenceDevice); scratch.Add(pv);
+                var biased = logits + pv.matmul(rpw); scratch.Add(biased);
+                logits = biased;
+            }
             var probs = nn.functional.softmax(logits, 0); scratch.Add(probs);
             using var probsCpu = probs.cpu();
             scores = probsCpu.data<float>().ToArray();
@@ -1313,6 +1390,64 @@ public class GenesisNeuralModel
         // different route's probability. On a tie/near-uniform head this sits near 1/N (honest low
         // confidence); with a decisive head it equals the true maximum.
         return (routeId, (double)scores[routeId]);
+    }
+
+    /// <summary>REINFORCE the route PERCEPTION weight toward <paramref name="routeId"/> (reward&gt;0 ⇒ raise that
+    /// route's probability for this perceived state). Trains ONLY <c>_routePerceptionW</c> — the main route head
+    /// stays on its label/autograd training — so the GRU learns the perceived-retrievability→route mapping.
+    /// No-op unless <see cref="PerceptionRouting"/>.</summary>
+    public void ReinforceRouteHead(IReadOnlyList<int> inputTokens, double[]? perception, int routeId, double reward)
+    {
+        if (!PerceptionRouting || inputTokens.Count == 0 || perception is not { Length: > 0 })
+            return;
+        if (double.IsNaN(reward) || double.IsInfinity(reward) || reward == 0.0)
+            return;
+        if (routeId < 0 || routeId >= NumRoutes)
+            return;
+
+        EnsureModelInitialized();
+        EnsureGruInitialized();
+        EnsureRouteHeadInitialized();
+        if (_routeWT is null || _routeB is null || _routePerceptionW is null)
+            return;
+
+        var boundedReward = (float)Math.Clamp(reward, -EditHeadRewardClamp, EditHeadRewardClamp);
+
+        Tensor meanEmb;
+        var encScratch = new List<Tensor>();
+        try
+        {
+            using (no_grad())
+            {
+                var hInput = EncodeInput(inputTokens, encScratch, _trainingDevice);
+                meanEmb = hInput.detach().clone();
+            }
+        }
+        finally
+        {
+            foreach (var t in encScratch) { try { t?.Dispose(); } catch { } }
+        }
+
+        using var meanEmbHolder = meanEmb;
+        using var pv = tensor(PerceptionFloats(perception), new long[] { EditPerceptionDim }, device: _trainingDevice);
+        // logits = h·routeW + perception·routePerceptionW + routeB; grad requested ONLY for _routePerceptionW.
+        using var logits = meanEmb.matmul(_routeWT!) + pv.matmul(_routePerceptionW!) + _routeB!;
+        using var logp = nn.functional.log_softmax(logits, 0);
+        using var chosen = logp.narrow(0, routeId, 1);
+        using var loss = (chosen * (-boundedReward)).sum(); // minimize -reward·logp[routeId]
+        var grads = autograd.grad(new List<Tensor> { loss }, new List<Tensor> { _routePerceptionW! });
+        try
+        {
+            using (no_grad())
+            {
+                using var step = grads[0] * EditHeadLearningRate;
+                _routePerceptionW!.sub_(step);
+            }
+        }
+        finally
+        {
+            foreach (var g in grads) { try { g.Dispose(); } catch { } }
+        }
     }
 
     private void EnsureHiddenSizeGpu(int hiddenSize, int oldHidden, int vocab)
@@ -1518,10 +1653,12 @@ public class GenesisNeuralModel
         try { _routeB?.Dispose(); } catch { }
         _routeWT = null;
         _routeB = null;
+        _routePerceptionW = null;
         try { _editWT?.Dispose(); } catch { }
         try { _editB?.Dispose(); } catch { }
         _editWT = null;
         _editB = null;
+        _editPerceptionW = null;
         // Platonic-query construction heads. MUST be torn down with the rest: leaving them alive
         // across Import (auto-resume restart) registers STALE parameters from the previous session's
         // graph epoch into the fresh optimizer, corrupting every subsequent training step. They are

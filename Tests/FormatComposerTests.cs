@@ -27,7 +27,7 @@ public sealed class FormatComposerTests
     private readonly ITestOutputHelper _out;
     public FormatComposerTests(ITestOutputHelper o) => _out = o;
 
-    [Fact]
+    [SlowFact]
     public void ArithmeticToWord_ComposerEmerges_FormatsResultAsWord()
     {
         var config = new GenesisNovaConfig(HiddenSize: ProductionDims.HiddenSize, LearningRate: 0.05);

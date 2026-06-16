@@ -31,13 +31,13 @@ public sealed class GruQueryConstructionTests
     private readonly ITestOutputHelper _out;
     public GruQueryConstructionTests(ITestOutputHelper output) => _out = output;
 
-    [Fact]
+    [SlowFact]
     public void GruConstructsPlatonicQueries_FramedArithmetic_NoGrammar()
     {
         var config = new GenesisNovaConfig(HiddenSize: ProductionDims.HiddenSize, LearningRate: 0.05);
         var tokenizer = new WhitespaceGenesisTokenizer();
         var model = new GenesisNeuralModel(config);
-        var memory = new PlatonicSpaceMemory(faceDimension: config.HiddenSize / 2, seed: 7);
+        var memory = new PlatonicSpaceMemory(faceDimension: config.FaceDimension, seed: 7);
         var trainer = new GenesisTrainer(tokenizer, model, memory, config);
         var inference = new GenesisInferenceEngine(
             tokenizer, model, memory, null);

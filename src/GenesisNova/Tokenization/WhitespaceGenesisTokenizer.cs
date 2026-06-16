@@ -19,6 +19,15 @@ public sealed class WhitespaceGenesisTokenizer : IGenesisTokenizer
     public int VocabularySize => _idToToken.Count;
     public IReadOnlyList<string> Vocabulary => _idToToken;
 
+    /// <summary>The learned detokenization spacing model. Trained from every <see cref="Encode"/> call (which
+    /// sees the original whitespace) and consulted by <see cref="Decode"/>; persisted with the checkpoint.</summary>
+    public LearnedSpacingModel SpacingModel { get; } = new();
+
+    /// <summary>The learned casing model (folded token -> surface spelling). Trained from every
+    /// <see cref="Encode"/> call (which sees the original case) and used by <see cref="Decode"/> to restore the
+    /// true casing the case-folded vocab would otherwise lose; persisted with the checkpoint.</summary>
+    public LearnedCasingModel CasingModel { get; } = new();
+
     public int[] Encode(string text, bool addBos = false, bool addEos = false)
     {
         var output = new List<int>();
@@ -27,8 +36,21 @@ public sealed class WhitespaceGenesisTokenizer : IGenesisTokenizer
 
         if (!string.IsNullOrWhiteSpace(text))
         {
-            foreach (var part in Tokenize(text))
-                output.Add(AddToken(part));
+            // Tokenize preserves surface case; the vocab/embedding key is the CASE-FOLDED token so a concept is
+            // shared across casings. The tokenizer is the only place that still sees the source case+whitespace,
+            // so it's where the casing model (folded -> surface) and the spacing model (pair -> joined) learn.
+            var parts = Tokenize(text);
+            string? prevFolded = null;
+            for (var i = 0; i < parts.Count; i++)
+            {
+                var surface = parts[i].Token;
+                var folded = surface.ToLowerInvariant();
+                CasingModel.Observe(surface);
+                if (prevFolded is not null)
+                    SpacingModel.Observe(prevFolded, folded, joined: !parts[i].SpaceBefore);
+                output.Add(AddToken(folded));
+                prevFolded = folded;
+            }
         }
 
         if (addEos)
@@ -37,11 +59,13 @@ public sealed class WhitespaceGenesisTokenizer : IGenesisTokenizer
         return output.ToArray();
     }
 
-    private static IReadOnlyList<string> Tokenize(string text)
+    private static IReadOnlyList<(string Token, bool SpaceBefore)> Tokenize(string text)
     {
-        var tokens = new List<string>();
-        var normalized = text.ToLowerInvariant();
+        var tokens = new List<(string, bool)>();
+        var normalized = text; // keep original case; folding happens per-token in Encode
         var buffer = new System.Text.StringBuilder();
+        var sawSpace = false;        // whitespace seen since the last char added to a token
+        var bufferSpaceBefore = false; // whether the current buffer's first char was preceded by whitespace
 
         for (var i = 0; i < normalized.Length; i++)
         {
@@ -49,24 +73,30 @@ public sealed class WhitespaceGenesisTokenizer : IGenesisTokenizer
             if (char.IsWhiteSpace(ch))
             {
                 FlushBuffer();
+                sawSpace = true;
                 continue;
             }
 
             if (IsAsciiDigit(ch))
             {
                 FlushBuffer();
-                tokens.Add(ch.ToString());
+                tokens.Add((ch.ToString(), sawSpace));
+                sawSpace = false;
                 continue;
             }
 
             if (char.IsLetterOrDigit(ch))
             {
+                if (buffer.Length == 0)
+                    bufferSpaceBefore = sawSpace;
                 buffer.Append(ch);
+                sawSpace = false;
                 continue;
             }
 
             FlushBuffer();
-            tokens.Add(ch.ToString());
+            tokens.Add((ch.ToString(), sawSpace));
+            sawSpace = false;
         }
 
         FlushBuffer();
@@ -77,7 +107,7 @@ public sealed class WhitespaceGenesisTokenizer : IGenesisTokenizer
             if (buffer.Length == 0)
                 return;
 
-            tokens.Add(buffer.ToString());
+            tokens.Add((buffer.ToString(), bufferSpaceBefore));
             buffer.Clear();
         }
     }
@@ -99,15 +129,21 @@ public sealed class WhitespaceGenesisTokenizer : IGenesisTokenizer
         if (words.Count == 0)
             return string.Empty;
 
-        var output = new System.Text.StringBuilder(words[0]);
+        // words are CASE-FOLDED vocab tokens; spacing is decided on the folded forms, casing restored for display.
+        var output = new System.Text.StringBuilder(CasingModel.Restore(words[0]));
         for (var i = 1; i < words.Count; i++)
         {
             var current = words[i];
             var previous = words[i - 1];
-            if (ShouldConcatenate(previous, current))
-                output.Append(current);
+            // Learned spacing wins where it has evidence; the structural heuristic is the cold-start prior.
+            var join = SpacingModel.TryDecide(previous, current, out var learned)
+                ? learned
+                : HeuristicJoin(previous, current);
+            var surface = CasingModel.Restore(current);
+            if (join)
+                output.Append(surface);
             else
-                output.Append(' ').Append(current);
+                output.Append(' ').Append(surface);
         }
 
         return output.ToString();
@@ -141,19 +177,29 @@ public sealed class WhitespaceGenesisTokenizer : IGenesisTokenizer
             AddToken(digit.ToString());
     }
 
-    private static bool ShouldConcatenate(string previous, string current)
+    // Structural prior used only when the learned spacing model has no evidence for a pair.
+    private static bool HeuristicJoin(string previous, string current)
     {
         if (IsDigitToken(previous) && IsDigitToken(current))
             return true;
 
+        // Punctuation/operator glues to the token on its LEFT ("apple" + "-" => "apple-").
         if (current.Length == 1 && IsOperatorOrPunctuation(current[0]))
             return true;
 
-        if ((previous == "-" || previous == "+") && current.All(char.IsDigit))
+        // ...and a word/number glues BACK onto a trailing connector, so hyphenated (and
+        // snake_/path/decimal) tokens round-trip instead of splitting ("apple-" + "orange"
+        // => "apple-orange", "5-" + "3" => "5-3", "3." + "14" => "3.14"). Without this the
+        // left-only rule yields "apple- orange".
+        if (previous.Length > 0 && IsConnector(previous[^1]) &&
+            current.Length > 0 && char.IsLetterOrDigit(current[0]))
             return true;
 
         return false;
     }
+
+    private static bool IsConnector(char ch)
+        => ch is '-' or '+' or '_' or '/' or '.';
 
     private static bool IsDigitToken(string token)
         => token.Length == 1 && IsAsciiDigit(token[0]);

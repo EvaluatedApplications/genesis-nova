@@ -1,0 +1,24 @@
+# Training-focused linking memories: Q->memory-key answers and memory<->memory cross-links that enrich the
+# association graph beyond what each entry's one-line description captures. Trained ALONGSIDE MEMORY.md by the
+# daemon (GenerateTruth also reads this file). Format:  "cue => key"  (one-way)  |  "a <=> b"  (relate).
+# Edit freely + rebuild; this is the hand-authored layer of the query graph the `query` verbs traverse.
+
+# ── Question -> the memory that answers it ───────────────────────────────────────────────────────────
+how does arithmetic work        => nova-platonic-space-guide
+exact computation homomorphism  => nova-platonic-space-guide
+why does it forget              => nova-retention-diagnosis
+catastrophic forgetting         => nova-retention-diagnosis
+how to train without overfitting => nova-demonstrate-not-overfit
+what is the mission             => nova-north-star
+how do i inspect the model      => nova-diagnostic-cli
+how do i recall memory          => nova-claude-memory
+how do i refactor god files     => nova-godfiles-audit
+how do i self improve           => nova-self-improve-loop
+
+# ── Cross-links between related memories (strengthen `near` / `path` traversal) ──────────────────────
+nova-self-improve-loop          <=> nova-godfiles-audit
+nova-benchmark                  <=> nova-generalized-training-routing
+nova-composer-shapes            <=> nova-platonic-gliders
+nova-diagnostic-cli             <=> nova-generalized-training-routing
+nova-retention-diagnosis        <=> nova-relational-geometry
+nova-north-star                 <=> nova-demonstrate-not-overfit

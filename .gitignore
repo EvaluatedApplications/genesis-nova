@@ -7,3 +7,8 @@ obj/
 /tempbuild/Debug/net8.0-windows
 /tempbuild-tests/Debug/net8.0-windows
 /artifacts
+# Runtime/generated — never source. The ClaudeMemory daemon's state + checkpoints (~400MB) and build logs.
+.claude-nova/
+*.log
+# Local Claude Code overrides stay private; the shared SessionStart hook (.claude/settings.json) is tracked.
+.claude/settings.local.json

@@ -29,13 +29,13 @@ public sealed class NumberWordEquivalenceProductionTests
     private readonly ITestOutputHelper _out;
     public NumberWordEquivalenceProductionTests(ITestOutputHelper output) => _out = output;
 
-    [Fact]
+    [SlowFact]
     public void Bidirectional_NumberWordEquivalence_IsPlatonic_AtProductionDimension()
     {
-        var config = new GenesisNovaConfig(HiddenSize: ProductionDims.HiddenSize, LearningRate: 0.05); // face 256: full layout + free region
+        var config = new GenesisNovaConfig(HiddenSize: ProductionDims.HiddenSize, LearningRate: 0.05); // production face: full layout + free region
         var tokenizer = new WhitespaceGenesisTokenizer();
         var model = new GenesisNeuralModel(config);
-        var memory = new PlatonicSpaceMemory(faceDimension: config.HiddenSize / 2, seed: 7);
+        var memory = new PlatonicSpaceMemory(faceDimension: config.FaceDimension, seed: 7);
         var trainer = new GenesisTrainer(tokenizer, model, memory, config);
         var inference = new GenesisInferenceEngine(
             tokenizer, model, memory, null);

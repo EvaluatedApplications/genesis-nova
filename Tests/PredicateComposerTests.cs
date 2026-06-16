@@ -26,7 +26,7 @@ public sealed class PredicateComposerTests
     private readonly ITestOutputHelper _out;
     public PredicateComposerTests(ITestOutputHelper o) => _out = o;
 
-    [Fact]
+    [SlowFact]
     public void Predicate_ComposerEmerges_ViaPlanHead_AndGeneralisesBeyondTrainingRange()
     {
         var config = new GenesisNovaConfig(HiddenSize: ProductionDims.HiddenSize, LearningRate: 0.05);

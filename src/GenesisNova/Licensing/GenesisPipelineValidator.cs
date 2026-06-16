@@ -5,17 +5,29 @@ using System.Text;
 namespace GenesisNova.Licensing;
 
 /// <summary>
-/// Genesis Nova pipeline license validator. Enables adaptive tuning for smart CPU/GPU gating.
+/// Genesis Nova pipeline license validator. EvalApp's adaptive CPU/GPU tuning (the non-"sequential" mode) is
+/// licensed by passing <see cref="ActiveKey"/> into the pipeline's <c>.Build(licenseKey)</c>. This validator
+/// MIRRORS EvalApp's real gate (product "EVALAPP" — see EvalApp.Licensing.LicenseGateFactory) so the mode it
+/// reports matches exactly what <c>.Build</c> will accept: a valid key → Licensed → adaptive tuning; an
+/// invalid/expired key → Unlicensed → free sequential mode (and ActiveKey is null, so .Build never throws).
 /// </summary>
 public static class GenesisPipelineValidator
 {
-    /// <summary>Genesis Nova license key (expires 2027-05-29)</summary>
-    private const string LicenseKey = "20270529-rwNNXcgcp1XSdkhdzGUKmEm5BGCxKt1ocE8BNsSPfOI";
+    /// <summary>EvalApp license key (product EVALAPP, expires 2027-03-12). Shared with genesis-engine.</summary>
+    private const string LicenseKey = "20270312-gwZ8hyAovecW9DmRm_OQ13xOG7oCZWvyBkYHzy_ZS8k";
+
+    // EVALAPP product parameters: a key "<yyyyMMdd>-<sig>" is valid when <sig> equals the base64url HMAC-SHA256
+    // of "EVALAPP|<yyyyMMdd>" under this seed and the date has not passed. Kept in sync with EvalApp's gate.
+    private const string ProductId = "EVALAPP";
+    private static readonly byte[] Seed = Convert.FromBase64String("RKn4nR+D+B6w0jtlIVwOtCEQByUr+Pg85/fwElg45oA=");
 
     /// <summary>
-    /// Validates the Genesis Nova license and returns the mode.
-    /// Licensed mode enables adaptive tuning for smart CPU/GPU parallelism.
+    /// The key to hand to the pipeline's <c>.Build(licenseKey)</c>, or null when invalid/expired so the
+    /// pipeline degrades to free sequential mode instead of throwing <c>InvalidLicenseException</c>.
     /// </summary>
+    public static string? ActiveKey => ValidateLicense() == LicenseMode.Licensed ? LicenseKey : null;
+
+    /// <summary>Validates the Genesis Nova (EvalApp) license and returns the mode.</summary>
     public static LicenseMode ValidateLicense()
     {
         try
@@ -29,16 +41,11 @@ public static class GenesisPipelineValidator
         }
     }
 
-    /// <summary>
-    /// Validates license periodically (default 60s between checks) for hot paths.
-    /// </summary>
+    /// <summary>Validates periodically (default 60s between checks) for hot paths.</summary>
     public static LicenseMode ValidateLicensePeriodic(TimeSpan? interval = null)
     {
-        // Cache validation result for hot paths
         if (_cachedMode != null && DateTime.UtcNow - _lastCheck < (interval ?? TimeSpan.FromSeconds(60)))
-        {
             return _cachedMode.Value;
-        }
 
         _cachedMode = ValidateLicense();
         _lastCheck = DateTime.UtcNow;
@@ -49,44 +56,33 @@ public static class GenesisPipelineValidator
     private static DateTime _lastCheck = DateTime.MinValue;
 
     /// <summary>
-    /// Validates license key format and expiration.
-    /// Format: YYYYMMDD-signature
+    /// Validates an EVALAPP license key. Format: <c>YYYYMMDD-base64urlSignature</c>. Split on the FIRST '-'
+    /// (the base64url signature may itself contain '-'). Verifies expiry then the HMAC signature.
     /// </summary>
     private static bool ValidateLicenseKey(string licenseKey)
     {
-        if (string.IsNullOrEmpty(licenseKey))
+        if (string.IsNullOrWhiteSpace(licenseKey))
             return false;
 
-        var parts = licenseKey.Split('-');
-        if (parts.Length != 2)
+        var dash = licenseKey.IndexOf('-');
+        if (dash <= 0 || dash >= licenseKey.Length - 1)
             return false;
 
-        if (!int.TryParse(parts[0], out var dateValue))
+        var datePart = licenseKey[..dash];
+        var sigPart = licenseKey[(dash + 1)..];
+        if (datePart.Length != 8 || !int.TryParse(datePart, out var dateValue))
             return false;
-
-        // Parse YYYYMMDD format
-        var year = dateValue / 10000;
-        var month = (dateValue / 100) % 100;
-        var day = dateValue % 100;
 
         try
         {
-            var expirationDate = new DateTime(year, month, day);
-            if (DateTime.UtcNow > expirationDate)
-                return false; // License expired
+            var expiration = new DateTime(dateValue / 10000, (dateValue / 100) % 100, dateValue % 100, 0, 0, 0, DateTimeKind.Utc);
+            if (DateTime.UtcNow > expiration)
+                return false; // expired
 
-            // Verify signature using HMAC-SHA256
-            const string productId = "GENESIS";
-            var seed = Convert.FromBase64String("h8Jk2LpQ7vN+3xR9mKoD4wT6yZaB1cF5gH0nJsL8vP2=");
-            
-            using (var hmac = new HMACSHA256(seed))
-            {
-                var dataToSign = $"{productId}:{parts[0]}";
-                var hash = hmac.ComputeHash(Encoding.UTF8.GetBytes(dataToSign));
-                var expectedSignature = Convert.ToBase64String(hash);
-                
-                return parts[1] == expectedSignature.TrimEnd('=');
-            }
+            using var hmac = new HMACSHA256(Seed);
+            var hash = hmac.ComputeHash(Encoding.UTF8.GetBytes($"{ProductId}|{datePart}"));
+            var expected = Convert.ToBase64String(hash).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+            return sigPart == expected;
         }
         catch
         {

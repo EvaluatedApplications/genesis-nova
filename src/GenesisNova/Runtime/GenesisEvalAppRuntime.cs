@@ -1,8 +1,10 @@
 using EvalApp.Consumer;
+using GenesisNova.Cognition;
 using GenesisNova.Core;
 using GenesisNova.Data;
 using GenesisNova.Data.Creators;
 using GenesisNova.Licensing;
+using GenesisNova.Model;
 using GenesisNova.Persistence;
 using GenesisNova.Train;
 
@@ -137,7 +139,7 @@ public sealed class GenesisEvalAppRuntime
                         .AddStep("BuildBatch", buildAutonomousBatchStep)
                         .AddStep("RunTraining", runAutonomousRoundStep))
                     .Run(out autonomousRound)
-                .Build();
+                .Build(GenesisPipelineValidator.ActiveKey); // EVALAPP license → adaptive CPU/GPU tuning (else sequential)
 
         TryBootstrapLatestState();
         EnsureConfiguredHiddenSize();
@@ -332,6 +334,14 @@ public sealed class GenesisEvalAppRuntime
         }, cancellationToken);
     }
 
+    /// <summary>
+    /// Register an operation token (a language verb, e.g. "find") as a ROUTE TRIGGER: it is excluded from
+    /// relation coupling/anchoring (so it never overloads a target and collapses retrieval) while the GRU
+    /// route head still learns it from the raw input. Re-register from the language definition at startup —
+    /// it is not persisted, being a pure function of that definition. See LANGUAGE_CREATOR.md §2.
+    /// </summary>
+    public void RegisterOperationToken(string token) => _state.Memory.RegisterOperationToken(token);
+
     public async Task<GenesisStepLoss> TrainOneAsync(GenesisExample example)
     {
         return await WithModelGateAsync(async () =>
@@ -445,6 +455,14 @@ public sealed class GenesisEvalAppRuntime
 
     public int VocabularySize => WithModelGate(() => _state.Tokenizer.VocabularySize);
     public int HiddenSize => WithModelGate(() => _state.Model.HiddenSize);
+
+    /// <summary>The SGD step size, exposed so a caller can implement a training SCHEDULE (e.g. anneal the LR as
+    /// a lesson approaches mastery, the way the autonomous orchestrator does). Reads/writes the live model.</summary>
+    public double LearningRate
+    {
+        get => WithModelGate(() => _state.Model.LearningRate);
+        set => WithModelGate(() => { _state.Model.LearningRate = value; return true; });
+    }
     public string ConversationBrief => WithModelGate(() => _state.Conversation.BuildContextBrief());
     public bool AutoResumeEnabled => _runtimeConfig.AutoResume;
     public string AutoCheckpointPath => GenesisLocalStateStore.ResolveCheckpointPath(_runtimeConfig);
@@ -565,6 +583,79 @@ public sealed class GenesisEvalAppRuntime
                 Anchors: anchors,
                 Nodes: selectedNodes,
                 Edges: edges);
+        });
+    }
+
+    /// <summary>
+    /// Structured introspection of the live model + platonic substrate (for the diagnostic CLI). Reads the
+    /// SAME runtime state inference uses, under the model gate, so it never diverges from what the model does.
+    /// </summary>
+    public GenesisRuntimeDiagnostics Diagnose(int topRelations = 12, int topFunctions = 16, int topChunks = 12)
+    {
+        return WithModelGate(() =>
+        {
+            var model = _state.Model;
+            var mem = _state.Memory;
+            var trainer = _state.Trainer;
+
+            var transforms = trainer.TransformAccumulator.ExportSnapshot().Transforms;
+            var folds = trainer.FoldPathDiscovery.ExportSnapshot();
+            var chunks = mem.ExportSnapshot().Chunks ?? Array.Empty<PlatonicChunkSnapshot>();
+
+            var funcs = mem.FunctionElements;
+            var funcById = funcs.ToDictionary(f => f.Id, f => f.Symbol);
+            var functionSummaries = funcs
+                .Take(topFunctions)
+                .Select(f => new FunctionElementSummary(
+                    f.Symbol,
+                    f.RelatedTo.Select(id => funcById.TryGetValue(id, out var s) ? s : $"#{id}").ToArray()))
+                .ToArray();
+
+            var topRel = mem.GetAllRelations()
+                .OrderByDescending(r => r.ObservationCount)
+                .ThenBy(r => r.Left, StringComparer.OrdinalIgnoreCase)
+                .Take(topRelations)
+                .Select(r => new RelationSummary(r.Left, r.Right, r.ObservationCount))
+                .ToArray();
+
+            var path = GenesisLocalStateStore.ResolveCheckpointPath(_runtimeConfig);
+
+            return new GenesisRuntimeDiagnostics(
+                CheckpointPath: path,
+                CheckpointExists: File.Exists(path),
+                CheckpointWriteUtc: File.Exists(path) ? File.GetLastWriteTimeUtc(path) : null,
+                Backend: _runtimeConfig.Backend.ToString(),
+                HiddenSize: model.HiddenSize,
+                FaceDimension: mem.FaceDimension,
+                VocabularySize: _state.Tokenizer.VocabularySize,
+                ParameterCount: model.ParameterCount(),
+                PlanKindCount: GenesisNeuralModel.PlanKindCount,
+                NodeCount: mem.NodeCount,
+                RelationCount: mem.RelationCount,
+                FunctionElementCount: funcs.Count,
+                LearnedTransformCount: transforms.Count,
+                FoldPathCount: folds.FoldPaths.Count,
+                LogLinearFitCount: folds.LogLinearFits.Count,
+                ChunkTagCount: chunks.Select(c => c.Tag).Distinct(StringComparer.OrdinalIgnoreCase).Count(),
+                ChunkCount: chunks.Length,
+                AutonomousRounds: _historyStore.History.Count,
+                MaxNodes: Math.Max(256, _runtimeConfig.MaxPlatonicNodes),
+                MaxRelations: Math.Max(1024, _runtimeConfig.MaxPlatonicRelations),
+                SpaceManagerEnabled: _runtimeConfig.AutoManagePlatonicSpace,
+                // Soft relation budget the SpaceManager prunes toward: nodes×TargetRelationsPerNode(6)+NodeBuffer(128),
+                // clamped to [MinRelations(1024), MaxRelations]. Relation-pressure = RelationCount / this budget.
+                RelationBudget: Math.Clamp(mem.NodeCount * 6 + 128, 1024, Math.Max(1024, _runtimeConfig.MaxPlatonicRelations)),
+                TopRelations: topRel,
+                FunctionElements: functionSummaries,
+                LearnedTransforms: transforms
+                    .Take(topFunctions)
+                    .Select(t => new TransformSummary(t.FunctionName, t.ObservationCount, t.Confidence, t.State.ToString()))
+                    .ToArray(),
+                Chunks: chunks
+                    .OrderByDescending(c => c.Count)
+                    .Take(topChunks)
+                    .Select(c => new ChunkSummary(c.Tag, c.Chunk, c.Count))
+                    .ToArray());
         });
     }
 

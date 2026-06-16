@@ -21,7 +21,7 @@ public sealed class AutonomousLoopSmokeTest
     private readonly ITestOutputHelper _out;
     public AutonomousLoopSmokeTest(ITestOutputHelper output) => _out = output;
 
-    [Fact]
+    [SlowFact]
     public async Task AutonomousLoop_RunsSeveralRounds_WithoutCrashing()
     {
         var tempState = Path.Combine(Path.GetTempPath(), "glider_auto_smoke_" + Guid.NewGuid().ToString("N"));

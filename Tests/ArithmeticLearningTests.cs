@@ -1,4 +1,6 @@
 using System;
+using System.Globalization;
+using GenesisNova.Cognition;
 using GenesisNova.Core;
 using Xunit;
 using Xunit.Abstractions;
@@ -7,7 +9,10 @@ namespace GenesisNova.Tests;
 
 /// <summary>
 /// The platonic space computes symbolic arithmetic EXACTLY via the face homomorphism (no NN). Fast,
-/// deterministic — the foundational guarantee the learned paths route TO.
+/// deterministic — the foundational guarantee the learned paths route TO. Drives the REAL substrate
+/// arithmetic path (<see cref="PlatonicGliderInterpreter.ComposeArithmetic"/> → R2 compose tick →
+/// <see cref="PlatonicFaceDecoder"/>), not a hand-rolled face blend, so it verifies the production
+/// component rather than a parallel reimplementation of it.
 ///
 /// (The model-LEARNS-to-route / number-word-equivalence-geometry / worded-arithmetic experiments that
 /// once lived here were one-off training investigations; their findings are recorded in memory and
@@ -30,22 +35,32 @@ public sealed class ArithmeticLearningTests
     [InlineData(1, 1, "*", 1)]
     public void PlatonicArithmetic_IsExact(double a, double b, string op, double expected)
     {
-        var dim = ProductionDims.FaceDimension;
-        var faceA = PlatonicFaceComposer.GetFreshNumericEmbedding(a, dim);
-        var faceB = PlatonicFaceComposer.GetFreshNumericEmbedding(b, dim);
-        var additive = op is "+" or "-";
-        var sign = op is "-" or "/" ? -1.0 : 1.0;
+        var gliderOp = op switch
+        {
+            "+" => GliderOp.Add,
+            "-" => GliderOp.Subtract,
+            "*" => GliderOp.Multiply,
+            "/" => GliderOp.Divide,
+            _ => throw new ArgumentOutOfRangeException(nameof(op), op, "unknown op"),
+        };
 
-        var blended = new double[dim];
-        for (var i = 0; i < dim; i++)
-            blended[i] = faceA[i] + (sign * faceB[i]);
+        // Drive the REAL substrate arithmetic: compose the operands into a platonic Composition element
+        // via the R2 compose tick, then decode the result through the face homomorphism — exactly the
+        // production path. No hand-rolled face blend.
+        var space = new PlatonicSpaceMemory(faceDimension: ProductionDims.FaceDimension, seed: 7);
+        var interp = new PlatonicGliderInterpreter(space);
+        var glider = new PlatonicGlider("arith",
+            new Compute(gliderOp, new GliderBlock[] { new Operand(0), new Operand(1) }));
 
-        var preferFace = additive ? 1 : 2; // 1=poly (add/sub), 2=log (mul/div)
-        var (value, quality, face) = PlatonicFaceDecoder.DecodeNumericFromPrediction(blended, dim, preferFace);
-        if (!additive && face == "log")
-            value *= Math.Sign(a) * Math.Sign(b);
+        var value = double.Parse(
+            interp.Execute(glider, new[]
+            {
+                a.ToString(CultureInfo.InvariantCulture),
+                b.ToString(CultureInfo.InvariantCulture),
+            }),
+            CultureInfo.InvariantCulture);
 
-        _out.WriteLine($"{a}{op}{b}: value={value} expected={expected} quality={quality:F3} face={face}");
+        _out.WriteLine($"{a}{op}{b}: value={value} expected={expected}");
         Assert.Equal(expected, value, 6);
     }
 }

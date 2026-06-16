@@ -1,5 +1,6 @@
 using GenesisNova.Core;
 using GenesisNova.Cognition;
+using GenesisNova.Tokenization;
 using GenesisNova.Train;
 
 namespace GenesisNova.Persistence;
@@ -25,6 +26,12 @@ public sealed record GenesisCheckpoint(
     MatrixSnapshot? GruWhh = null,
     double[]? GruBih = null,
     double[]? GruBhh = null,
+    // Learned detokenization spacing statistics. Null on older checkpoints (the model relearns from training
+    // text on load). Lets the spacing model survive a reload instead of resetting to the heuristic prior.
+    SpacingModelSnapshot? SpacingModel = null,
+    // Learned detokenization casing statistics (folded token -> surface spelling). Null on older checkpoints
+    // (relearns on load). Lets restored casing ("WhitespaceGenesisTokenizer") survive a reload.
+    CasingModelSnapshot? CasingModel = null,
     int Version = 0)
 {
     public const int CurrentVersion = 3;

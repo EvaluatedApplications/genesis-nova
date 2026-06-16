@@ -26,7 +26,7 @@ public sealed class RefComposerTests
     private readonly ITestOutputHelper _out;
     public RefComposerTests(ITestOutputHelper o) => _out = o;
 
-    [Fact]
+    [SlowFact]
     public void Ref_ComposerEmerges_GliderOfGliders_ViaPlanHead_AndGeneralises()
     {
         var config = new GenesisNovaConfig(HiddenSize: ProductionDims.HiddenSize, LearningRate: 0.05);

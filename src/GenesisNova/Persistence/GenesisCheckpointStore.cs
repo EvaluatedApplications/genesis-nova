@@ -12,7 +12,9 @@ public static class GenesisCheckpointStore
     private static readonly TimeSpan CheckpointLockTimeout = TimeSpan.FromSeconds(15);
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
-        WriteIndented = true
+        // Compact (not indented): the checkpoint is large (100s of MB at scale); indentation is pure bloat that
+        // slows serialize/write/parse. JSON parses fine either way, so old indented checkpoints still load.
+        WriteIndented = false
     };
 
     public static void Save(
@@ -32,7 +34,9 @@ public static class GenesisCheckpointStore
             Embeddings: MatrixSnapshot.From(snapshot.Embeddings),
             OutputWeights: MatrixSnapshot.From(snapshot.OutputWeights),
             OutputBias: snapshot.OutputBias,
-            PlatonicSpace: platonicSpace,
+            // The platonic space is persisted to a SEPARATE companion file (see below), not embedded in the NN
+            // checkpoint — so the substrate can be wiped (delete the companion) while the long-lived NN persists.
+            PlatonicSpace: null,
             Conversation: conversation,
             AutonomousTraining: autonomousTraining,
             RouteWeights: snapshot.RouteWeights is not null ? MatrixSnapshot.From(snapshot.RouteWeights) : null,
@@ -46,33 +50,51 @@ public static class GenesisCheckpointStore
             GruWhh: snapshot.GruWhh is not null ? MatrixSnapshot.From(snapshot.GruWhh) : null,
             GruBih: snapshot.GruBih,
             GruBhh: snapshot.GruBhh,
+            SpacingModel: tokenizer.SpacingModel.Export(),
+            CasingModel: tokenizer.CasingModel.Export(),
             Version: GenesisCheckpoint.CurrentVersion);
 
         var json = JsonSerializer.Serialize(payload, JsonOptions);
+        // The platonic space is serialized SEPARATELY and written to a companion file alongside the NN
+        // checkpoint, so it can be deleted to reset the substrate without disturbing the trained NN.
+        var platonicPath = PlatonicCompanionPath(path);
+        var platonicJson = platonicSpace is not null ? JsonSerializer.Serialize(platonicSpace, JsonOptions) : null;
         var dir = Path.GetDirectoryName(path);
         if (!string.IsNullOrWhiteSpace(dir))
             Directory.CreateDirectory(dir);
         ExecuteWithCheckpointLock(path, () =>
         {
-            var tempPath = $"{path}.{Environment.ProcessId}.{Guid.NewGuid():N}.tmp";
-            try
-            {
-                File.WriteAllText(tempPath, json);
-                File.Move(tempPath, path, overwrite: true);
-            }
-            finally
-            {
-                if (File.Exists(tempPath))
-                    File.Delete(tempPath);
-            }
+            WriteAtomic(path, json);
+            if (platonicJson is not null)
+                WriteAtomic(platonicPath, platonicJson);
         });
+    }
+
+    /// <summary>The companion file holding the platonic space for a given NN checkpoint path. Deleting it
+    /// resets the substrate while keeping the long-lived NN.</summary>
+    public static string PlatonicCompanionPath(string checkpointPath) => checkpointPath + ".platonic.json";
+
+    private static void WriteAtomic(string path, string content)
+    {
+        var tempPath = $"{path}.{Environment.ProcessId}.{Guid.NewGuid():N}.tmp";
+        try
+        {
+            File.WriteAllText(tempPath, content);
+            File.Move(tempPath, path, overwrite: true);
+        }
+        finally
+        {
+            if (File.Exists(tempPath))
+                File.Delete(tempPath);
+        }
     }
 
     public static (GenesisNovaConfig Config, WhitespaceGenesisTokenizer Tokenizer, GenesisNeuralModel Model, PlatonicMemorySnapshot? PlatonicSpace, GenesisConversationSnapshot? Conversation, GenesisAutonomousTrainingSnapshot? AutonomousTraining) Load(string path)
     {
         var payload = ReadPayload(path);
         var loaded = CreateRuntimePayload(payload, payload.Config);
-        return (loaded.Config, loaded.Tokenizer, loaded.Model, loaded.PlatonicSpace, loaded.Conversation, loaded.AutonomousTraining);
+        var platonic = ReadPlatonicCompanion(path) ?? loaded.PlatonicSpace; // companion wins; embedded = legacy fallback
+        return (loaded.Config, loaded.Tokenizer, loaded.Model, platonic, loaded.Conversation, loaded.AutonomousTraining);
     }
 
     public static (GenesisNovaConfig Config, WhitespaceGenesisTokenizer Tokenizer, GenesisNeuralModel Model, PlatonicMemorySnapshot? PlatonicSpace, GenesisConversationSnapshot? Conversation, GenesisAutonomousTrainingSnapshot? AutonomousTraining, string? TrainerLearningStateJson) LoadForRuntime(
@@ -80,7 +102,9 @@ public static class GenesisCheckpointStore
         GenesisNovaConfig runtimeConfig)
     {
         var payload = ReadPayload(path);
-        return CreateRuntimePayload(payload, runtimeConfig);
+        var loaded = CreateRuntimePayload(payload, runtimeConfig);
+        var platonic = ReadPlatonicCompanion(path) ?? loaded.PlatonicSpace; // companion wins; embedded = legacy fallback
+        return (loaded.Config, loaded.Tokenizer, loaded.Model, platonic, loaded.Conversation, loaded.AutonomousTraining, loaded.TrainerLearningStateJson);
     }
 
     private static GenesisCheckpoint ReadPayload(string path)
@@ -88,6 +112,23 @@ public static class GenesisCheckpointStore
         var json = ExecuteWithCheckpointLock(path, () => File.ReadAllText(path));
         return JsonSerializer.Deserialize<GenesisCheckpoint>(json, JsonOptions)
             ?? throw new InvalidOperationException("Failed to deserialize checkpoint.");
+    }
+
+    // Read the companion platonic-space file if present (null when it's been deleted → substrate resets fresh
+    // while the NN checkpoint is unchanged). General mechanism; the consumer chooses when to delete it.
+    private static PlatonicMemorySnapshot? ReadPlatonicCompanion(string path)
+    {
+        var companion = PlatonicCompanionPath(path);
+        if (!File.Exists(companion)) return null;
+        try
+        {
+            var json = ExecuteWithCheckpointLock(companion, () => File.ReadAllText(companion));
+            return JsonSerializer.Deserialize<PlatonicMemorySnapshot>(json, JsonOptions);
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     public static void CopyCheckpointFile(string sourcePath, string destinationPath)
@@ -142,6 +183,8 @@ public static class GenesisCheckpointStore
     {
         var tokenizer = new WhitespaceGenesisTokenizer();
         tokenizer.ReplaceVocabulary(payload.Vocabulary);
+        tokenizer.SpacingModel.Import(payload.SpacingModel);
+        tokenizer.CasingModel.Import(payload.CasingModel);
 
         var effectiveConfig = payload.Config with
         {

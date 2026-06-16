@@ -230,7 +230,17 @@ public sealed class GenesisInferenceEngine
         GenerationRequest request,
         IReadOnlyList<int> inputTokens)
     {
-        var (routeId, routeConfidence) = _model.PredictRoute(inputTokens);
+        // PERCEPTION ROUTING (SPACE_AWARE_GRU.md §I): when enabled, let the route head also read a TARGET-AGNOSTIC
+        // perception of the query anchor ("does the space look like it can answer this?") so platonic-vs-neural is
+        // decided from perceived retrievability, not tokens alone. Default-off → unchanged token-only routing.
+        double[]? routePerception = null;
+        if (_model.PerceptionRouting && inputTokens.Count > 0)
+        {
+            var toks = _tokenizer.Decode(inputTokens).Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            if (toks.Length > 0)
+                routePerception = _memory.ComputeRoutePerception(toks[^1]); // operand = last token (after the op verb)
+        }
+        var (routeId, routeConfidence) = _model.PredictRoute(inputTokens, routePerception);
 
         // Mode 2 (platonic-assisted reasoning): generate neurally but invoke the platonic space
         // mid-generation as an internal scratchpad. Falls back to pure neural if no sub-step fires.
@@ -1267,6 +1277,10 @@ public sealed class GenesisInferenceEngine
             // region — the concept-chain returned a numeric neighbour; being re-validated at production
             // face dim where the free region exists.) Stray single letters still dropped; ContainsConcept gates.
             .Where(t => t.Length > 1 || (t.Length == 1 && char.IsDigit(t[0])))
+            // An op-token (e.g. "find") is a ROUTE TRIGGER, not a retrieval anchor — excluding it lets the GRU
+            // route on the verb while the OPERAND anchors retrieval (so "find <topic>" is a single-anchor
+            // relation-first query, not a collapse onto the verb's edges). See PlatonicSpaceMemory op-tokens.
+            .Where(t => !_memory.IsOperationToken(t))
             .Where(t => _memory.ContainsConcept(t))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .Take(8)

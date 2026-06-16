@@ -5,9 +5,10 @@ namespace GenesisNova.Tests;
 /// <summary>
 /// Production dimensions for the whole test suite — DERIVED from the runtime's single source of truth
 /// (<see cref="GenesisNovaConfig"/>), never hardcoded. Tests therefore exercise the exact production
-/// model width and the exact face-width convention (HiddenSize/2) the runtime uses; change the defaults
-/// in <see cref="GenesisNovaConfig"/> and both runtime and tests move together. The platonic space is
-/// only fully instantiated at this production face dimension — the old tiny test dims were degenerate.
+/// model width and the exact face-width convention (<see cref="GenesisNovaConfig.FaceDimension"/>, which
+/// tracks HiddenSize by default) the runtime uses; change the defaults in <see cref="GenesisNovaConfig"/>
+/// and both runtime and tests move together. The platonic space is only fully instantiated at this
+/// production face dimension — the old tiny test dims (and the ad-hoc HiddenSize/2) were degenerate.
 /// </summary>
 internal static class ProductionDims
 {

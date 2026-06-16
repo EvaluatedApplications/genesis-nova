@@ -32,7 +32,7 @@ public sealed class RetentionDiagnosticTests
 
     private sealed record Snapshot(int Route, double RouteConf, string Path, bool UsedPlatonic, bool EdgeOk, bool Correct, string Output, string Relations);
 
-    [Fact]
+    [SlowFact]
     public void Retention_Diagnosis_BreakdownByLayer()
     {
         var reportPath = Path.Combine(Path.GetTempPath(), "retention_diag.txt");

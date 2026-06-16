@@ -26,7 +26,18 @@ namespace GenesisNova.Cognition;
 /// </summary>
 internal sealed class PlatonicLattice
 {
-    private const int SemanticRebuildThreshold = 48;
+    // ── Rebuild policy (ADAPTIVE, fraction-of-space) ──────────────────────────────────────────────────────
+    // A full index rebuild is O(N); doing one on EVERY mutation makes per-example queries O(N^2) (a training
+    // hang). But a FIXED threshold either over-rebuilds when the space is tiny or STARVES ("dirty forever,
+    // never recalculated") when it is huge. So we rebuild once a FRACTION of the space has changed, with a
+    // small floor: the cadence scales with size and can never starve. A smaller fraction = a fresher global
+    // index = more accurate bulk retrieval (and discovery of brand-new neighbourhoods a moved concept drifts
+    // into), at amortized O(N log N) cost — negligible per-step even at a million nodes. This is the
+    // global-correctness FLOOR. WITHIN-STEP edit verification does NOT depend on it: GetNearestConceptsFresh
+    // scores live faces over a bounded candidate set, so a correct edit is recognised in the SAME step
+    // regardless of when this last fired. Lower the fraction to spend compute on accuracy.
+    private const int RebuildMinMutations = 16;
+    private const double RebuildSpaceFraction = 0.05;
 
     // Strict numeric classification: a genuine concept token is a plain signed decimal.
     // NumberStyles.Any would accept trailing-sign garbage like "0+"/"5-" (parses as 0/5),
@@ -43,20 +54,18 @@ internal sealed class PlatonicLattice
     // ── Layer 1: adjacency (incremental, always current) ──
     private readonly Dictionary<string, HashSet<string>> _adjacency = new(StringComparer.OrdinalIgnoreCase);
 
-    // ── Layer 2: numeric + char (lazy, rebuilt on node-set change) ──
+    // ── Layer 2: numeric + char (lazy; rebuilt on the same ADAPTIVE fraction policy as the semantic tree) ──
     private readonly SortedList<double, string> _numericLattice = new();
     private readonly Dictionary<char, string> _charLattice = new();
-    // Throttle: a full index rebuild is O(N); doing one on EVERY node change makes per-example
-    // neighbour queries O(N^2) (it looked like a training hang). Rebuild only after this many
-    // node-set changes accumulate, or on first use.
-    private const int TopologyRebuildThreshold = 64;
     private int _topologyChanges;
+    private int _lastTopologyCount;
     private bool _numericBuilt;
 
-    // ── Layer 2: semantic VP-Tree (lazy, drift-throttled) ──
+    // ── Layer 2: semantic VP-Tree (lazy; rebuilt on the adaptive fraction policy) ──
     private VPTree? _semanticTree;
     private bool _semanticDirty = true;
     private int _mutationsSinceBuild;
+    private int _lastSemanticCount;
 
     public PlatonicLattice(
         Func<IEnumerable<string>> nodeNames,
@@ -121,9 +130,11 @@ internal sealed class PlatonicLattice
         _charLattice.Clear();
         _semanticTree = null;
         _topologyChanges = 0;
+        _lastTopologyCount = 0;
         _numericBuilt = false;
         _semanticDirty = true;
         _mutationsSinceBuild = 0;
+        _lastSemanticCount = 0;
     }
 
     private void Link(string from, string to)
@@ -210,17 +221,19 @@ internal sealed class PlatonicLattice
 
     private void EnsureTopology()
     {
-        // Throttle: rebuild the numeric/char indices only on first use or after enough node-set
-        // changes accumulate — NOT on every new concept (which made per-example queries O(N^2)).
-        // A very recently added node may briefly be missing; acceptable for heuristic neighbour reads.
-        if (_numericBuilt && _topologyChanges < TopologyRebuildThreshold)
+        // ADAPTIVE rebuild (see rebuild-policy note): refresh on first use or once a FRACTION of the space has
+        // changed (floor RebuildMinMutations) — never on every node (O(N^2)) and never starving at scale.
+        var trigger = Math.Max(RebuildMinMutations, (int)(RebuildSpaceFraction * _lastTopologyCount));
+        if (_numericBuilt && _topologyChanges < trigger)
             return;
 
         _numericLattice.Clear();
         _charLattice.Clear();
 
+        var total = 0;
         foreach (var name in _nodeNames())
         {
+            total++;
             if (double.TryParse(name, NumericStyle, CultureInfo.InvariantCulture, out var numeric))
             {
                 // Duplicate numeric values get a smallest-possible offset so the sorted lattice stays total.
@@ -234,14 +247,19 @@ internal sealed class PlatonicLattice
             }
         }
 
+        _lastTopologyCount = total;
         _numericBuilt = true;
         _topologyChanges = 0;
     }
 
     private void EnsureSemantic()
     {
+        // ADAPTIVE rebuild (see rebuild-policy note): rebuild on first use or once a FRACTION of the space has
+        // drifted (floor RebuildMinMutations). This is the global-correctness floor — within-step accuracy
+        // comes from live-face candidate scoring (GetNearestConceptsFresh), not from how recently this fired.
+        var trigger = Math.Max(RebuildMinMutations, (int)(RebuildSpaceFraction * _lastSemanticCount));
         var needRebuild = _semanticTree is null
-            || (_semanticDirty && _mutationsSinceBuild >= SemanticRebuildThreshold);
+            || (_semanticDirty && _mutationsSinceBuild >= trigger);
         if (!needRebuild)
             return;
 
@@ -263,6 +281,7 @@ internal sealed class PlatonicLattice
         var semanticStart = GenesisNova.Core.FaceLayout.WordFaceStart(dim);
         var rangeStart = (semanticStart > 0 && semanticStart < dim) ? semanticStart : 0;
         _semanticTree = new VPTree(names.ToArray(), faceArray, rangeStart: rangeStart, rangeEnd: dim);
+        _lastSemanticCount = names.Count;
         _semanticDirty = false;
         _mutationsSinceBuild = 0;
     }

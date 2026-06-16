@@ -196,6 +196,50 @@ public sealed class PlatonicSpaceMemory
         return _lattice.GetSemanticNeighbors(conceptFace, limit, conceptKey);
     }
 
+    /// <summary>
+    /// LIVE-FACE nearest concepts for WITHIN-STEP edit verification / perception. The global
+    /// <see cref="GetNearestConcepts"/> reads the throttled VP-Tree, so a face that just moved this step is not
+    /// reflected until the next rebuild — which staled the edit-head's pre/post retrievability DELTA and the
+    /// route/edit perceptions (the controller couldn't "see" that a correct edit landed). This instead assembles
+    /// a BOUNDED candidate set — the caller's <paramref name="seeds"/> (e.g. the example's target concepts), the
+    /// anchor's relational neighbours (Layer-1, always current), and the anchor's current VP-Tree neighbourhood
+    /// used ONLY as a candidate-NAME source — then re-scores every candidate against LIVE faces. So everything
+    /// that moved is measured at its current position, in the same step, at O(candidates) cost (no rebuild). The
+    /// periodic full rebuild remains the authority for discovering brand-new neighbourhoods across the space.
+    /// </summary>
+    public IReadOnlyList<(string Symbol, double Distance)> GetNearestConceptsFresh(
+        string concept, IReadOnlyCollection<string>? seeds = null, int maxNeighbors = 8)
+    {
+        if (!TryGetConceptFace(concept, out var conceptFace) || conceptFace.Length == 0)
+            return Array.Empty<(string Symbol, double Distance)>();
+
+        var conceptKey = Normalize(concept);
+        var candidates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        if (seeds is not null)
+            foreach (var s in seeds)
+            {
+                var n = Normalize(s);
+                if (!n.Equals(conceptKey, StringComparison.OrdinalIgnoreCase))
+                    candidates.Add(n);
+            }
+
+        // Relational neighbours (Layer-1 adjacency is maintained incrementally → always current names).
+        foreach (var n in _lattice.GetRelationalNeighbors(conceptKey))
+            candidates.Add(n);
+
+        // VP-Tree neighbourhood of the anchor's CURRENT face — used only to harvest candidate NAMES (their
+        // stored positions may be slightly stale); they are RE-SCORED against live faces by GetNearestConcepts.
+        var pool = Math.Clamp(maxNeighbors * 3, 8, 64);
+        foreach (var (n, _) in _lattice.GetSemanticNeighbors(conceptFace, pool, conceptKey))
+            candidates.Add(n);
+
+        candidates.Remove(conceptKey);
+        return candidates.Count == 0
+            ? Array.Empty<(string Symbol, double Distance)>()
+            : GetNearestConcepts(concept, candidates: candidates, maxNeighbors: maxNeighbors);
+    }
+
     /// <summary>TARGET-AGNOSTIC route-perception vector (SPACE_AWARE_GRU.md §I): "can the space answer a query
     /// anchored here?" — usable at INFERENCE where the target is unknown. [has-neighbour, nearest-confidence,
     /// degree-norm, mean-top-confidence, transform-reliability, bias]; dims match
@@ -204,7 +248,9 @@ public sealed class PlatonicSpaceMemory
     /// it bubbles proven transform capability up to the route head so it learns which functions to trust.</summary>
     public double[] ComputeRoutePerception(string anchor, double transformReliability = 0.0)
     {
-        var near = GetNearestConcepts(anchor, candidates: null, maxNeighbors: 4);
+        // LIVE faces (not the throttled tree) so the perception reflects edits made this step — see
+        // GetNearestConceptsFresh. Target-agnostic here (no seeds): relational + current-neighbourhood candidates.
+        var near = GetNearestConceptsFresh(anchor, seeds: null, maxNeighbors: 4);
         var hasNeighbour = near.Count > 0 ? 1.0 : 0.0;
         var nearestConf = near.Count > 0 ? 1.0 / (1.0 + Math.Max(0.0, near[0].Distance)) : 0.0;
         var meanTopConf = near.Count > 0 ? near.Average(n => 1.0 / (1.0 + Math.Max(0.0, n.Distance))) : 0.0;

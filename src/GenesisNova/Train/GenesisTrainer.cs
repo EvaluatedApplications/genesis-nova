@@ -1469,7 +1469,9 @@ public sealed class GenesisTrainer
     {
         var anchor = inputConcepts.FirstOrDefault(c => !IsNumericConcept(c)) ?? inputConcepts[0];
         var targetSet = new HashSet<string>(outputConcepts.Select(c => c.ToLowerInvariant()), StringComparer.OrdinalIgnoreCase);
-        var near = _platonicSpace.GetNearestConcepts(anchor, candidates: null, maxNeighbors: 8);
+        // LIVE faces so the read-before-write perception conditioning the edit magnitude sees the space as it
+        // IS this step (see GetNearestConceptsFresh); seed the targets so their fresh rank/closeness is exact.
+        var near = _platonicSpace.GetNearestConceptsFresh(anchor, seeds: targetSet, maxNeighbors: 8);
         var rank = -1; var targetDist = double.NaN;
         for (var i = 0; i < near.Count; i++)
             if (targetSet.Contains(near[i].Symbol)) { rank = i; targetDist = near[i].Distance; break; }
@@ -1714,7 +1716,10 @@ public sealed class GenesisTrainer
     private double DirectedRetrievalScore(string from, HashSet<string> targetSymbols)
     {
         const int maxNeighbors = 8;
-        var nearest = _platonicSpace.GetNearestConcepts(from, candidates: null, maxNeighbors: maxNeighbors);
+        // LIVE-FACE read (see GetNearestConceptsFresh): the pre/post retrievability delta must reflect THIS
+        // step's writes, so the edit head is rewarded by the edit's real effect, not a stale tree snapshot.
+        // Seed with the targets so they are always scored fresh; relational + current neighbours supply distractors.
+        var nearest = _platonicSpace.GetNearestConceptsFresh(from, seeds: targetSymbols, maxNeighbors: maxNeighbors);
         for (var rank = 0; rank < nearest.Count; rank++)
         {
             if (!targetSymbols.Contains(nearest[rank].Symbol))

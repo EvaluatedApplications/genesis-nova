@@ -16,6 +16,12 @@ using static TorchSharp.torch;
 //  mastery-gated regime is NOT used here, to keep the training procedure identical — conservative for nova).
 // ════════════════════════════════════════════════════════════════════════════════════════════════════
 
+// Redirect libtorch's native stderr to a log BEFORE any torch call loads the native library. libtorch emits
+// cosmetic notices on stderr (e.g. the "non-leaf Tensor .grad" warning from deep inside TorchSharp's SGD on
+// the nova side) that would otherwise spam the race window. Same approach the ClaudeMemory daemon uses to keep
+// its window to just the learning curve. The warnings still land in race-stderr.log for debugging.
+NativeStderr.RedirectToFile(Path.Combine(AppContext.BaseDirectory, "race-stderr.log"));
+
 var logPath = Path.Combine(AppContext.BaseDirectory, "race-log.txt");
 using var log = new StreamWriter(logPath) { AutoFlush = true };
 void P(string s) { Console.WriteLine(s); log.WriteLine(s); }
@@ -86,8 +92,8 @@ P($"  nova        : {novaParams,10:N0} params   ~{NovaMB,5:F1} MB   (GRU control
 P($"  transformer : {xf.ParameterCount,10:N0} params   ~{XfMB,5:F1} MB   (d={best.d} L={best.L} h={best.h}, Adam)");
 P($"  budget      : EQUAL PARAMETERS, both SMALL — nova's structure needs little capacity; can a transformer this size find it?");
 Rule();
-P("  ASYNC RACE — each model trains in its own task and posts a line the moment it finishes an epoch.");
-P("  (GPU kernels are serialized on the single CUDA stream; the race is per-epoch throughput — faster pulls ahead.)");
+P("  GATED RACE — both models train in LOCKSTEP: neither starts epoch N+1 until BOTH have finished epoch N.");
+P("  (per-epoch barrier ⇒ EQUAL training work; GPU kernels serialized on one CUDA stream. Compare held-out at matched epochs.)");
 P("  >>> PRESS ANY KEY to stop the race and print the final per-creator breakdown. <<<");
 P("  ──────────────────────────────────────────────────────────────────────────────────────────────────────────");
 
@@ -107,6 +113,12 @@ var outLock = new object();
 var swRace = System.Diagnostics.Stopwatch.StartNew();
 double lastNovaHeld = 0, lastXfHeld = 0;
 const int CHUNK = 32; // GPU-lock granularity: hand the GPU back every CHUNK examples so the two tasks interleave
+
+// Per-epoch BARRIER (2 participants): neither model begins epoch N+1 until BOTH have finished epoch N. This
+// makes the training budgets identical (equal epochs) — the comparison is held-out quality at matched work,
+// not a throughput race. Both tasks always reach the barrier once per epoch, so on cancel both release and
+// then exit at the top of the next iteration (no deadlock).
+var epochBarrier = new System.Threading.Barrier(2);
 
 void Post(string who, ConsoleColor color, int ep, double tr, double held, double otherHeld)
 {
@@ -142,6 +154,7 @@ var novaTask = Task.Run(() =>
         lock (gpu) { nt = Acc(NovaGen, evalTrain); nh = Acc(NovaGen, evalHeld); }
         lastNovaHeld = nh;
         Post("NOVA", ConsoleColor.Cyan, ep, nt, nh, lastXfHeld);
+        try { epochBarrier.SignalAndWait(cts.Token); } catch (OperationCanceledException) { break; }
     }
 });
 
@@ -157,6 +170,7 @@ var xfTask = Task.Run(() =>
         lock (gpu) { tt = Acc(xf.Generate, evalTrain); th = Acc(xf.Generate, evalHeld); }
         lastXfHeld = th;
         Post("TRANSFORMER", ConsoleColor.Yellow, ep, tt, th, lastNovaHeld);
+        try { epochBarrier.SignalAndWait(cts.Token); } catch (OperationCanceledException) { break; }
     }
 });
 
@@ -180,3 +194,38 @@ P($"  note             : both trained FLAT until stopped (nova's mastery-gated r
 P($"                     a transformer needs far more epochs to fit train — this is the equal-budget result.");
 Rule();
 Console.WriteLine($"\n(log written to {logPath})");
+
+/// <summary>
+/// Redirects the process's CRT stderr (file descriptor 2) to a file. libtorch's native warnings are written
+/// via the C runtime's stderr (fileno == 2), which bypasses .NET's Console.SetError AND the Win32 SetStdHandle.
+/// Because the universal CRT (ucrtbase.dll) is a single shared module, dup2-ing fd 2 here redirects libtorch's
+/// stderr too, so its cosmetic notices land in a log instead of spamming the race window.
+/// </summary>
+internal static class NativeStderr
+{
+    // _open flags: _O_WRONLY (1) | _O_CREAT (0x100) | _O_TRUNC (0x200); pmode _S_IWRITE (0x80).
+    private const int O_WRONLY = 0x1, O_CREAT = 0x100, O_TRUNC = 0x200, S_IWRITE = 0x80, STDERR_FD = 2;
+
+    [System.Runtime.InteropServices.DllImport("ucrtbase.dll", CallingConvention = System.Runtime.InteropServices.CallingConvention.Cdecl, CharSet = System.Runtime.InteropServices.CharSet.Ansi, EntryPoint = "_open")]
+    private static extern int CrtOpen(string filename, int oflag, int pmode);
+
+    [System.Runtime.InteropServices.DllImport("ucrtbase.dll", CallingConvention = System.Runtime.InteropServices.CallingConvention.Cdecl, EntryPoint = "_dup2")]
+    private static extern int CrtDup2(int fd1, int fd2);
+
+    [System.Runtime.InteropServices.DllImport("ucrtbase.dll", CallingConvention = System.Runtime.InteropServices.CallingConvention.Cdecl, EntryPoint = "_close")]
+    private static extern int CrtClose(int fd);
+
+    public static void RedirectToFile(string path)
+    {
+        try
+        {
+            var fd = CrtOpen(path, O_WRONLY | O_CREAT | O_TRUNC, S_IWRITE);
+            if (fd >= 0)
+            {
+                CrtDup2(fd, STDERR_FD); // make fd 2 point at the file → libtorch's stderr follows
+                CrtClose(fd);
+            }
+        }
+        catch { /* best-effort: if redirect fails, the warnings simply remain on-screen */ }
+    }
+}

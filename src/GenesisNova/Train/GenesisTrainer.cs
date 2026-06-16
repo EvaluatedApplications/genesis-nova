@@ -1444,6 +1444,14 @@ public sealed class GenesisTrainer
         var dim = _transformAccumulator.EmbeddingDimension;
         var inputEmbedding = InputEmbeddingComposer.ComposeInput(example.Input, mode, dim);
         var outputEmbedding = InputEmbeddingComposer.GetInputEmbedding(example.Output, dim);
+        // EARNED reliability (bubble-up): BEFORE folding this example in, score whether the CURRENT transform
+        // already predicts it better than identity — a held-out-ish predictive-success signal. Consistent
+        // transforms keep improving; noisy ones don't. RecordOutcome feeds ReliabilityUcb → route perception so
+        // the route head learns which transforms are actually useful. (First sighting has no transform → skip.)
+        if (_transformAccumulator.TryGetTransform(arithmetic.OperationConcept, out _))
+            _transformAccumulator.RecordOutcome(
+                arithmetic.OperationConcept,
+                _transformAccumulator.ApplyImprovesOverIdentity(arithmetic.OperationConcept, inputEmbedding, outputEmbedding));
         _transformAccumulator.Learn(arithmetic.OperationConcept, inputEmbedding, outputEmbedding);
     }
 
@@ -1647,7 +1655,10 @@ public sealed class GenesisTrainer
         if (inputConcepts.Count == 0)
             return;
         var anchor = inputConcepts.FirstOrDefault(c => !IsNumericConcept(c)) ?? inputConcepts[0];
-        _model.ReinforceRouteHead(inputTokens, _platonicSpace.ComputeRoutePerception(anchor), routeLabel, 1.0);
+        // Bubble the EARNED transform reliability into the route perception so the route head is reinforced to
+        // trust the function/platonic route in proportion to how proven the model's transforms are.
+        var transformReliability = _model.TransformReliabilityRouting ? _transformAccumulator.BestReliabilityUcb() : 0.0;
+        _model.ReinforceRouteHead(inputTokens, _platonicSpace.ComputeRoutePerception(anchor, transformReliability), routeLabel, 1.0);
     }
 
     private void RewardEditHead(GenesisExample example, double tokenLoss)

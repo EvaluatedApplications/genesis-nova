@@ -198,15 +198,18 @@ public sealed class PlatonicSpaceMemory
 
     /// <summary>TARGET-AGNOSTIC route-perception vector (SPACE_AWARE_GRU.md §I): "can the space answer a query
     /// anchored here?" — usable at INFERENCE where the target is unknown. [has-neighbour, nearest-confidence,
-    /// degree-norm, mean-top-confidence, 0, bias]; dims match <c>GenesisNeuralModel.EditPerceptionDim</c>.</summary>
-    public double[] ComputeRoutePerception(string anchor)
+    /// degree-norm, mean-top-confidence, transform-reliability, bias]; dims match
+    /// <c>GenesisNeuralModel.EditPerceptionDim</c>. <paramref name="transformReliability"/> is the EARNED UCB
+    /// reliability of the model's best applicable learned transform (0 when none / when the feature is off) —
+    /// it bubbles proven transform capability up to the route head so it learns which functions to trust.</summary>
+    public double[] ComputeRoutePerception(string anchor, double transformReliability = 0.0)
     {
         var near = GetNearestConcepts(anchor, candidates: null, maxNeighbors: 4);
         var hasNeighbour = near.Count > 0 ? 1.0 : 0.0;
         var nearestConf = near.Count > 0 ? 1.0 / (1.0 + Math.Max(0.0, near[0].Distance)) : 0.0;
         var meanTopConf = near.Count > 0 ? near.Average(n => 1.0 / (1.0 + Math.Max(0.0, n.Distance))) : 0.0;
         var degreeNorm = Math.Clamp(GetRelationDegree(Normalize(anchor)) / 8.0, 0.0, 1.0);
-        return new[] { hasNeighbour, nearestConf, degreeNorm, meanTopConf, 0.0, 1.0 };
+        return new[] { hasNeighbour, nearestConf, degreeNorm, meanTopConf, Math.Clamp(transformReliability, 0.0, 1.0), 1.0 };
     }
 
     public int NumericDimensions => Math.Min(_faceDimension / 2, 21);

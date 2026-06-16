@@ -43,6 +43,11 @@ public record Transform(
     // consistent across training (poly=1 for additive +k, log=2 for multiplicative ×k). 0 = unknown/auto.
     // Decoding the applied transform in this face avoids the spurious-but-clean reading in the other face.
     int PreferredFace = 0,
+    // EARNED downstream reliability (distinct from the structural audit Confidence): how often APPLYING this
+    // transform actually predicted the target better than identity, across training. Feeds ReliabilityUcb →
+    // route perception so the route head learns which transforms are genuinely useful vs noisy. Persisted.
+    int SuccessCount = 0,
+    int AttemptCount = 0,
     IReadOnlyList<double[]>? InputSamples = null,
     IReadOnlyList<double[]>? OutputSamples = null);
 
@@ -62,7 +67,9 @@ public sealed record TransformEntrySnapshot(
     double NeighborhoodScore,
     double PolarityCoherenceScore,
     double SelfConsistencyScore,
-    int AuditPassCount);
+    int AuditPassCount,
+    int SuccessCount = 0,
+    int AttemptCount = 0);
 
 /// <summary>
 /// JSON-serializable snapshot of an entire <see cref="TransformAccumulator"/> for checkpoint persistence.
@@ -210,6 +217,65 @@ public class TransformAccumulator
 
     public bool TryGetTransform(string functionName, out Transform transform)
         => _transforms.TryGetValue(functionName, out transform!);
+
+    // ── EARNED reliability (the "bubble up successes to the route head" mechanism) ───────────────────────────
+    // A transform's reliability is its measured downstream success rate — does applying it actually help —
+    // NOT a hand-set label. The route head reads it (via ComputeRoutePerception) so it learns to trust the
+    // function route when proven transforms exist and distrust it when they're noisy.
+
+    /// <summary>Record one APPLICATION outcome (Laplace-smoothed success rate is what callers read back).
+    /// Immutable record → replace the entry with incremented counts. No-op for an unknown transform.</summary>
+    public void RecordOutcome(string functionName, bool correct)
+    {
+        if (!_transforms.TryGetValue(functionName, out var t))
+            return;
+        _transforms[functionName] = t with
+        {
+            AttemptCount = t.AttemptCount + 1,
+            SuccessCount = t.SuccessCount + (correct ? 1 : 0),
+        };
+    }
+
+    /// <summary>Did applying the CURRENT transform predict <paramref name="output"/> closer than doing nothing
+    /// (identity)? A scale-free success criterion: a consistent constant-translation improves over identity, a
+    /// noisy/inconsistent one does not. False when the transform is unknown.</summary>
+    public bool ApplyImprovesOverIdentity(string functionName, double[] input, double[] output)
+    {
+        var predicted = Apply(functionName, input);
+        if (predicted is null)
+            return false;
+        return EuclideanDistance(predicted, output) < EuclideanDistance(input, output);
+    }
+
+    /// <summary>Laplace-smoothed success rate (success+1)/(attempts+2) in [0,1]; 0.5 for a known-but-untried
+    /// transform, 0 for an unknown one.</summary>
+    public double Reliability(string functionName)
+        => _transforms.TryGetValue(functionName, out var t)
+            ? (t.SuccessCount + 1.0) / (t.AttemptCount + 2.0)
+            : 0.0;
+
+    /// <summary>UCB1-style reliability: success rate + an exploration bonus that decays with attempts, so an
+    /// under-tried transform is optimistically surfaced (gets routed enough to earn or disprove itself) instead
+    /// of being frozen out. Clamped to [0,1]. 0 for an unknown transform.</summary>
+    public double ReliabilityUcb(string functionName)
+    {
+        if (!_transforms.TryGetValue(functionName, out var t))
+            return 0.0;
+        var totalAttempts = 0;
+        foreach (var x in _transforms.Values) totalAttempts += x.AttemptCount;
+        var bonus = Math.Sqrt(2.0 * Math.Log(totalAttempts + 1.0) / (t.AttemptCount + 1.0));
+        return Math.Clamp(Reliability(functionName) + bonus, 0.0, 1.0);
+    }
+
+    /// <summary>The most-reliable (UCB) transform's score — a target-agnostic "do I have a proven transform
+    /// capability here?" signal for the route head. 0 when no transforms exist.</summary>
+    public double BestReliabilityUcb()
+    {
+        var best = 0.0;
+        foreach (var name in _transforms.Keys)
+            best = Math.Max(best, ReliabilityUcb(name));
+        return best;
+    }
     
     /// <summary>
     /// Find the most similar operation to a given embedding (KNN over operation embeddings).
@@ -261,7 +327,9 @@ public class TransformAccumulator
                 t.NeighborhoodScore,
                 t.PolarityCoherenceScore,
                 t.SelfConsistencyScore,
-                t.AuditPassCount));
+                t.AuditPassCount,
+                t.SuccessCount,
+                t.AttemptCount));
         }
         return new TransformAccumulatorSnapshot(_embeddingDim, entries);
     }
@@ -301,6 +369,8 @@ public class TransformAccumulator
                 NeighborhoodScore: entry.NeighborhoodScore,
                 PolarityCoherenceScore: entry.PolarityCoherenceScore,
                 SelfConsistencyScore: entry.SelfConsistencyScore,
+                SuccessCount: entry.SuccessCount,
+                AttemptCount: entry.AttemptCount,
                 InputSamples: null,
                 OutputSamples: null);
         }

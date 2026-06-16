@@ -238,7 +238,14 @@ public sealed class GenesisInferenceEngine
         {
             var toks = _tokenizer.Decode(inputTokens).Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
             if (toks.Length > 0)
-                routePerception = _memory.ComputeRoutePerception(toks[^1]); // operand = last token (after the op verb)
+            {
+                // Bubble EARNED transform reliability up to the route head (gated by TransformReliabilityRouting):
+                // a proven transform tilts the router toward the function/platonic route; a noisy one doesn't.
+                var transformReliability = _model.TransformReliabilityRouting && _transformAccumulator is not null
+                    ? _transformAccumulator.BestReliabilityUcb()
+                    : 0.0;
+                routePerception = _memory.ComputeRoutePerception(toks[^1], transformReliability); // operand = last token
+            }
         }
         var (routeId, routeConfidence) = _model.PredictRoute(inputTokens, routePerception);
 
@@ -1193,6 +1200,17 @@ public sealed class GenesisInferenceEngine
                 }
             }
         }
+
+        // REPETITION GUARD: a token already emitted THIS generation must not keep its positive platonic BOOST
+        // on later steps. The query bias is static (e.g. `find X` boosts X at every step), so without this the
+        // boosted answer re-wins each step and the decoder repeats it to maxTokens instead of taking the LEARNED
+        // EOS ("ObserveTrainingPair" ×16). Dropping the boost for emitted tokens lets termination (or a genuinely
+        // next token) win — same principle as the rule that the bias layer must not override the learned stop.
+        // Only the POSITIVE boost is removed; the NN's own logit (which legitimately allows repeats like "100")
+        // is untouched, and numeric tokens aren't concepts so they never carried a bias here anyway.
+        for (var g = 0; g < generatedTokens.Count; g++)
+            if (biases.TryGetValue(generatedTokens[g], out var prior) && prior > 0)
+                biases.Remove(generatedTokens[g]);
 
         if (biases.Count == 0)
             return null;

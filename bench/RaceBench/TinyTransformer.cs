@@ -33,16 +33,19 @@ public sealed class TinyTransformer : Module<Tensor, Tensor>
         _layers = layers;
         _dev = dev;
 
-        _tok = Embedding(vocab, dModel);
-        _pos = Parameter(torch.randn(maxLen, dModel) * 0.02);
+        // Construct EVERY parameter directly on the target device. (Building on CPU and then moving the whole
+        // module with this.to(dev) yields device COPIES that carry a grad_fn — non-leaf parameters — so libtorch
+        // warns each time Adam reads their .grad. Creating on-device makes them clean leaves and removes the move.)
+        _tok = Embedding(vocab, dModel, device: dev);
+        _pos = Parameter(torch.randn(maxLen, dModel, device: dev).mul_(0.02));
         _blocks = new ModuleList<TransformerBlock>();
         for (var i = 0; i < layers; i++)
-            _blocks.Add(new TransformerBlock(dModel, heads, ffMult));
-        _lnFinal = LayerNorm(dModel);
-        _head = Linear(dModel, vocab);
+            _blocks.Add(new TransformerBlock(dModel, heads, ffMult, dev));
+        _lnFinal = LayerNorm(dModel, device: dev);
+        _head = Linear(dModel, vocab, device: dev);
 
         RegisterComponents();
-        this.to(dev);
+        // No this.to(dev): everything above is already on the device as leaf parameters.
     }
 
     /// <summary>idx: [B, T] (long token ids) → logits [B, T, vocab].</summary>
@@ -75,17 +78,18 @@ internal sealed class TransformerBlock : Module<Tensor, Tensor, Tensor>
     private readonly Linear _fc1;
     private readonly Linear _fc2;
 
-    public TransformerBlock(int dModel, int heads, int ffMult) : base(nameof(TransformerBlock))
+    public TransformerBlock(int dModel, int heads, int ffMult, Device dev) : base(nameof(TransformerBlock))
     {
         _dModel = dModel;
         _heads = heads;
         _headDim = dModel / heads;
-        _ln1 = LayerNorm(dModel);
-        _ln2 = LayerNorm(dModel);
-        _qkv = Linear(dModel, 3 * dModel);
-        _proj = Linear(dModel, dModel);
-        _fc1 = Linear(dModel, ffMult * dModel);
-        _fc2 = Linear(ffMult * dModel, dModel);
+        // All on-device (see TinyTransformer ctor) so parameters are leaves and no module-move is needed.
+        _ln1 = LayerNorm(dModel, device: dev);
+        _ln2 = LayerNorm(dModel, device: dev);
+        _qkv = Linear(dModel, 3 * dModel, device: dev);
+        _proj = Linear(dModel, dModel, device: dev);
+        _fc1 = Linear(dModel, ffMult * dModel, device: dev);
+        _fc2 = Linear(ffMult * dModel, dModel, device: dev);
         RegisterComponents();
     }
 

@@ -56,6 +56,12 @@ public class GenesisNeuralModel
     private TorchSharp.Modules.Parameter? _routePerceptionW; // [EditPerceptionDim, RouteCount]
     public bool PerceptionRouting { get; set; } = true;
 
+    // RELIABILITY-WEIGHTED ROUTING: when on, the route perception's spare channel carries the EARNED UCB
+    // reliability of the model's best learned transform, so the route head learns to trust the function/platonic
+    // route when transforms are proven and distrust it when they're noisy ("bubble up successes"). The channel
+    // rides the existing _routePerceptionW (no new params); default ON. Off → the channel is fed 0 (unchanged).
+    public bool TransformReliabilityRouting { get; set; } = true;
+
     // Platonic-QUERY construction heads: the GRU learns to CONSTRUCT the platonic query itself
     // (which face operation, which input tokens are operands) instead of a hardcoded grammar
     // extracting them. Op vocabulary is face-derived ({poly,log} × {+,−} + abstain), see

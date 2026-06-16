@@ -342,6 +342,7 @@ List<MemoryProbe> GenerateProbes()
 {
     var probes = new List<MemoryProbe>();
     var verb = queryTemplates.Select(t => t.Split(' ', 2)[0]).FirstOrDefault() ?? "find";
+    var entries = new List<(string Name, List<string> Kws)>();
     if (File.Exists(indexPath))
         foreach (var raw in File.ReadLines(indexPath))
         {
@@ -351,9 +352,25 @@ List<MemoryProbe> GenerateProbes()
             if (!m.Success) continue;
             var name = m.Groups["name"].Value.Trim();
             var kws = Keywords(m.Groups["desc"].Value).Where(k => !k.Contains('-')).ToList();
-            foreach (var ho in kws.Skip(3).Take(2)) probes.Add(new MemoryProbe($"{verb} {ho}", name, true));   // held-out operand
-            if (kws.Count > 0) probes.Add(new MemoryProbe($"{verb} {kws[0]}", name, false));                   // in-sample
+            entries.Add((name, kws));
         }
+    // FULL allowed-answer set per cue: a `find <kw>` query is satisfied by ANY memory whose description carries
+    // <kw> — not only the one name we happened to pair the keyword with. WITHOUT this, the held-out metric marks
+    // a genuinely-correct sibling answer "wrong" and UNDERCOUNTS real learning (the model found a valid memory,
+    // just not the single one this probe expected). Invert keyword → all names that carry it.
+    var kwToNames = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+    foreach (var (name, kws) in entries)
+        foreach (var kw in kws)
+        {
+            if (!kwToNames.TryGetValue(kw, out var ns)) kwToNames[kw] = ns = new List<string>();
+            if (!ns.Contains(name, StringComparer.OrdinalIgnoreCase)) ns.Add(name);
+        }
+    IReadOnlyList<string> Allowed(string kw) => kwToNames.TryGetValue(kw, out var ns) ? ns : new List<string>();
+    foreach (var (name, kws) in entries)
+    {
+        foreach (var ho in kws.Skip(3).Take(2)) probes.Add(new MemoryProbe($"{verb} {ho}", name, true, Allowed(ho)));   // held-out operand
+        if (kws.Count > 0) probes.Add(new MemoryProbe($"{verb} {kws[0]}", name, false, Allowed(kws[0])));               // in-sample
+    }
     var bridges = Path.Combine(root, "claude", "truth", "bridges.truth");
     if (File.Exists(bridges))
         foreach (var raw in File.ReadLines(bridges))
@@ -381,9 +398,15 @@ async Task<(double Acc, double Held, double Purity, double Conf)> EvaluateAsync(
         // base credit. OVER-GENERATION PENALTY (a SEPARATE term, not folded into the present-reward): tax every
         // token emitted beyond the key itself, so "too much response" scores strictly less than a clean hit. A
         // verbose-but-correct answer still keeps a floor of credit (the answer IS there); a concise hit scores 1.
-        var present = Canon(pr.ExpectedKey).Length > 0 && Canon(res.Output).Contains(Canon(pr.ExpectedKey));
+        // Credit the FULL allowed-answer set: correct if the output contains ANY valid answer for this cue
+        // (one-to-many relations have many right answers), not only the single key this probe was paired with.
+        var allowed = pr.AllowedKeys is { Count: > 0 } ? pr.AllowedKeys : new[] { pr.ExpectedKey };
+        var outCanon = Canon(res.Output);
+        string? matched = null;
+        foreach (var k in allowed) { var ck = Canon(k); if (ck.Length > 0 && outCanon.Contains(ck)) { matched = k; break; } }
+        var present = matched is not null;
         var outToks = (res.Output ?? "").Split(new[] { ',', ' ' }, StringSplitOptions.RemoveEmptyEntries).Length;
-        var keyToks = Math.Max(1, pr.ExpectedKey.Split(new[] { ',', ' ' }, StringSplitOptions.RemoveEmptyEntries).Length);
+        var keyToks = Math.Max(1, (matched ?? pr.ExpectedKey).Split(new[] { ',', ' ' }, StringSplitOptions.RemoveEmptyEntries).Length);
         var excess = Math.Max(0, outToks - keyToks);               // tokens past what the answer needed
         var quality = present ? Math.Clamp(1.0 - 0.34 * excess, 0.2, 1.0) : 0.0;
         correct += quality;
@@ -396,7 +419,17 @@ async Task<(double Acc, double Held, double Purity, double Conf)> EvaluateAsync(
 }
 
 GenesisNovaConfig MakeConfig(bool resume) => new(
-    HiddenSize: 1024, // controller width / platonic face dim — bumped from the 512 default for more capacity
+    // ── PRODUCTION STANDARD — 6 GB-VRAM minimum spec (set deliberately, NOT auto-derived) ──────────────────
+    // HiddenSize is the GRU controller width and the only term that fills VRAM. 2048 is the sweet spot for a
+    // 6 GB / ~4096-CUDA-core class GPU: past it the GRU (a thin SELECTOR, not the reasoner) hits diminishing
+    // returns while per-step cost grows quadratically. The platonic SUBSTRATE is decoupled via
+    // FaceDimensionOverride — it has zero GRU-sized params (face↔GRU bridge is by NAME), lives in CPU RAM, and
+    // therefore scales to a million+ objects INDEPENDENTLY of the controller. See the sizing analysis + memories.
+    HiddenSize: 2048,
+    FaceDimensionOverride: 512,          // substrate width (RAM, not VRAM): 1M objects ≈ 1M × 512 × 8 B ≈ 4 GB RAM
+    MaxPlatonicNodes: 1_500_000,         // allow a million+ concepts before hard eviction (was 100k)
+    MaxPlatonicRelations: 4_000_000,     // relation headroom (was 500k); relations are positioned vectors → watch RAM as it fills
+    AutoScaleVram: false,                // FIXED standard: do not auto-resize hidden to the host machine
     Backend: useGpu ? ComputeBackend.Gpu : ComputeBackend.Cpu,
     AutoResume: resume, AutoPersist: true, LocalStateDirectory: stateDir);
 
@@ -669,7 +702,8 @@ if (cmd is "serve")
     var cycle = 0;
     var stable = 0;
     const int StableCycles = 3;     // legacy idle latch (now set when ALL buckets are mastered)
-    const int EvalEvery = 5;         // run the 82-probe held-out curve every N cycles (observability)
+    const int EvalEvery = 1;         // probe the held-out curve EVERY cycle (it's cheap) — full-signal observability + ramp
+    const int SampleEvery = 5;       // print the 5 cue→guess samples this often (eval is every cycle; samples stay readable)
     const int RefreshEvery = 100000; // effectively never: the periodic rebuild only existed to re-permute lists
                                      // (now removed), and it was RESETTING the focus mid drive-to-depth every 10
                                      // cycles so nothing could master. Real memory/code changes still refresh via
@@ -708,6 +742,7 @@ if (cmd is "serve")
     var baseLr = server.LearningRate; // the un-annealed step; anneal multiplies this, restored on stop
     List<Bucket>? buckets = null;
     var allCorpusLines = new List<string>(); // every association (cue => member) — the broad-training corpus
+    Dictionary<string, List<string>>? cueAnswersMap = null; // cue → FULL valid-answer set, for full-list sample grading
     const int ChunkSize = 96;         // associations trained per cycle (a slice of the shuffled corpus sweep)
     var sweep = new List<string>();   // current shuffled pass over the whole corpus
     var sweepPos = 0;                 // position within the current sweep
@@ -872,6 +907,7 @@ if (cmd is "serve")
         if (buckets is null)
         {
             var cueAnswers = BuildCueAnswers();
+            cueAnswersMap = cueAnswers; // remember the FULL valid-answer set per cue for honest sample grading
             WriteTrainFile(MaxAnswersPerCue); // refresh the reference artifact (trainset.txt) at full length
             buckets = BuildBuckets(cueAnswers);
             allCorpusLines = buckets.SelectMany(EpochLinesFor).ToList(); // the whole corpus, broad-trained in sweeps
@@ -953,10 +989,10 @@ if (cmd is "serve")
         var freshEval = cycle % EvalEvery == 0 ? "*" : " ";
         Stamp($"cycle {cycle,4} | sweep {epochNum,3} {sweepPos,5}/{sweep.Count,-5} | loss {trainLoss,6:F3} | held {lastHeld,4:P0} acc {lastAcc,4:P0} route {lastPurity,4:P0}{freshEval}| {sw.Elapsed.TotalSeconds,4:F1}s");
 
-        // On eval cycles, show 5 random associations + the model's guess (generous token budget for multi-token keys).
-        if (cycle % EvalEvery == 0 && allCorpusLines.Count > 0)
+        // Periodically show 5 random associations + the model's guess (generous token budget for multi-token keys).
+        if (cycle % SampleEvery == 0 && allCorpusLines.Count > 0)
         {
-            P("      -- sample: cue -> guess   (want ~ key) --");
+            P("      -- sample: cue -> guess   (want ~ any valid) --");
             for (var s = 0; s < 5; s++)
             {
                 var line = allCorpusLines[Random.Shared.Next(allCorpusLines.Count)];
@@ -965,8 +1001,14 @@ if (cmd is "serve")
                 var cue = line[..arrow].Trim();
                 var key = line[(arrow + 4)..].Trim();
                 var raw = (await server.PredictAsync(cue, maxTokens: 16)).Result?.Output?.Trim() ?? "";
-                var hit = Canon(key).Length > 0 && Canon(raw).Contains(Canon(key));
-                P($"      [{(hit ? "hit " : "miss")}]  {cue} -> {raw}   (want ~ {key})");
+                // Grade against the FULL valid-answer set for this cue (any member counts), not just the one
+                // member this sample line happened to show — same fix as the held-out metric.
+                var allowed = cueAnswersMap is not null && cueAnswersMap.TryGetValue(cue, out var la) && la.Count > 0
+                    ? la : new List<string> { key };
+                var rawCanon = Canon(raw);
+                var hit = allowed.Any(a => Canon(a).Length > 0 && rawCanon.Contains(Canon(a)));
+                var want = allowed.Count > 1 ? $"{key} (+{allowed.Count - 1} more)" : key;
+                P($"      [{(hit ? "hit " : "miss")}]  {cue} -> {raw}   (want ~ {want})");
             }
         }
 
@@ -1096,7 +1138,7 @@ internal sealed class Bucket
 
 // A measurement probe: a query and the memory key it SHOULD recall. HeldOut probes use the find-syntax on an
 // operand never trained in that syntax — a correct hit proves operand generalization, the mastery target.
-internal sealed record MemoryProbe(string Query, string ExpectedKey, bool HeldOut);
+internal sealed record MemoryProbe(string Query, string ExpectedKey, bool HeldOut, IReadOnlyList<string>? AllowedKeys = null);
 
 // One row of the continuous-mastery learning curve, appended per training cycle.
 internal sealed record MetricsEntry(

@@ -94,6 +94,7 @@ public sealed class PlatonicSpaceMemory
     {
         _faceDimension = Math.Max(4, faceDimension);
         _functions = new FunctionElementRegistry(_faceDimension);
+        _words = new WordElementRegistry(_faceDimension);
         _maxPlatonicNodes = Math.Max(256, maxNodes);
         _maxPlatonicRelations = Math.Max(1024, maxRelations);
         _lattice = new PlatonicLattice(
@@ -128,6 +129,13 @@ public sealed class PlatonicSpaceMemory
 
     public bool IsOperationToken(string concept)
         => _operationTokens.Count > 0 && _operationTokens.Contains(Normalize(concept));
+
+    /// <summary>Reserved INTERNAL concepts — the op→face routing markers ("face:poly"/"face:log"). They are
+    /// valid relation ENDPOINTS (the op↔face affinity that routes arithmetic) but are hyper-observed hubs, so
+    /// they must NEVER be returned as a retrieval ANSWER, used as a retrieval anchor, or shown as an activated
+    /// concept. They are not user-facing concepts.</summary>
+    public static bool IsReservedConcept(string? concept)
+        => !string.IsNullOrEmpty(concept) && concept.StartsWith("face:", System.StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// Returns the positive face of a concept without side effects.
@@ -376,6 +384,7 @@ public sealed class PlatonicSpaceMemory
     // delegates. Both are kept out of _nodes so they never contaminate concept retrieval. The executable
     // glider definitions live in PlatonicShapeRegistry; the Function elements here are their substrate existence.
     private readonly FunctionElementRegistry _functions;
+    private readonly WordElementRegistry _words;
     private readonly ChunkElementStore _chunks = new();
 
     /// <summary>The canonical tag under which the Seq composer mines/looks-up its scaffold chunk.</summary>
@@ -390,6 +399,34 @@ public sealed class PlatonicSpaceMemory
 
     public bool TryGetFunctionElement(string name, out Core.PlatonicElement element)
         => _functions.TryGet(name, out element);
+
+    /// <summary>The WORD ELEMENTS registered in the space (whole-string identities in the word face).</summary>
+    public IReadOnlyList<Core.PlatonicElement> WordElements => _words.Elements;
+
+    /// <summary>
+    /// Register (idempotently) a concept as a first-class WORD ELEMENT — a distinct element whose identity
+    /// lives in the word face (spelling-independent), NOT a region of the concept's char face. A MULTI-word
+    /// concept auto-registers each constituent word element FIRST and RELATES to them (concat); reading those
+    /// related parts is decompose (<see cref="DecomposeWordElement"/>).
+    /// </summary>
+    public Core.PlatonicElement RegisterWordElement(string concept)
+    {
+        var key = (concept ?? string.Empty).Trim();
+        var tokens = key.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        if (tokens.Length < 2)
+            return _words.Register(key, null);                 // atomic word element
+        foreach (var t in tokens)
+            _words.Register(t, null);                          // ensure each part exists first
+        return _words.Register(key, tokens);                   // the whole, relating to its parts (concat)
+    }
+
+    public bool TryGetWordElement(string concept, out Core.PlatonicElement element)
+        => _words.TryGet(concept, out element);
+
+    /// <summary>DECOMPOSE a (multi-word) word element into its constituent word elements — the inverse of the
+    /// concat structure, read from the element's <c>RelatedTo</c>. Empty for an atomic / unregistered concept.</summary>
+    public IReadOnlyList<Core.PlatonicElement> DecomposeWordElement(string concept)
+        => _words.TryGet(concept, out var e) ? _words.Parts(e) : Array.Empty<Core.PlatonicElement>();
 
     /// <summary>Record one observation of <paramref name="chunk"/> as a scaffold for <paramref name="tag"/>.</summary>
     public void MineChunk(string tag, string chunk) => _chunks.Mine(tag, chunk);
@@ -576,6 +613,8 @@ public sealed class PlatonicSpaceMemory
             if (candidate.Confidence < threshold)
                 return;
             if (string.Equals(candidate.Concept, key, StringComparison.OrdinalIgnoreCase))
+                return;
+            if (IsReservedConcept(candidate.Concept)) // internal op→face markers (face:poly/log) are never neighbours/answers
                 return;
             if (!collected.TryGetValue(candidate.Concept, out var existing) || candidate.Confidence > existing.Confidence)
                 collected[candidate.Concept] = candidate;
@@ -1309,7 +1348,7 @@ public sealed class PlatonicSpaceMemory
         return 1.0 / (1.0 + usage);
     }
 
-    private int GetRelationDegree(string concept)
+    public int GetRelationDegree(string concept)
         => _lattice.Degree(Normalize(concept));
 
     private void TouchNode(string concept, bool success, long step)
@@ -1368,7 +1407,9 @@ public sealed class PlatonicSpaceMemory
     ///   <item>Numbers: the arithmetic face [0 .. 2*NumericDimensions) (poly + log) —
     ///   the homomorphic basis (value*10^-i, ln|value|*10^-i).</item>
     ///   <item>Text concepts: the character-slot face [CharFaceStart .. WordFaceStart) — the
-    ///   lexical fingerprint. The word face and all other dims stay learnable.</item>
+    ///   lexical fingerprint. The word face and all other dims stay learnable. (The spelling-independent
+    ///   per-concept IDENTITY lives on a SEPARATE word ELEMENT, not in the concept's face — see
+    ///   <c>RegisterWordElement</c> / WordElementRegistry — so it is stable by being in its own index.)</item>
     /// </list>
     /// </summary>
     private (int Start, int End) IdentityRange(string concept)

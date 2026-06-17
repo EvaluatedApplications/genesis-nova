@@ -75,6 +75,12 @@ public class GenesisNeuralModel
     private const double QueryLossWeight = 0.25;
     private TorchSharp.Modules.Parameter? _queryOpWT;      // [hidden, QueryOpCount]
     private TorchSharp.Modules.Parameter? _queryOpB;       // [QueryOpCount]
+    // SPACE-AWARE op head (SPACE_AWARE_GRU.md §A): the op classifier conditions on a perception vector of the
+    // query anchor's region, so it READS the space rather than choosing from tokens alone. Runtime-only
+    // (reinitialised, not persisted); trained by TrainQueryOpPerception; default ON. No perception / flag off
+    // → the channel is fed 0 (head unchanged), so non-relational (numeric) inputs degrade gracefully.
+    private TorchSharp.Modules.Parameter? _queryOpPerceptionW; // [EditPerceptionDim, QueryOpCount]
+    public bool PerceptionQuery { get; set; } = true;
     private TorchSharp.Modules.Parameter? _queryOperandWT; // [hidden, 1]
     private TorchSharp.Modules.Parameter? _queryOperandB;  // [1]
 
@@ -84,12 +90,18 @@ public class GenesisNeuralModel
     // Increment 1 wires PlanKind.Predicate (Compare→Branch); more shapes extend PlanKindCount.
     // 0=none, 1=arithmetic, 2=predicate, 3=retrieval, 4=arithmetic→word, 5=fold-sum, 6=fold-product,
     // 7=seq (Concatenate-Composition: Literal scaffold + Compute → "the answer is N"),
-    // 8=ref (higher-order: a Ref glider invokes another named glider then scales it → 2·max(a,b)).
+    // 8=expression-chain (MULTI-operator expression "2 x 7 + 3" → 17: each operator classified from context
+    //   by the op head, evaluated with precedence by chaining compute-elements on the substrate).
     // Each shape the GRU can SELECT; the substrate executes it (R2 compose / homomorphism / relations).
     public const int PlanKindCount = 9;
     private const double PlanLossWeight = 0.25;
     private TorchSharp.Modules.Parameter? _planWT; // [hidden, PlanKindCount]
     private TorchSharp.Modules.Parameter? _planB;  // [PlanKindCount]
+    // SPACE-AWARE plan head (SPACE_AWARE_GRU.md §A): shape selection conditions on the anchor's perception
+    // vector, so the composer READS the space before picking a shape. Runtime-only; trained by
+    // TrainPlanPerception; default ON. No perception / flag off → fed 0 (head unchanged).
+    private TorchSharp.Modules.Parameter? _planPerceptionW; // [EditPerceptionDim, PlanKindCount]
+    public bool PerceptionPlan { get; set; } = true;
 
     // Learned edit-head: predicts HOW STRONGLY the platonic space should be edited for a given
     // input context. Shape mirrors the route head but emits a single scalar: _editWT is [hidden, 1]
@@ -224,7 +236,14 @@ public class GenesisNeuralModel
             _gruWih is not null ? TensorToMatrix(_gruWih) : null,
             _gruWhh is not null ? TensorToMatrix(_gruWhh) : null,
             _gruBih is not null ? TensorToVector(_gruBih) : null,
-            _gruBhh is not null ? TensorToVector(_gruBhh) : null);
+            _gruBhh is not null ? TensorToVector(_gruBhh) : null,
+            // Query-construction + plan heads (null until lazily initialised; created together so all-or-none).
+            _queryOpWT is not null ? TensorToMatrix(_queryOpWT) : null,
+            _queryOpB is not null ? TensorToVector(_queryOpB) : null,
+            _queryOperandWT is not null ? TensorToMatrix(_queryOperandWT) : null,
+            _queryOperandB is not null ? TensorToVector(_queryOperandB) : null,
+            _planWT is not null ? TensorToMatrix(_planWT) : null,
+            _planB is not null ? TensorToVector(_planB) : null);
     }
 
     public void Import(ModelSnapshot snapshot)
@@ -257,7 +276,33 @@ public class GenesisNeuralModel
             _gruBih = VectorToParameter(snapshot.GruBih!);
             _gruBhh = VectorToParameter(snapshot.GruBhh!);
         }
+        // QUERY-construction + PLAN heads — restore ALL SIX or NONE (they are created together by
+        // EnsureQueryHeadsInitialized, which returns early once _queryOpWT exists; a partial restore would leave
+        // the rest null and NPE). Shape-mismatched / pre-head checkpoints leave them null → lazily reinitialised.
+        if (HasUsableQueryPlanHeads(snapshot, _hiddenSize))
+        {
+            _queryOpWT = MatrixToParameter(snapshot.QueryOpWeights!);
+            _queryOpB = VectorToParameter(snapshot.QueryOpBias!);
+            _queryOperandWT = MatrixToParameter(snapshot.QueryOperandWeights!);
+            _queryOperandB = VectorToParameter(snapshot.QueryOperandBias!);
+            _planWT = MatrixToParameter(snapshot.PlanWeights!);
+            _planB = VectorToParameter(snapshot.PlanBias!);
+        }
         RecreateOptimizer();
+    }
+
+    private static bool HasUsableQueryPlanHeads(ModelSnapshot s, int hiddenSize)
+    {
+        if (hiddenSize <= 0) return false;
+        if (s.QueryOpWeights is null || s.QueryOpBias is null || s.QueryOperandWeights is null
+            || s.QueryOperandBias is null || s.PlanWeights is null || s.PlanBias is null)
+            return false;
+        return s.QueryOpWeights.GetLength(0) == hiddenSize && s.QueryOpWeights.GetLength(1) == QueryOpCount
+            && s.QueryOpBias.Length == QueryOpCount
+            && s.QueryOperandWeights.GetLength(0) == hiddenSize && s.QueryOperandWeights.GetLength(1) == 1
+            && s.QueryOperandBias.Length == 1
+            && s.PlanWeights.GetLength(0) == hiddenSize && s.PlanWeights.GetLength(1) == PlanKindCount
+            && s.PlanBias.Length == PlanKindCount;
     }
 
     private int PredictNextTokenGpu(
@@ -665,7 +710,7 @@ public class GenesisNeuralModel
     /// successor to the hardcoded arithmetic grammar. Returns op 0 (abstain) with empty flags until
     /// the heads have been supervised at least once, so callers degrade gracefully.
     /// </summary>
-    public (int OperationId, double Confidence, bool[] OperandFlags) PredictQuery(IReadOnlyList<int> inputTokens)
+    public (int OperationId, double Confidence, bool[] OperandFlags) PredictQuery(IReadOnlyList<int> inputTokens, double[]? perception = null)
     {
         if (_queryOpWT is null || inputTokens.Count == 0)
             return (0, 0.0, Array.Empty<bool>());
@@ -690,6 +735,16 @@ public class GenesisNeuralModel
             }
 
             var opLogits = hInput.matmul(opW) + opB; scratch.Add(opLogits);
+            // SPACE-AWARE: + perception·_queryOpPerceptionW so the op choice can READ the anchor's region
+            // (graceful no-op for numeric arithmetic, which has no relational anchor — perception is all-0).
+            if (PerceptionQuery && perception is { Length: > 0 } && _queryOpPerceptionW is not null)
+            {
+                Tensor qpw = _queryOpPerceptionW;
+                if (_inferenceDevice != _trainingDevice) { qpw = _queryOpPerceptionW.to(_inferenceDevice); scratch.Add(qpw); }
+                var pv = tensor(PerceptionFloats(perception), new long[] { EditPerceptionDim }, device: _inferenceDevice); scratch.Add(pv);
+                var perceptLogits = pv.matmul(qpw); scratch.Add(perceptLogits);
+                opLogits = opLogits + perceptLogits; scratch.Add(opLogits);
+            }
             var opProbs = nn.functional.softmax(opLogits, 0); scratch.Add(opProbs);
             using var opCpu = opProbs.cpu();
             var opScores = opCpu.data<float>().ToArray();
@@ -724,7 +779,7 @@ public class GenesisNeuralModel
     /// selector: 0=none/abstain, 1=arithmetic, 2=predicate, 3=retrieval. Softmax over the plan-kind head.
     /// Returns (0, 0) until the head has been supervised, so callers degrade gracefully.
     /// </summary>
-    public (int PlanKind, double Confidence) PredictPlan(IReadOnlyList<int> inputTokens)
+    public (int PlanKind, double Confidence) PredictPlan(IReadOnlyList<int> inputTokens, double[]? perception = null)
     {
         if (_planWT is null || inputTokens.Count == 0)
             return (0, 0.0);
@@ -744,6 +799,15 @@ public class GenesisNeuralModel
                 pB = _planB!.to(_inferenceDevice); scratch.Add(pB);
             }
             var logits = hInput.matmul(pW) + pB; scratch.Add(logits);
+            // SPACE-AWARE: + perception·_planPerceptionW so the shape choice READS the anchor's region.
+            if (PerceptionPlan && perception is { Length: > 0 } && _planPerceptionW is not null)
+            {
+                Tensor ppw = _planPerceptionW;
+                if (_inferenceDevice != _trainingDevice) { ppw = _planPerceptionW.to(_inferenceDevice); scratch.Add(ppw); }
+                var pv = tensor(PerceptionFloats(perception), new long[] { EditPerceptionDim }, device: _inferenceDevice); scratch.Add(pv);
+                var perceptLogits = pv.matmul(ppw); scratch.Add(perceptLogits);
+                logits = logits + perceptLogits; scratch.Add(logits);
+            }
             var probs = nn.functional.softmax(logits, 0); scratch.Add(probs);
             using var cpu = probs.cpu();
             var scores = cpu.data<float>().ToArray();
@@ -1093,22 +1157,29 @@ public class GenesisNeuralModel
 
     private void EnsureQueryHeadsInitialized()
     {
-        if (_queryOpWT is not null)
-            return;
-
-        _queryOpWT = new TorchSharp.Modules.Parameter(
-            ((rand(new long[] { _hiddenSize, QueryOpCount }, device: _trainingDevice) * 2.0) - 1.0) * 0.05, true);
-        _queryOpB = new TorchSharp.Modules.Parameter(
-            zeros(new long[] { QueryOpCount }, dtype: ScalarType.Float32, device: _trainingDevice), true);
-        _queryOperandWT = new TorchSharp.Modules.Parameter(
-            ((rand(new long[] { _hiddenSize, 1 }, device: _trainingDevice) * 2.0) - 1.0) * 0.05, true);
-        _queryOperandB = new TorchSharp.Modules.Parameter(
-            zeros(new long[] { 1 }, dtype: ScalarType.Float32, device: _trainingDevice), true);
-        _planWT = new TorchSharp.Modules.Parameter(
-            ((rand(new long[] { _hiddenSize, PlanKindCount }, device: _trainingDevice) * 2.0) - 1.0) * 0.05, true);
-        _planB = new TorchSharp.Modules.Parameter(
-            zeros(new long[] { PlanKindCount }, dtype: ScalarType.Float32, device: _trainingDevice), true);
-        RecreateOptimizer();
+        if (_queryOpWT is null)
+        {
+            _queryOpWT = new TorchSharp.Modules.Parameter(
+                ((rand(new long[] { _hiddenSize, QueryOpCount }, device: _trainingDevice) * 2.0) - 1.0) * 0.05, true);
+            _queryOpB = new TorchSharp.Modules.Parameter(
+                zeros(new long[] { QueryOpCount }, dtype: ScalarType.Float32, device: _trainingDevice), true);
+            _queryOperandWT = new TorchSharp.Modules.Parameter(
+                ((rand(new long[] { _hiddenSize, 1 }, device: _trainingDevice) * 2.0) - 1.0) * 0.05, true);
+            _queryOperandB = new TorchSharp.Modules.Parameter(
+                zeros(new long[] { 1 }, dtype: ScalarType.Float32, device: _trainingDevice), true);
+            _planWT = new TorchSharp.Modules.Parameter(
+                ((rand(new long[] { _hiddenSize, PlanKindCount }, device: _trainingDevice) * 2.0) - 1.0) * 0.05, true);
+            _planB = new TorchSharp.Modules.Parameter(
+                zeros(new long[] { PlanKindCount }, dtype: ScalarType.Float32, device: _trainingDevice), true);
+            RecreateOptimizer();
+        }
+        // SPACE-AWARE perception weights ensured INDEPENDENTLY (a loaded checkpoint sets the heads but not
+        // these runtime-only weights). Trained by TrainQueryOpPerception / TrainPlanPerception, NOT the shared
+        // optimizer — same discipline as _routePerceptionW / _editPerceptionW.
+        _queryOpPerceptionW ??= new TorchSharp.Modules.Parameter(
+            ((rand(new long[] { EditPerceptionDim, QueryOpCount }, device: _trainingDevice) * 2.0) - 1.0) * 0.05, true);
+        _planPerceptionW ??= new TorchSharp.Modules.Parameter(
+            ((rand(new long[] { EditPerceptionDim, PlanKindCount }, device: _trainingDevice) * 2.0) - 1.0) * 0.05, true);
     }
 
     private void EnsureEditHeadInitialized()
@@ -1456,6 +1527,75 @@ public class GenesisNeuralModel
         }
     }
 
+    /// <summary>SPACE-AWARE plan head (SPACE_AWARE_GRU.md §A): supervised CE training of ONLY
+    /// <c>_planPerceptionW</c> — the perceived anchor region shifts shape selection toward the correct plan
+    /// kind; the main plan head keeps its shared-optimizer training. No-op unless <see cref="PerceptionPlan"/>
+    /// and a perception vector + valid label are given.</summary>
+    public void TrainPlanPerception(IReadOnlyList<int> inputTokens, double[]? perception, int planLabel)
+        => TrainHeadPerception(inputTokens, perception, planLabel, PerceptionPlan, PlanKindCount,
+            _planWT, _planB, _planPerceptionW);
+
+    /// <summary>SPACE-AWARE op head: supervised CE training of ONLY <c>_queryOpPerceptionW</c>.</summary>
+    public void TrainQueryOpPerception(IReadOnlyList<int> inputTokens, double[]? perception, int opLabel)
+        => TrainHeadPerception(inputTokens, perception, opLabel, PerceptionQuery, QueryOpCount,
+            _queryOpWT, _queryOpB, _queryOpPerceptionW);
+
+    /// <summary>Shared supervised-CE perception trainer: logits = h·W + perception·perceptionW + b, gradient
+    /// requested ONLY for perceptionW, which is updated IN PLACE (sub_), so the parameters can be passed by
+    /// value — the main head W/b keep their own training. Same detached-encode + manual-step discipline as
+    /// <see cref="ReinforceRouteHead"/>.</summary>
+    private void TrainHeadPerception(IReadOnlyList<int> inputTokens, double[]? perception, int label,
+        bool enabled, int classCount,
+        TorchSharp.Modules.Parameter? headW, TorchSharp.Modules.Parameter? headB,
+        TorchSharp.Modules.Parameter? perceptionW)
+    {
+        if (!enabled || inputTokens.Count == 0 || perception is not { Length: > 0 })
+            return;
+        if (label < 0 || label >= classCount)
+            return;
+
+        EnsureModelInitialized();
+        EnsureGruInitialized();
+        EnsureQueryHeadsInitialized();
+        if (headW is null || headB is null || perceptionW is null)
+            return;
+
+        Tensor meanEmb;
+        var encScratch = new List<Tensor>();
+        try
+        {
+            using (no_grad())
+            {
+                var hInput = EncodeInput(inputTokens, encScratch, _trainingDevice);
+                meanEmb = hInput.detach().clone();
+            }
+        }
+        finally
+        {
+            foreach (var t in encScratch) { try { t?.Dispose(); } catch { } }
+        }
+
+        using var meanEmbHolder = meanEmb;
+        using var pv = tensor(PerceptionFloats(perception), new long[] { EditPerceptionDim }, device: _trainingDevice);
+        using var logits = meanEmb.matmul(headW!) + pv.matmul(perceptionW!) + headB!;
+        using var batch = logits.unsqueeze(0);
+        using var target = tensor(new long[] { label }, dtype: ScalarType.Int64, device: _trainingDevice);
+        using var loss = nn.functional.cross_entropy(batch, target);
+        var grads = autograd.grad(new List<Tensor> { loss }, new List<Tensor> { perceptionW! });
+        try
+        {
+            using (no_grad())
+            {
+                using var step = grads[0] * EditHeadLearningRate;
+                perceptionW!.sub_(step);
+            }
+        }
+        finally
+        {
+            foreach (var g in grads) { try { g.Dispose(); } catch { } }
+        }
+    }
+
     private void EnsureHiddenSizeGpu(int hiddenSize, int oldHidden, int vocab)
     {
         var newEmb = ((rand(new long[] { vocab, hiddenSize }, device: _trainingDevice) * 2.0) - 1.0) * 0.05;
@@ -1677,10 +1817,12 @@ public class GenesisNeuralModel
         _queryOpB = null;
         _queryOperandWT = null;
         _queryOperandB = null;
+        _queryOpPerceptionW = null; // runtime-only perception weight (matches _routePerceptionW handling)
         try { _planWT?.Dispose(); } catch { }
         try { _planB?.Dispose(); } catch { }
         _planWT = null;
         _planB = null;
+        _planPerceptionW = null;
         // SHARED GRU gate weights/biases.
         try { _gruWih?.Dispose(); } catch { }
         try { _gruWhh?.Dispose(); } catch { }
@@ -1820,4 +1962,14 @@ public sealed record ModelSnapshot(
     double[,]? GruWih = null,
     double[,]? GruWhh = null,
     double[]? GruBih = null,
-    double[]? GruBhh = null);
+    double[]? GruBhh = null,
+    // Platonic-query construction heads (op classifier [h,QueryOpCount] + operand scorer [h,1]) and the composer
+    // PLAN head [h,PlanKindCount]. OPTIONAL, appended so existing call sites compile; null on pre-head checkpoints
+    // (then lazily reinitialised). Persisted so a loaded model keeps these TRAINED heads instead of resetting
+    // them each reload (the same drop-on-load bug previously fixed for the GRU/edit heads).
+    double[,]? QueryOpWeights = null,
+    double[]? QueryOpBias = null,
+    double[,]? QueryOperandWeights = null,
+    double[]? QueryOperandBias = null,
+    double[,]? PlanWeights = null,
+    double[]? PlanBias = null);

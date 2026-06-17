@@ -54,6 +54,37 @@ internal static class PlatonicFaceComposer
         return embedding;
     }
 
+    /// <summary>
+    /// Write a PER-CONCEPT IDENTITY code into the word face <c>[WordFaceStart, dim)</c>: a deterministic,
+    /// whole-string-seeded unit vector (≈orthogonal across distinct concepts in this many dims). It is keyed
+    /// by the ENTIRE string, so "four"/"fruit"/"fort" get distinct, non-confusable identities (unlike the old
+    /// per-char-chunk hash) and a multi-word concept is distinct from its constituent words. Decoupled from
+    /// spelling (the char face) — this is "who is this concept", not "how is it spelled"; meaning lives in
+    /// relations. No-op when there is no word face at this dim (dim ≤ 202). OVERWRITES the region (so any
+    /// prior seed noise there is replaced by the stable code).
+    /// </summary>
+    public static void AddWordIdentity(double[] embedding, string concept, int dim)
+    {
+        var wordStart = FaceLayout.WordFaceStart(dim);
+        var wordDims = FaceLayout.WordFaceDims(dim);
+        if (wordDims <= 0 || string.IsNullOrEmpty(concept))
+            return;
+        var rng = new Random(unchecked((int)StableHash("id:" + concept))); // whole-string seed
+        var sum = 0.0;
+        for (var d = wordStart; d < wordStart + wordDims && d < dim && d < embedding.Length; d++)
+        {
+            var v = (rng.NextDouble() * 2.0) - 1.0;
+            embedding[d] = v;
+            sum += v * v;
+        }
+        var norm = Math.Sqrt(sum);
+        if (norm <= 1e-12)
+            return;
+        var inv = 1.0 / norm;
+        for (var d = wordStart; d < wordStart + wordDims && d < dim && d < embedding.Length; d++)
+            embedding[d] *= inv;
+    }
+
     /// <summary>Single-token embedding: numeric (poly+log) or char-composed, then seeded.</summary>
     public static double[] GetFreshEmbedding(string symbol, int dim)
     {

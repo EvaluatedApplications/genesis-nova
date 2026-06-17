@@ -3,7 +3,9 @@ obj/
 .vs/
 *.user
 *.suo
-/models
+# Local model output stays out, but the SHARED starter people fork from IS tracked (see MODEL_STORAGE.md).
+/models/*
+!/models/genesis-nova/
 /tempbuild/Debug/net8.0-windows
 /tempbuild-tests/Debug/net8.0-windows
 /artifacts

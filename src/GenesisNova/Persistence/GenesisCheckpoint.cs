@@ -32,9 +32,18 @@ public sealed record GenesisCheckpoint(
     // Learned detokenization casing statistics (folded token -> surface spelling). Null on older checkpoints
     // (relearns on load). Lets restored casing ("WhitespaceGenesisTokenizer") survive a reload.
     CasingModelSnapshot? CasingModel = null,
+    // Platonic-query construction heads (op classifier + operand scorer) and the composer PLAN head. Null on
+    // older checkpoints (then lazily reinitialised on load). Persisted so these TRAINED heads survive a reload
+    // instead of resetting each time — the drop-on-load gap previously fixed for the GRU/edit heads.
+    MatrixSnapshot? QueryOpWeights = null,
+    double[]? QueryOpBias = null,
+    MatrixSnapshot? QueryOperandWeights = null,
+    double[]? QueryOperandBias = null,
+    MatrixSnapshot? PlanWeights = null,
+    double[]? PlanBias = null,
     int Version = 0)
 {
-    public const int CurrentVersion = 3;
+    public const int CurrentVersion = 4;
 }
 
 public sealed record MatrixSnapshot(int Rows, int Cols, double[] Values)

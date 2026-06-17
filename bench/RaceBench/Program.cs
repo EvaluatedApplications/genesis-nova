@@ -110,7 +110,6 @@ string NovaGen(string i) => inference.Generate(new GenerationRequest(i, 8)).Outp
 // instant it finishes an epoch, so the faster model gets through the GPU lock more often and pulls ahead.
 var gpu = new object();
 var outLock = new object();
-var swRace = System.Diagnostics.Stopwatch.StartNew();
 double lastNovaHeld = 0, lastXfHeld = 0;
 const int CHUNK = 32; // GPU-lock granularity: hand the GPU back every CHUNK examples so the two tasks interleave
 
@@ -120,10 +119,10 @@ const int CHUNK = 32; // GPU-lock granularity: hand the GPU back every CHUNK exa
 // then exit at the top of the next iteration (no deadlock).
 var epochBarrier = new System.Threading.Barrier(2);
 
-void Post(string who, ConsoleColor color, int ep, double tr, double held, double otherHeld)
+void Post(string who, ConsoleColor color, int ep, double tr, double held, double otherHeld, double epochSecs)
 {
     var lead = held > otherHeld + 1e-9 ? "▲ ahead" : held < otherHeld - 1e-9 ? "▼ behind" : "= even";
-    var line = $"  {who,-11} ep {ep,3}   train {tr,5:P0}   held-out {held,5:P0}   {lead,-8} (t {swRace.Elapsed.TotalSeconds,6:F1}s)";
+    var line = $"  {who,-11} ep {ep,3}   train {tr,5:P0}   held-out {held,5:P0}   {lead,-8} (epoch {epochSecs,5:F1}s)";
     lock (outLock)
     {
         log.WriteLine(line);
@@ -147,13 +146,14 @@ var novaTask = Task.Run(() =>
     var rngN = new Random(SEED + 11);
     for (var ep = 1; ep <= SAFETYCAP && !cts.IsCancellationRequested; ep++)
     {
+        var epSw = System.Diagnostics.Stopwatch.StartNew(); // time THIS epoch's work (train + eval), not wall clock
         var order = train.OrderBy(_ => rngN.Next()).ToList();
         for (var b = 0; b < order.Count; b += CHUNK)
             lock (gpu) { foreach (var (i, o) in order.Skip(b).Take(CHUNK)) novaTrainer.TrainStep(new GenesisExample(i, o)); }
         double nt, nh;
         lock (gpu) { nt = Acc(NovaGen, evalTrain); nh = Acc(NovaGen, evalHeld); }
         lastNovaHeld = nh;
-        Post("NOVA", ConsoleColor.Cyan, ep, nt, nh, lastXfHeld);
+        Post("NOVA", ConsoleColor.Cyan, ep, nt, nh, lastXfHeld, epSw.Elapsed.TotalSeconds);
         try { epochBarrier.SignalAndWait(cts.Token); } catch (OperationCanceledException) { break; }
     }
 });
@@ -163,13 +163,14 @@ var xfTask = Task.Run(() =>
     var rngX = new Random(SEED + 22);
     for (var ep = 1; ep <= SAFETYCAP && !cts.IsCancellationRequested; ep++)
     {
+        var epSw = System.Diagnostics.Stopwatch.StartNew(); // time THIS epoch's work (train + eval), not wall clock
         var order = train.OrderBy(_ => rngX.Next()).ToList();
         for (var b = 0; b < order.Count; b += CHUNK)
             lock (gpu) { xf.TrainBatch(order.Skip(b).Take(CHUNK).ToList()); }
         double tt, th;
         lock (gpu) { tt = Acc(xf.Generate, evalTrain); th = Acc(xf.Generate, evalHeld); }
         lastXfHeld = th;
-        Post("TRANSFORMER", ConsoleColor.Yellow, ep, tt, th, lastNovaHeld);
+        Post("TRANSFORMER", ConsoleColor.Yellow, ep, tt, th, lastNovaHeld, epSw.Elapsed.TotalSeconds);
         try { epochBarrier.SignalAndWait(cts.Token); } catch (OperationCanceledException) { break; }
     }
 });

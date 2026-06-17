@@ -110,35 +110,34 @@ public sealed class QueryLabelTests
     }
 
     [Fact]
-    public void QueryHeads_AreTornDownOnImport_AndTrainingRecovers()
+    public void QueryHeads_SurviveImport_AndTrainingContinues()
     {
-        // The autonomous-runtime restart path: stop → checkpoint → start → Import(snapshot). The
-        // query heads are NOT persisted, so Import MUST dispose+null them — leaving the previous
-        // session's stale parameters registered in the fresh optimizer corrupted every subsequent
-        // training run (the real-world "worked, restarted, now all runs fail" regression).
+        // The autonomous-runtime restart path: stop → checkpoint (Export) → start → Import(snapshot). The
+        // query/plan heads are now PERSISTED, so Import RESTORES the trained heads (fresh Parameters, cleanly
+        // re-registered in a new optimizer — never stale) instead of tearing them down. The model keeps what it
+        // learned across a reload, and subsequent training continues without graph/optimizer corruption.
         var config = new GenesisNovaConfig(HiddenSize: ProductionDims.HiddenSize, LearningRate: 0.05);
         var tokenizer = new WhitespaceGenesisTokenizer();
         var model = new GenesisNeuralModel(config);
         var memory = new PlatonicSpaceMemory(faceDimension: ProductionDims.FaceDimension, seed: 7);
         var trainer = new GenesisTrainer(tokenizer, model, memory, config);
 
-        // A few supervised steps initialize the query heads.
+        // A few supervised steps initialize + train the query heads.
         for (var i = 0; i < 4; i++)
             trainer.TrainStep(new GenesisExample("1 + 2", "3"));
-        Assert.NotEqual(0, model.PredictQuery(tokenizer.Encode("1 + 2")).OperationId);
+        var trainedOp = model.PredictQuery(tokenizer.Encode("1 + 2")).OperationId;
+        Assert.NotEqual(0, trainedOp);
 
         // Simulate the restart: export + import (what auto-resume does).
         var snapshot = model.Export();
         model.Import(snapshot);
 
-        // Heads must be GONE (clean abstain), not stale.
-        var (opId, _, flags) = model.PredictQuery(tokenizer.Encode("1 + 2"));
-        Assert.Equal(0, opId);
-        Assert.Empty(flags);
+        // Heads SURVIVE — the trained op is still predicted (not reset to abstain), so a restart no longer
+        // throws away the query/plan-head training.
+        Assert.Equal(trainedOp, model.PredictQuery(tokenizer.Encode("1 + 2")).OperationId);
 
-        // And training must RECOVER: supervised steps after Import reinitialize fresh heads and run
-        // without graph/optimizer corruption. (NB not "2 + 2" — that is the AMBIGUOUS case
-        // (2+2 == 2*2) which ResolveQueryLabel correctly refuses to supervise.)
+        // And training continues cleanly after Import (no graph/optimizer corruption). (NB not "2 + 2" — that is
+        // the AMBIGUOUS case (2+2 == 2*2) which ResolveQueryLabel correctly refuses to supervise.)
         for (var i = 0; i < 4; i++)
             trainer.TrainStep(new GenesisExample("3 + 2", "5"));
         Assert.NotEqual(0, model.PredictQuery(tokenizer.Encode("3 + 2")).OperationId);

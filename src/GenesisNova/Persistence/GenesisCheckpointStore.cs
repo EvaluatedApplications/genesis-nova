@@ -52,23 +52,35 @@ public static class GenesisCheckpointStore
             GruBhh: snapshot.GruBhh,
             SpacingModel: tokenizer.SpacingModel.Export(),
             CasingModel: tokenizer.CasingModel.Export(),
+            // Query-construction + plan heads — persist so they aren't reset to untrained on every load.
+            QueryOpWeights: snapshot.QueryOpWeights is not null ? MatrixSnapshot.From(snapshot.QueryOpWeights) : null,
+            QueryOpBias: snapshot.QueryOpBias,
+            QueryOperandWeights: snapshot.QueryOperandWeights is not null ? MatrixSnapshot.From(snapshot.QueryOperandWeights) : null,
+            QueryOperandBias: snapshot.QueryOperandBias,
+            PlanWeights: snapshot.PlanWeights is not null ? MatrixSnapshot.From(snapshot.PlanWeights) : null,
+            PlanBias: snapshot.PlanBias,
             Version: GenesisCheckpoint.CurrentVersion);
 
-        var json = JsonSerializer.Serialize(payload, JsonOptions);
-        // The platonic space is serialized SEPARATELY and written to a companion file alongside the NN
-        // checkpoint, so it can be deleted to reset the substrate without disturbing the trained NN.
-        var platonicPath = PlatonicCompanionPath(path);
-        var platonicJson = platonicSpace is not null ? JsonSerializer.Serialize(platonicSpace, JsonOptions) : null;
+        // BINARY SHARDED storage (see MODEL_STORAGE.md): the NN goes to a sharded model directory, the substrate
+        // to a separate sharded directory (still resettable), and the legacy ".json" path holds a tiny POINTER
+        // marker so existence checks + the daemon's resume resolve keep working unchanged.
         var dir = Path.GetDirectoryName(path);
         if (!string.IsNullOrWhiteSpace(dir))
             Directory.CreateDirectory(dir);
         ExecuteWithCheckpointLock(path, () =>
         {
-            WriteAtomic(path, json);
-            if (platonicJson is not null)
-                WriteAtomic(platonicPath, platonicJson);
+            GenesisShardedCheckpointStore.WriteModel(GenesisShardedCheckpointStore.ModelDir(path), payload);
+            if (platonicSpace is not null)
+                GenesisShardedCheckpointStore.WriteSubstrate(GenesisShardedCheckpointStore.SubstrateDir(path), platonicSpace);
+            WriteAtomic(path, ShardedPointerJson);
+            // A stale legacy substrate companion (data now lives in the .platonic dir) would only confuse — drop it.
+            var companion = PlatonicCompanionPath(path);
+            if (File.Exists(companion)) try { File.Delete(companion); } catch { }
         });
     }
+
+    // The legacy ".json" checkpoint path now holds this tiny pointer; the real data is in the sharded model dir.
+    private const string ShardedPointerJson = "{\"GnvSharded\":true,\"FormatVersion\":1}";
 
     /// <summary>The companion file holding the platonic space for a given NN checkpoint path. Deleting it
     /// resets the substrate while keeping the long-lived NN.</summary>
@@ -91,9 +103,8 @@ public static class GenesisCheckpointStore
 
     public static (GenesisNovaConfig Config, WhitespaceGenesisTokenizer Tokenizer, GenesisNeuralModel Model, PlatonicMemorySnapshot? PlatonicSpace, GenesisConversationSnapshot? Conversation, GenesisAutonomousTrainingSnapshot? AutonomousTraining) Load(string path)
     {
-        var payload = ReadPayload(path);
+        var (payload, platonic) = ResolveStored(path);
         var loaded = CreateRuntimePayload(payload, payload.Config);
-        var platonic = ReadPlatonicCompanion(path) ?? loaded.PlatonicSpace; // companion wins; embedded = legacy fallback
         return (loaded.Config, loaded.Tokenizer, loaded.Model, platonic, loaded.Conversation, loaded.AutonomousTraining);
     }
 
@@ -101,10 +112,58 @@ public static class GenesisCheckpointStore
         string path,
         GenesisNovaConfig runtimeConfig)
     {
-        var payload = ReadPayload(path);
+        var (payload, platonic) = ResolveStored(path);
         var loaded = CreateRuntimePayload(payload, runtimeConfig);
-        var platonic = ReadPlatonicCompanion(path) ?? loaded.PlatonicSpace; // companion wins; embedded = legacy fallback
         return (loaded.Config, loaded.Tokenizer, loaded.Model, platonic, loaded.Conversation, loaded.AutonomousTraining, loaded.TrainerLearningStateJson);
+    }
+
+    /// <summary>Resolve a checkpoint at <paramref name="path"/>: read the sharded model if present, otherwise
+    /// load a LEGACY single-JSON checkpoint and migrate it to the sharded layout (cleaning up the old files).</summary>
+    private static (GenesisCheckpoint Payload, PlatonicMemorySnapshot? Platonic) ResolveStored(string path)
+    {
+        var modelDir = GenesisShardedCheckpointStore.ModelDir(path);
+        if (GenesisShardedCheckpointStore.ModelExists(modelDir))
+        {
+            var sharded = GenesisShardedCheckpointStore.ReadModel(modelDir);
+            var substrate = GenesisShardedCheckpointStore.ReadSubstrate(GenesisShardedCheckpointStore.SubstrateDir(path));
+            return (sharded, substrate);
+        }
+
+        // LEGACY: a pre-sharding single-JSON checkpoint (+ optional .platonic.json companion). Load it, migrate to
+        // the sharded layout, then move the originals out of the active directory. DELETE this branch once
+        // migration is proven in the wild (it is the only reason the JSON reader below still exists).
+        var legacy = ReadPayload(path);
+        var legacyPlatonic = ReadPlatonicCompanion(path) ?? legacy.PlatonicSpace;
+        MigrateLegacyToSharded(path, legacy, legacyPlatonic);
+        return (legacy, legacyPlatonic);
+    }
+
+    private static void MigrateLegacyToSharded(string path, GenesisCheckpoint payload, PlatonicMemorySnapshot? platonic)
+    {
+        ExecuteWithCheckpointLock(path, () =>
+        {
+            GenesisShardedCheckpointStore.WriteModel(GenesisShardedCheckpointStore.ModelDir(path), payload with { PlatonicSpace = null });
+            if (platonic is not null)
+                GenesisShardedCheckpointStore.WriteSubstrate(GenesisShardedCheckpointStore.SubstrateDir(path), platonic);
+
+            // Clean up: move the legacy files into .legacy-backup so the active dir only holds what's relevant
+            // (no confusion), then leave the pointer marker at the original path.
+            var stateDir = Path.GetDirectoryName(path);
+            if (!string.IsNullOrWhiteSpace(stateDir))
+            {
+                var backup = Path.Combine(stateDir, ".legacy-backup");
+                Directory.CreateDirectory(backup);
+                MoveToBackup(path, backup);
+                MoveToBackup(PlatonicCompanionPath(path), backup);
+            }
+            WriteAtomic(path, ShardedPointerJson);
+        });
+    }
+
+    private static void MoveToBackup(string file, string backupDir)
+    {
+        if (!File.Exists(file)) return;
+        try { File.Move(file, Path.Combine(backupDir, Path.GetFileName(file)), overwrite: true); } catch { /* best-effort */ }
     }
 
     private static GenesisCheckpoint ReadPayload(string path)
@@ -139,6 +198,17 @@ public static class GenesisCheckpointStore
             if (!string.IsNullOrWhiteSpace(dir))
                 Directory.CreateDirectory(dir);
 
+            // Sharded checkpoint: copy the model dir (+ substrate dir) and the pointer marker.
+            if (GenesisShardedCheckpointStore.ModelExists(GenesisShardedCheckpointStore.ModelDir(sourcePath)))
+            {
+                GenesisShardedCheckpointStore.CopyModel(
+                    GenesisShardedCheckpointStore.ModelDir(sourcePath),
+                    GenesisShardedCheckpointStore.ModelDir(destinationPath));
+                if (File.Exists(sourcePath)) File.Copy(sourcePath, destinationPath, overwrite: true);
+                return;
+            }
+
+            // Legacy single-file copy.
             var tempPath = $"{destinationPath}.{Environment.ProcessId}.{Guid.NewGuid():N}.tmp";
             try
             {
@@ -219,7 +289,13 @@ public static class GenesisCheckpointStore
             GruWih: payload.GruWih?.ToMatrix(),
             GruWhh: payload.GruWhh?.ToMatrix(),
             GruBih: payload.GruBih,
-            GruBhh: payload.GruBhh);
+            GruBhh: payload.GruBhh,
+            QueryOpWeights: payload.QueryOpWeights?.ToMatrix(),
+            QueryOpBias: payload.QueryOpBias,
+            QueryOperandWeights: payload.QueryOperandWeights?.ToMatrix(),
+            QueryOperandBias: payload.QueryOperandBias,
+            PlanWeights: payload.PlanWeights?.ToMatrix(),
+            PlanBias: payload.PlanBias);
 
         // Hidden-size growth can't reshape the GRU/edit head — Import rejects the mismatch and
         // reinitialises them; the embeddings/output/route heads still expand.

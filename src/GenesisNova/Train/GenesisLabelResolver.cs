@@ -53,8 +53,12 @@ public sealed class GenesisLabelResolver
         if (numericOperands >= 2 && TrySeqSegments(toks, outT, out _))
             return 7;
 
-        // REF (plan-kind 8) — higher-order 2·max(a,b), excluding plain a+b/a*b identities the digit shape owns.
-        if (numericOperands == 2 && outIsNumber && IsTwiceLarger(toks, outT))
+        // EXPRESSION-CHAIN (plan-kind 8) — a MULTI-OPERATOR expression evaluated with precedence by CHAINING
+        // compute-elements (e.g. "2 x 7 + 3" → 17). Pure same-op runs are already caught as fold (5/6) above,
+        // so this owns the MIXED-operator cases. The op of each operator is classified from CONTEXT by the op
+        // head at inference (never a symbol→op map); this oracle interprets the standard arithmetic symbols
+        // ONLY to derive the label's truth. Checked before the single-op arithmetic fallback.
+        if (IsExpressionChain(toks, outT))
             return 8;
 
         if (numericOperands >= 2 && outIsNumber) return 1;           // arithmetic (digit)
@@ -107,26 +111,66 @@ public sealed class GenesisLabelResolver
     }
 
     /// <summary>
-    /// REF structure detector: exactly two numeric operands and output == 2·max(a,b), excluding cases the
-    /// plain digit-arithmetic shape already owns (output also == a+b or a·b) to keep supervision unambiguous.
+    /// EXPRESSION-CHAIN structure detector (plan-kind 8 ORACLE): the input is a MULTI-OPERATOR arithmetic
+    /// expression (≥2 operators over ≥3 operands) whose standard precedence-evaluation (× ÷ before + −, each
+    /// pass left-to-right) equals the numeric output. This derives the supervised label's TRUTH from the
+    /// example's own structure — it interprets the standard arithmetic operator symbols (+ - x * /) ONLY for
+    /// grading; the MODEL never sees this map and must classify each operator from CONTEXT (the op head) at
+    /// inference. Pure single-operator runs are owned by fold (5/6) / digit-arithmetic (1), so they are
+    /// excluded by the ≥2-operator requirement (and fold is checked first in <see cref="ResolvePlanLabel"/>).
     /// </summary>
-    public static bool IsTwiceLarger(IReadOnlyList<string> inputToks, string output)
+    public static bool IsExpressionChain(IReadOnlyList<string> inputToks, string output)
     {
         var inv = System.Globalization.CultureInfo.InvariantCulture;
         const System.Globalization.NumberStyles ns =
             System.Globalization.NumberStyles.AllowLeadingSign | System.Globalization.NumberStyles.AllowDecimalPoint;
-        var operands = inputToks.Where(t => double.TryParse(t, ns, inv, out _))
-                                .Select(t => double.Parse(t, ns, inv)).ToList();
-        if (operands.Count != 2)
-            return false;
         if (!double.TryParse(output, ns, inv, out var target))
             return false;
-        var (a, b) = (operands[0], operands[1]);
-        if (Math.Abs(2.0 * Math.Max(a, b) - target) > 1e-6)
-            return false;
-        if (Math.Abs((a + b) - target) < 1e-6 || Math.Abs((a * b) - target) < 1e-6)
-            return false;
-        return true;
+
+        var operands = new List<double>();
+        var ops = new List<char>();
+        var expectOperand = true;
+        foreach (var tok in inputToks)
+        {
+            if (expectOperand)
+            {
+                if (!double.TryParse(tok, ns, inv, out var v))
+                    return false; // a non-operand where an operand was expected → not a clean expression
+                operands.Add(v);
+                expectOperand = false;
+            }
+            else
+            {
+                var op = tok switch { "+" => '+', "-" => '-', "x" or "*" => '*', "/" => '/', _ => '\0' };
+                if (op == '\0')
+                    return false; // not a standard arithmetic operator symbol
+                ops.Add(op);
+                expectOperand = true;
+            }
+        }
+        if (!expectOperand)
+            return false; // trailing operator → malformed
+        if (ops.Count < 2 || operands.Count != ops.Count + 1)
+            return false; // MULTI-operator only (single binary / fold handled elsewhere)
+
+        // Precedence evaluation (the oracle's ground truth).
+        var vals = operands.ToList();
+        var oo = ops.ToList();
+        for (var i = 0; i < oo.Count;)
+        {
+            if (oo[i] is '*' or '/')
+            {
+                if (oo[i] == '/' && Math.Abs(vals[i + 1]) < 1e-12) return false;
+                vals[i] = oo[i] == '*' ? vals[i] * vals[i + 1] : vals[i] / vals[i + 1];
+                vals.RemoveAt(i + 1);
+                oo.RemoveAt(i);
+            }
+            else i++;
+        }
+        var acc = vals[0];
+        for (var i = 0; i < oo.Count; i++)
+            acc = oo[i] == '+' ? acc + vals[i + 1] : acc - vals[i + 1];
+        return Math.Abs(acc - target) < 1e-6;
     }
 
     /// <summary>

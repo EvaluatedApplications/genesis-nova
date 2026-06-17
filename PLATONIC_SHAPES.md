@@ -48,7 +48,24 @@ most-reinforced scaffold** and binds it to a `Fold(Add)` value via the interpret
 `CompositionMode.Concatenate` semantics). The scaffold is learned, not a template baked into inference; the
 shape abstains until one is mined. This is the cache/binding idea done element-natively.
 
-### Ref (higher-order, glider-of-gliders) — a Function element referencing shape-elements
+### Expression-chain (multi-operator) — chaining compute-elements by context, NO locked cue
+
+The general "complex chaining of elements". A MULTI-operator expression (`2 x 7 + 3` → `17`) is solved by
+chaining compute-elements: the plan head selects the expression-chain shape (kind 8); the route
+(`TryGenerateFromExpressionChain`) parses the operand/operator sequence and classifies **each operator from
+CONTEXT** via the learned op head on its local binary window — there is **no symbol→op map**, so `x` is
+multiply only because of the operands around it (in `let x = 5` the same token is a variable). It evaluates
+with standard precedence (× ÷ before + −, each pass left-to-right); **every binary step is one substrate R2
+compose + homomorphic decode**, so the answer generalises to any operands. Control flow lives in the route;
+the compute is on the substrate. Supervision is derived from the expression's own value
+(`GenesisLabelResolver.IsExpressionChain`, an oracle); no invented cue token is ever required — this replaced
+the old `twicelarger` Ref cue (a single token locked to one prebuilt glider — see `nova-no-token-locking`).
+
+### Ref (higher-order, glider-of-gliders) — a Function element referencing shape-elements [RETAINED INFRA]
+
+> The Ref block + `PlatonicShapeRegistry` + `ElementKind.Function` registry remain as general substrate
+> machinery (a glider can still invoke a named glider recursively, tested by `PlatonicShapeMachineryTests`),
+> but the plan head no longer SELECTS a named ref shape via a cue word — kind 8 is now the expression-chain.
 Shapes are first-class **`ElementKind.Function`** elements of the space
 (`PlatonicSpaceMemory.RegisterFunctionElement` / `FunctionElements`): positioned (composed embedding) with a
 `RelatedTo` pointing at the shape-elements they compose, held in their own index (`_functionElements`),
@@ -85,7 +102,7 @@ The GRU never grows beyond shape-selection.
 | 5 | fold-sum | N-way R2 compose (poly-sum) | sum of ≥3 operands |
 | 6 | fold-product | N-way R2 compose (log-sum) | product of ≥3 operands |
 | 7 | seq | mined scaffold ∘ Fold(Add) | scaffold words + operands' sum |
-| 8 | ref | Function element ∘ recursive execute | 2·max(a,b), excluding a+b / a·b identities |
+| 8 | expression-chain | per-operator op-head classification + precedence eval, chaining R2 composes | ≥2-operator expression whose precedence value == output |
 
 Tests via main-code `Generate` (assert correctness *and* the `glider-plan` decision path): `PredicateComposerTests`,
 `FormatComposerTests`, `FoldComposerTests`, `SeqComposerTests`, `RefComposerTests`.

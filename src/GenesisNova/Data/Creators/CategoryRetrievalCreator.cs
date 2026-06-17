@@ -1,4 +1,6 @@
+using System.Collections.Generic;
 using System.Collections.Immutable;
+using System.Linq;
 
 namespace GenesisNova.Data.Creators;
 
@@ -38,6 +40,25 @@ public sealed class CategoryRetrievalCreator : IExampleCreator
     public int EstimatedComplexity => 10;
 
     public GenesisTrainingExampleKind TrainingKind => GenesisTrainingExampleKind.PromptAnswer;
+
+    // Some categories have an equally-correct broader grouping — don't exact-penalize a valid alternative.
+    private static readonly Dictionary<string, string[]> Alternates = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["fruit"] = new[] { "fruit", "food" },
+    };
+
+    // Answer vocabulary = every category (+ the alternates), so the grader can tell a COMPETING wrong category
+    // ("animal" for a fruit) from free filler ("the answer is fruit"), value-aware and contextual.
+    private static readonly GradingPolicy GradingPolicyValue = new(
+        RequirePlatonic: true,
+        AnswerVocabulary: Table.Select(t => t.Category)
+            .Concat(Alternates.Values.SelectMany(v => v))
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToArray());
+
+    public GradingPolicy Grading => GradingPolicyValue;
+
+    public IReadOnlyList<string> AcceptableAnswers(string input, string trainedOutput, int difficulty)
+        => Alternates.TryGetValue(trainedOutput, out var alts) ? alts : new[] { trainedOutput };
 
     public ImmutableArray<(string Input, string Output)> Generate(int count, int difficulty, bool forTraining)
     {

@@ -579,7 +579,7 @@ public sealed class GenesisInferenceEngine
             return false;
 
         var tokenIds = _tokenizer.Encode(request.Input);
-        var (opId, opConfidence, flags) = _model.PredictQuery(tokenIds);
+        var (opId, opConfidence, flags) = _model.PredictQuery(tokenIds, AnchorPerception(tokenIds));
         if (opId <= 0 || opId >= GenesisNova.Model.GenesisNeuralModel.QueryOpCount || flags.Length != tokenIds.Length)
             return false;
 
@@ -776,12 +776,12 @@ public sealed class GenesisInferenceEngine
         if (string.IsNullOrWhiteSpace(request.Input))
             return false;
         var tokenIds = _tokenizer.Encode(request.Input);
-        var (planKind, conf) = _model.PredictPlan(tokenIds);
+        var (planKind, conf) = _model.PredictPlan(tokenIds, AnchorPerception(tokenIds));
         // Execute the shapes the dedicated routes DON'T serve: predicate (2), arithmetic→word (4),
-        // fold-sum (5), fold-product (6), seq (7), ref (8). Digit-arithmetic (1) defers to GruQuery,
-        // retrieval (3) to relation-first — keeping their decision paths intact. Each shape's WORK is on
-        // the substrate (R2 compose / homomorphism / relation hop / composition-of-compositions).
-        if (planKind is not (2 or 4 or 5 or 6 or 7 or 8))
+        // fold-sum (5), fold-product (6), seq (7). Digit-arithmetic (1) defers to GruQuery, retrieval (3)
+        // to relation-first, and the MULTI-operator expression-chain (8) to its own route below — keeping
+        // their decision paths intact. Each shape's WORK is on the substrate.
+        if (planKind is not (2 or 4 or 5 or 6 or 7))
             return false;
 
         const System.Globalization.NumberStyles ns =
@@ -824,16 +824,8 @@ public sealed class GenesisInferenceEngine
                     new Fold(GliderOp.Add, 0),
                 });
                 break;
-            case 8: // REF — higher-order glider-of-gliders, retrieved from the shape registry (a Function
-                // element referencing the "larger" Function element). The substrate executes it by traversing
-                // + composing the referenced shapes: 2·max(a,b) = Compute(Multiply, Ref("larger"), Const(2)).
-                // No inline construction — the shape is selected, not built here.
-                if (!_shapeRegistry.TryGet(PlatonicShapeRegistry.TwiceLargerShape, out var refShape))
-                    return false;
-                root = refShape.Root;
-                break;
             default: // planKind == 4: arithmetic FORMATTED AS A WORD — Hop(Compute(op,operands), Word).
-                var (opId, _, _) = _model.PredictQuery(tokenIds);
+                var (opId, _, _) = _model.PredictQuery(tokenIds, AnchorPerception(tokenIds));
                 var gop = opId switch
                 {
                     1 => GliderOp.Add,
@@ -877,7 +869,6 @@ public sealed class GenesisInferenceEngine
                 5 => "fold-sum",
                 6 => "fold-product",
                 7 => "seq",
-                8 => "ref",
                 _ => "shape" + planKind
             },
             PlatonicConfidence: conf,
@@ -885,6 +876,135 @@ public sealed class GenesisInferenceEngine
             AverageBiasMagnitude: 0.0,
             ChunksGenerated: 1,
             PlatonicHopCount: 1);
+        return true;
+    }
+
+    /// <summary>TARGET-AGNOSTIC perception of the input's anchor region (SPACE_AWARE_GRU.md §A), shared by the
+    /// space-aware plan/op heads — the same construction the route head uses. Null when perception is off or
+    /// there is no anchor. Numeric/arithmetic inputs have no relational anchor → ≈0 vector → graceful no-op.</summary>
+    private double[]? AnchorPerception(IReadOnlyList<int> tokenIds)
+    {
+        if ((!_model.PerceptionPlan && !_model.PerceptionQuery) || tokenIds.Count == 0)
+            return null;
+        var toks = _tokenizer.Decode(tokenIds).Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (toks.Length == 0)
+            return null;
+        var transformReliability = _model.TransformReliabilityRouting && _transformAccumulator is not null
+            ? _transformAccumulator.BestReliabilityUcb()
+            : 0.0;
+        return _memory.ComputeRoutePerception(toks[^1], transformReliability);
+    }
+
+    /// <summary>
+    /// EXPRESSION-CHAIN route (plan-kind 8). The GRU plan head selects "this is a multi-operator expression";
+    /// this evaluates it by CHAINING compute-elements on the substrate. Each operator is classified from
+    /// CONTEXT by the learned op head (the op head runs on the operator's local binary window) — there is NO
+    /// hardcoded symbol→op map, so "x" is multiply only when the surrounding tokens make it so. Evaluation
+    /// uses standard precedence (× ÷ before + −, each pass left-to-right); every binary step is one substrate
+    /// R2 compose + homomorphic decode (PlatonicGliderInterpreter), so the answer GENERALISES to any operands.
+    /// Control flow lives here; the compute is on the substrate. Abstains unless the plan head picked kind 8
+    /// AND the input parses as a ≥2-operator expression AND the op head classifies every operator.
+    /// </summary>
+    private bool TryGenerateFromExpressionChain(GenerationRequest request, out GenerationResult result)
+    {
+        result = default!;
+        if (string.IsNullOrWhiteSpace(request.Input))
+            return false;
+        var tokenIds = _tokenizer.Encode(request.Input);
+        var (planKind, conf) = _model.PredictPlan(tokenIds, AnchorPerception(tokenIds));
+        if (planKind != 8)
+            return false; // the GRU plan head must SELECT the expression-chain shape
+
+        const System.Globalization.NumberStyles ns =
+            System.Globalization.NumberStyles.AllowLeadingSign | System.Globalization.NumberStyles.AllowDecimalPoint;
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
+
+        // Parse the (space-separated) expression into alternating operand values and operator tokens.
+        var raw = request.Input.Trim().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        var operands = new List<double>();
+        var opTokens = new List<string>();
+        var expectOperand = true;
+        foreach (var tok in raw)
+        {
+            if (expectOperand)
+            {
+                if (!double.TryParse(tok, ns, inv, out var v))
+                    return false; // framing/garbage where an operand was expected → abstain
+                operands.Add(v);
+                expectOperand = false;
+            }
+            else { opTokens.Add(tok); expectOperand = true; }
+        }
+        if (!expectOperand || opTokens.Count < 2 || operands.Count != opTokens.Count + 1)
+            return false; // MULTI-operator only; single binary defers to GruQuery
+
+        // Classify EACH operator from CONTEXT via the learned op head — its own local binary window. No
+        // symbol→op lookup: the head decides add/sub/mul/div from the operand+operator+operand context.
+        var ops = new List<GliderOp>(opTokens.Count);
+        for (var i = 0; i < opTokens.Count; i++)
+        {
+            var window = _tokenizer.Encode($"{FormatNumber(operands[i])} {opTokens[i]} {FormatNumber(operands[i + 1])}");
+            var (opId, _, _) = _model.PredictQuery(window);
+            GliderOp? g = opId switch
+            {
+                1 => GliderOp.Add,
+                2 => GliderOp.Subtract,
+                3 => GliderOp.Multiply,
+                4 => GliderOp.Divide,
+                _ => (GliderOp?)null
+            };
+            if (g is null)
+                return false; // op head couldn't classify this operator from context → abstain
+            ops.Add(g.Value);
+        }
+
+        // One binary step = one substrate R2 compose + homomorphic decode (a chained compute-element).
+        double Step(double l, GliderOp op, double r)
+        {
+            var glider = new PlatonicGlider("expr-step",
+                new Compute(op, new GliderBlock[] { new Const(l), new Const(r) }));
+            var txt = _glider.Execute(glider, Array.Empty<string>());
+            return double.TryParse(txt, ns, inv, out var res) ? res : double.NaN;
+        }
+
+        // Precedence: resolve × ÷ left-to-right, then + − left-to-right — chaining the compute-elements.
+        var vals = operands.ToList();
+        var oo = ops.ToList();
+        for (var i = 0; i < oo.Count;)
+        {
+            if (oo[i] is GliderOp.Multiply or GliderOp.Divide)
+            {
+                var r = Step(vals[i], oo[i], vals[i + 1]);
+                if (double.IsNaN(r)) return false;
+                vals[i] = r;
+                vals.RemoveAt(i + 1);
+                oo.RemoveAt(i);
+            }
+            else i++;
+        }
+        var acc = vals[0];
+        for (var i = 0; i < oo.Count; i++)
+        {
+            acc = Step(acc, oo[i], vals[i + 1]);
+            if (double.IsNaN(acc)) return false;
+        }
+
+        var outTokens = _tokenizer.Encode(FormatNumber(acc), addEos: true)
+            .Take(Math.Max(1, request.MaxNewTokens))
+            .ToArray();
+        if (outTokens.Length == 0)
+            return false;
+        result = new GenerationResult(
+            Output: _tokenizer.Decode(outTokens),
+            GeneratedTokens: outTokens,
+            UsedPlatonicQuery: true,
+            UsedNeuralFallback: false,
+            DecisionPath: "platonic-expression-chain",
+            PlatonicConfidence: conf,
+            AppliedBiasCount: 0,
+            AverageBiasMagnitude: 0.0,
+            ChunksGenerated: 1,
+            PlatonicHopCount: opTokens.Count); // chain length = number of chained compute-elements
         return true;
     }
 
@@ -899,6 +1019,11 @@ public sealed class GenesisInferenceEngine
         // whenever the plan head is untrained or the shape isn't a wired one, so every route below — and
         // every existing test — is unaffected.
         if (TryGenerateFromGliderPlan(request, out result))
+            return true;
+        // EXPRESSION-CHAIN (plan-kind 8): a MULTI-operator expression evaluated by chaining compute-elements
+        // on the substrate, each operator classified from context by the op head. Runs before the single-op
+        // GruQuery (which assumes one operator); abstains on single-op / non-expression inputs.
+        if (TryGenerateFromExpressionChain(request, out result))
             return true;
         if (TryGenerateFromGruQuery(request, out result))
             return true;
@@ -973,12 +1098,24 @@ public sealed class GenesisInferenceEngine
         var neighbours = _memory.GetNeighbors(
             anchors[0],
             PlatonicNeighborhoodType.Relational,
-            maxNeighbors: 1,
+            maxNeighbors: 5,
             minConfidence: RelationFirstMinConfidence);
-        if (neighbours.Count == 0)
+
+        // Pick the strongest neighbour that is a real, user-facing concept — never a RESERVED internal marker
+        // (face:poly/face:log) or an op-token. Those are routing affinity, not answers.
+        string? answer = null;
+        var confidence = 0.0;
+        foreach (var n in neighbours)
+        {
+            if (PlatonicSpaceMemory.IsReservedConcept(n.Concept) || _memory.IsOperationToken(n.Concept))
+                continue;
+            answer = n.Concept;
+            confidence = n.Confidence;
+            break;
+        }
+        if (answer is null)
             return false;
 
-        var answer = neighbours[0].Concept;
         var tokens = _tokenizer.Encode(answer, addEos: true)
             .Take(Math.Max(1, request.MaxNewTokens))
             .ToArray();
@@ -991,7 +1128,7 @@ public sealed class GenesisInferenceEngine
             UsedPlatonicQuery: true,
             UsedNeuralFallback: false,
             DecisionPath: "platonic-relation-edge",
-            PlatonicConfidence: neighbours[0].Confidence,
+            PlatonicConfidence: confidence,
             AppliedBiasCount: 0,
             AverageBiasMagnitude: 0.0,
             ChunksGenerated: 1,

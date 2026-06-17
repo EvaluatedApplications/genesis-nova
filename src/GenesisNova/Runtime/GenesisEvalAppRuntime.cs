@@ -549,6 +549,7 @@ public sealed class GenesisEvalAppRuntime
             }
 
             var selectedNodes = nodes
+                .Where(n => !GenesisNova.Cognition.PlatonicSpaceMemory.IsReservedConcept(n.Name)) // hide internal face: routing markers
                 .OrderByDescending(n => n.IsAnchor)
                 .ThenByDescending(n => n.Score)
                 .ThenByDescending(n => n.ObservationCount)

@@ -1047,7 +1047,10 @@ public sealed class GenesisTrainer
         // (route 1). Same structure detectors the plan-label uses, so route + plan agree.
         if (numOpsForWord >= 2 && GenesisLabelResolver.TrySeqSegments(rawArithToks, predOut, out _))
             return 1;
-        if (numOpsForWord == 2 && GenesisLabelResolver.IsTwiceLarger(rawArithToks, predOut))
+        // EXPRESSION-CHAIN: a multi-operator expression evaluated by chaining compute-elements on the
+        // substrate — exact and space-independent → platonic-direct (route 1). Same detector the plan-label
+        // uses, so route + plan agree.
+        if (GenesisLabelResolver.IsExpressionChain(rawArithToks, predOut))
             return 1;
 
         // General (non-arithmetic) modality: the universal platonic op is RETRIEVAL. Label the
@@ -1613,8 +1616,12 @@ public sealed class GenesisTrainer
                 .ToArray();
             if (partners.Length == 0)
                 continue;
-            var nearest = _platonicSpace.GetNearestConcepts(output, candidates: partners, maxNeighbors: 1);
-            var partner = nearest.Count > 0 ? nearest[0].Symbol : partners[0];
+            // Couple to the MOST DISCRIMINATIVE partner (lowest relation degree), not merely the geometrically
+            // nearest: a ubiquitous COMMAND word (a query verb present in EVERY cue) accrues huge degree by
+            // sitting near everything, and the nearest-partner rule let it monopolise every coupling into one
+            // mega-hub that collapses retrieval (the "op-token must never be a relation participant" bug). The
+            // specific keyword (low degree) now wins, so the real keyword↔answer edge forms instead of verb↔answer.
+            var partner = partners.Length == 1 ? partners[0] : SelectDiscriminativePartner(output, partners);
             // Skip ANY edge to a numeric result of a computation (multi-concept input), and the
             // number↔number case generally — both are carried by the homomorphism, not the graph.
             if (IsNumericConcept(output) && (outputComputed || IsNumericConcept(partner)))
@@ -1623,6 +1630,19 @@ public sealed class GenesisTrainer
         }
 
         _platonicSpace.FineEditFromExample(inputConcepts, outputConcepts, isNegative);
+    }
+
+    // Pick the relation partner LEAST likely to be a non-discriminative hub: lowest relation degree, ties broken
+    // by geometric nearness (the original relatedness signal). This is what stops a command word / query verb —
+    // which is in every cue and therefore drifts near everything — from monopolising couplings into a mega-hub
+    // that collapses platonic retrieval to one answer regardless of the actual keyword.
+    private string SelectDiscriminativePartner(string output, string[] partners)
+    {
+        var byNearness = _platonicSpace.GetNearestConcepts(output, candidates: partners, maxNeighbors: partners.Length)
+            .Select(n => n.Symbol).ToList();
+        foreach (var p in partners)
+            if (!byNearness.Contains(p, StringComparer.OrdinalIgnoreCase)) byNearness.Add(p);
+        return byNearness.OrderBy(p => _platonicSpace.GetRelationDegree(p)).First(); // stable sort → ties keep nearer-first
     }
 
     // Numbers relate geometrically via the face homomorphism, never as relation-graph edges — so the
@@ -1649,9 +1669,7 @@ public sealed class GenesisTrainer
     // query whose anchor "looks answerable" gets routed platonic. No-op unless the model has PerceptionRouting on.
     private void MaybeReinforceRoute(GenesisExample example, IReadOnlyList<int> inputTokens)
     {
-        if (!_model.PerceptionRouting)
-            return;
-        if (ResolveRouteLabel(example) is not int routeLabel)
+        if (!_model.PerceptionRouting && !_model.PerceptionPlan && !_model.PerceptionQuery)
             return;
         var inputConcepts = ExtractMirrorConcepts(example.Input, string.Empty);
         if (inputConcepts.Count == 0)
@@ -1660,7 +1678,19 @@ public sealed class GenesisTrainer
         // Bubble the EARNED transform reliability into the route perception so the route head is reinforced to
         // trust the function/platonic route in proportion to how proven the model's transforms are.
         var transformReliability = _model.TransformReliabilityRouting ? _transformAccumulator.BestReliabilityUcb() : 0.0;
-        _model.ReinforceRouteHead(inputTokens, _platonicSpace.ComputeRoutePerception(anchor, transformReliability), routeLabel, 1.0);
+        // One target-agnostic perception of the anchor's region, shared by all space-aware heads (route/plan/op).
+        var perception = _platonicSpace.ComputeRoutePerception(anchor, transformReliability);
+
+        if (_model.PerceptionRouting && ResolveRouteLabel(example) is int routeLabel)
+            _model.ReinforceRouteHead(inputTokens, perception, routeLabel, 1.0);
+
+        // SPACE-AWARE plan + op heads (SPACE_AWARE_GRU.md §A): supervise their perception weights toward this
+        // example's structural labels, so shape + op selection learn to READ the anchor's region rather than
+        // deciding blind from tokens. Numeric anchors have no relational edges → perception ≈ 0 → graceful.
+        if (_model.PerceptionPlan && ResolvePlanLabel(example.Input, example.Output) is int planLabel)
+            _model.TrainPlanPerception(inputTokens, perception, planLabel);
+        if (_model.PerceptionQuery && ResolveQueryLabel(inputTokens, example.Output) is { } ql)
+            _model.TrainQueryOpPerception(inputTokens, perception, ql.OperationId);
     }
 
     private void RewardEditHead(GenesisExample example, double tokenLoss)

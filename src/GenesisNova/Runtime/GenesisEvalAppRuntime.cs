@@ -502,6 +502,11 @@ public sealed class GenesisEvalAppRuntime
         });
     }
 
+    /// <summary>READ-ONLY push/pull geometry summary of the loaded platonic space (related vs unrelated
+    /// concept distances — the magnitude the contrastive dynamics achieved).</summary>
+    public Cognition.PlatonicSpaceMemory.GeometrySummary GeometrySummary()
+        => WithModelGate(() => _state.Memory.SummarizePushPullGeometry());
+
     public PlatonicActivationView AnalyzePlatonicActivation(string input, int maxNodes = 24, int maxEdges = 40)
     {
         return WithModelGate(() =>

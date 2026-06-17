@@ -1052,6 +1052,11 @@ public sealed class GenesisTrainer
         // uses, so route + plan agree.
         if (GenesisLabelResolver.IsExpressionChain(rawArithToks, predOut))
             return 1;
+        // LEARNED UNARY FUNCTION: if a clean "<fn> <x>" → numeric example is reproduced by the LEARNED
+        // transform T(fn) (computed, not retrieved), teach the router to send it to the learned-function route
+        // (platonic-direct, route 1). Unsupervised until the transform exists (no always-neural attractor).
+        if (TryUnaryFunctionRouteReproduces(example))
+            return 1;
 
         // General (non-arithmetic) modality: the universal platonic op is RETRIEVAL. Label the
         // platonic route whenever the space reproduces the target for this input — relational,
@@ -1419,7 +1424,15 @@ public sealed class GenesisTrainer
     private void UpdateTransformDiscovery(GenesisExample example)
     {
         if (!TryExtractArithmeticObservation(example, out var arithmetic))
+        {
+            // GENERALIZED (was arithmetic-gated): a non-arithmetic UNARY FUNCTION application — "<fn> <x>"
+            // (one cue word + one numeric operand) → a numeric output — feeds the TransformAccumulator so the
+            // learned-function route can apply T(fn). Only the affine/multiplicative class GENERALIZES (the
+            // route decodes in the face where the per-example delta is consistent); other maps simply won't,
+            // which is fine. See [[nova-learned-functions]].
+            TryLearnUnaryFunctionTransform(example);
             return;
+        }
 
         if (!double.TryParse(arithmetic.LeftToken, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var left) ||
             !double.TryParse(arithmetic.RightToken, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var right) ||
@@ -1456,6 +1469,72 @@ public sealed class GenesisTrainer
                 arithmetic.OperationConcept,
                 _transformAccumulator.ApplyImprovesOverIdentity(arithmetic.OperationConcept, inputEmbedding, outputEmbedding));
         _transformAccumulator.Learn(arithmetic.OperationConcept, inputEmbedding, outputEmbedding);
+    }
+
+    /// <summary>
+    /// GENERALIZED transform learning for a UNARY function: an input of exactly "&lt;fn&gt; &lt;x&gt;" / "&lt;x&gt; &lt;fn&gt;"
+    /// (one letter cue + one numeric operand) with a numeric output learns T(fn) = embed(out) − embed(x) in the
+    /// TransformAccumulator (open-vocab, selected later by the learned-function route, NOT a hardcoded name).
+    /// Restricted to the clean 2-token form so it never fires on arithmetic, retrieval, comparison, or worded
+    /// examples. Embeddings come from the SAME composer the route uses, so encode/decode align.
+    /// </summary>
+    private void TryLearnUnaryFunctionTransform(GenesisExample example)
+    {
+        if (string.IsNullOrWhiteSpace(example.Input) || string.IsNullOrWhiteSpace(example.Output))
+            return;
+        const System.Globalization.NumberStyles ns =
+            System.Globalization.NumberStyles.AllowLeadingSign | System.Globalization.NumberStyles.AllowDecimalPoint;
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
+        if (!double.TryParse(example.Output.Trim(), ns, inv, out _))
+            return; // a function application here produces a numeric value
+        var toks = example.Input.Trim().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        if (toks.Length != 2)
+            return; // clean unary form only: exactly [cue, operand] (in either order)
+        var operands = toks.Where(t => double.TryParse(t, ns, inv, out _)).ToArray();
+        var cues = toks.Where(t => t.Any(char.IsLetter)).ToArray();
+        if (operands.Length != 1 || cues.Length != 1)
+            return;
+
+        var fn = cues[0];
+        var dim = _transformAccumulator.EmbeddingDimension;
+        var inputEmbedding = InputEmbeddingComposer.GetInputEmbedding(operands[0], dim);
+        var outputEmbedding = InputEmbeddingComposer.GetInputEmbedding(example.Output.Trim(), dim);
+        // Earned reliability (bubble-up) BEFORE folding this example in (skip on first sighting — no transform yet).
+        if (_transformAccumulator.TryGetTransform(fn, out _))
+            _transformAccumulator.RecordOutcome(
+                fn, _transformAccumulator.ApplyImprovesOverIdentity(fn, inputEmbedding, outputEmbedding));
+        _transformAccumulator.Learn(fn, inputEmbedding, outputEmbedding);
+    }
+
+    /// <summary>
+    /// Does the LEARNED transform T(fn) reproduce this clean "&lt;fn&gt; &lt;x&gt;" → numeric example (apply + decode in
+    /// the transform's preferred face)? Used to supervise the platonic route toward the learned-function route.
+    /// Mirrors <c>GenesisInferenceEngine.TryGenerateFromLearnedFunction</c>'s decode so route and inference agree.
+    /// </summary>
+    private bool TryUnaryFunctionRouteReproduces(GenesisExample example)
+    {
+        if (string.IsNullOrWhiteSpace(example.Input) || string.IsNullOrWhiteSpace(example.Output))
+            return false;
+        const System.Globalization.NumberStyles ns =
+            System.Globalization.NumberStyles.AllowLeadingSign | System.Globalization.NumberStyles.AllowDecimalPoint;
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
+        if (!double.TryParse(example.Output.Trim(), ns, inv, out var target))
+            return false;
+        var toks = example.Input.Trim().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        if (toks.Length != 2)
+            return false;
+        var operands = toks.Where(t => double.TryParse(t, ns, inv, out _)).ToArray();
+        var cues = toks.Where(t => t.Any(char.IsLetter)).ToArray();
+        if (operands.Length != 1 || cues.Length != 1)
+            return false;
+        if (!_transformAccumulator.TryGetTransform(cues[0], out var transform))
+            return false;
+        var dim = _transformAccumulator.EmbeddingDimension;
+        var predicted = _transformAccumulator.Apply(cues[0], InputEmbeddingComposer.GetInputEmbedding(operands[0], dim));
+        if (predicted is null)
+            return false;
+        var (value, quality, face) = GenesisNova.Core.PlatonicFaceDecoder.DecodeNumericFromPrediction(predicted, dim, transform.PreferredFace);
+        return face != "none" && quality > 0.50 && Math.Abs(value - target) < 1e-6;
     }
 
     // NOTE: the per-example tick loop (R1–R9 on a private `_tickState`) was removed 2026-06-14 — it was a

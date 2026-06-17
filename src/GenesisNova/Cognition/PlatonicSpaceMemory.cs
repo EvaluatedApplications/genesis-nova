@@ -38,6 +38,12 @@ public sealed class PlatonicSpaceMemory
     private readonly int _maxPlatonicNodes;
     private readonly int _maxPlatonicRelations;
     private const double GeometryLearningRate = 0.04;
+    // ATTRACTION FLOOR: an OBSERVED relation is a structural fact and must be PULLED, even when the edit head's
+    // magnitude m is weak (live attraction strength = m via contradiction=0.5−0.5m, so a timid head starves the
+    // pull → related drifts as far as unrelated under the now-effective repulsion → flat separation). Floor the
+    // attracting affinity so the pull BALANCES the push; repelling pairs (affinity<0) are untouched. Gated by
+    // PlatonicGeometryDynamicsTests (weak-attraction scenario must still separate).
+    private const double MinAttractAffinity = 0.5;
 
     // Contrastive repulsion — ported from the genesis source of truth (GraphAligner.NudgeGraphAlignment,
     // which "push[es] away from sampled non-neighbours ... maintain[s] discriminability between unrelated
@@ -47,10 +53,15 @@ public sealed class PlatonicSpaceMemory
     // Strength is genesis-faithful: repulsion is a GENTLE discriminability pressure (~0.1x attraction),
     // not a strong separator. A stronger setting separates unrelated concepts more but overpowers weak
     // genuine attractions (e.g. text→frozen-number equivalence), so we keep the source-of-truth scale.
-    private const int RepulsionInterval = 16;
-    private const int RepulsionSamples = 5;
+    // REBALANCED (2026): the old "~0.1× attraction" repulsion was ~65× weaker than attraction per observation,
+    // so the semantic space COLLAPSED into a cone (measured: related FARTHER than unrelated). Repulsion now
+    // runs far more often, with more samples and meaningfully stronger force, so unrelated concepts are pushed
+    // toward orthogonality while edged (related) pairs — which are EXEMPT from repulsion — stay pulled. Gated
+    // by PlatonicGeometryDynamicsTests (related must sit clearly closer than unrelated).
+    private const int RepulsionInterval = 4;
+    private const int RepulsionSamples = 10;
     private const double RepulsionRate = 0.02;
-    private const double RepulsionRatio = 0.1; // repulsion strength relative to RepulsionRate floor
+    private const double RepulsionRatio = 0.5; // repulsion strength relative to RepulsionRate floor
     private int _observationsSinceRepulsion;
     private int _repulsionPassCount;
 
@@ -202,6 +213,56 @@ public sealed class PlatonicSpaceMemory
 
         // Global nearest: O(log N) VP-Tree over the whole space (replaces the brute-force O(N) scan).
         return _lattice.GetSemanticNeighbors(conceptFace, limit, conceptKey);
+    }
+
+    /// <summary>The magnitude of separation the contrastive dynamics (pull related / push unrelated) achieved.</summary>
+    public sealed record GeometrySummary(
+        int TotalConcepts, int MutableConcepts, int RelatedPairs, int UnrelatedPairs,
+        double RelatedMean, double RelatedMin, double RelatedMax,
+        double UnrelatedMean, double UnrelatedMin, double UnrelatedMax)
+    {
+        /// <summary>How much farther apart unrelated concepts sit than related ones — the push/pull gap.</summary>
+        public double Separation => UnrelatedMean - RelatedMean;
+    }
+
+    /// <summary>
+    /// PUSH/PULL geometry summary (READ-ONLY): over a sample of MUTABLE (non-frozen) concepts, the semantic-face
+    /// distance to relation-edged neighbours (the PULL — should be SMALL) vs. to random UNRELATED concepts (the
+    /// PUSH — should be LARGE). Faces are unit-normalised so distances live in [0, 2]; <c>Separation</c> =
+    /// unrelatedMean − relatedMean is the magnitude the message-passing + contrastive repulsion actually moved.
+    /// </summary>
+    public GeometrySummary SummarizePushPullGeometry(int maxConcepts = 600, int unrelatedPerNode = 8, int seed = 1234)
+    {
+        var rng = new Random(seed);
+        var mutable = _nodes.Values.Where(n => !IsFrozenConcept(n.Name) && n.PositiveFace is { Length: > 0 }).ToArray();
+        var sample = mutable.Length <= maxConcepts ? mutable : mutable.OrderBy(_ => rng.Next()).Take(maxConcepts).ToArray();
+
+        var related = new List<double>();
+        var unrelated = new List<double>();
+        foreach (var node in sample)
+        {
+            // PULL: distance to each relation-edged neighbour.
+            foreach (var rn in _lattice.GetRelationalNeighbors(node.Name))
+                if (_nodes.TryGetValue(Normalize(rn), out var other) && !IsFrozenConcept(other.Name) && other.PositiveFace.Length > 0)
+                    related.Add(FaceAwareDistance(node.PositiveFace, other.PositiveFace));
+            // PUSH: distance to random UNRELATED concepts (no relation edge).
+            for (var s = 0; s < unrelatedPerNode && mutable.Length > 1; s++)
+            {
+                var other = mutable[rng.Next(mutable.Length)];
+                if (ReferenceEquals(other, node))
+                    continue;
+                if (_relationIndex.ContainsKey(RelationKey(node.Name, other.Name)))
+                    continue;
+                unrelated.Add(FaceAwareDistance(node.PositiveFace, other.PositiveFace));
+            }
+        }
+
+        static (double Mean, double Min, double Max) St(List<double> xs)
+            => xs.Count == 0 ? (0.0, 0.0, 0.0) : (xs.Average(), xs.Min(), xs.Max());
+        var r = St(related);
+        var u = St(unrelated);
+        return new GeometrySummary(_nodes.Count, mutable.Length, related.Count, unrelated.Count,
+            r.Mean, r.Min, r.Max, u.Mean, u.Min, u.Max);
     }
 
     /// <summary>
@@ -1104,6 +1165,10 @@ public sealed class PlatonicSpaceMemory
         // Low contradiction → concepts agree → pull together (+1).
         // High contradiction → concepts disagree → push apart (−1).
         var affinity = 1.0 - (2.0 * Clamp01(targetContradiction)); // [+1 .. -1]
+        // Floor the PULL so an observed relation clusters even under a weak edit-head magnitude (balance the
+        // push). Only when attracting — a repel (affinity<0) keeps its full strength.
+        if (affinity > 0.0)
+            affinity = Math.Max(affinity, MinAttractAffinity);
 
         MessagePassUpdate(a, b.PositiveFace, alphaA, affinity);
         MessagePassUpdate(b, a.PositiveFace, alphaB, affinity);
@@ -1165,6 +1230,13 @@ public sealed class PlatonicSpaceMemory
             return;
 
         var snapshot = _nodes.Values.ToArray();
+        // Repel ONLY from MUTABLE targets. Frozen numbers (often the MAJORITY of nodes at scale — e.g. ~72% in
+        // the live gym) never move AND don't need separating from text concepts; sampling them wasted most of
+        // the repulsion budget, so mutable-vs-mutable separation was starved and the space collapsed. Sampling
+        // the mutable pool restores effective repulsion regardless of how many numbers exist.
+        var targets = snapshot.Where(x => !IsFrozenConcept(x.Name) && x.PositiveFace is { Length: > 0 }).ToArray();
+        if (targets.Length < 2)
+            return;
         var dim = _faceDimension;
         _repulsionPassCount++;
 
@@ -1177,10 +1249,10 @@ public sealed class PlatonicSpaceMemory
             var updated = node.PositiveFace;
             var rng = new Random(unchecked(StableHash(node.Name) + _repulsionPassCount));
 
-            var samples = Math.Min(RepulsionSamples, n - 1);
+            var samples = Math.Min(RepulsionSamples, targets.Length - 1);
             for (var s = 0; s < samples; s++)
             {
-                var other = snapshot[rng.Next(snapshot.Length)];
+                var other = targets[rng.Next(targets.Length)];
                 if (ReferenceEquals(other, node))
                     continue;
                 // Repulsion is ONLY for unrelated pairs — a confirmed relation is exempt (it is what

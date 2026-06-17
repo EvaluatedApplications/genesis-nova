@@ -212,6 +212,17 @@ switch (cmd)
         if (rest.Count > 0) await QueryAsync(string.Join(' ', rest), maxNodes: 24, maxEdges: 24);
         else Report();
         break;
+    case "geometry":
+    {
+        H("PUSH / PULL GEOMETRY  (semantic-face distance; faces unit-normalised → range [0, 2])");
+        var g = runtime.GeometrySummary();
+        P($"  concepts        : {g.TotalConcepts}  (mutable, non-frozen: {g.MutableConcepts})");
+        P($"  PULL (related)  : mean {g.RelatedMean:F3}   min {g.RelatedMin:F3}   max {g.RelatedMax:F3}   (n={g.RelatedPairs} edged pairs)");
+        P($"  PUSH (unrelated): mean {g.UnrelatedMean:F3}   min {g.UnrelatedMin:F3}   max {g.UnrelatedMax:F3}   (n={g.UnrelatedPairs} sampled pairs)");
+        P($"  SEPARATION      : {g.Separation:F3}   (unrelated mean − related mean; >0 means push/pull pulled related closer than unrelated)");
+        P($"  reference       : 0 = identical, ~1.41 = orthogonal, 2 = antipodal");
+        break;
+    }
     case "report":
     default:
         Report();

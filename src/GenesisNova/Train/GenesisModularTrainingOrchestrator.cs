@@ -69,6 +69,11 @@ public sealed class GenesisModularTrainingOrchestrator
             var units = curriculum.Units;
             var capture = cycle % Math.Max(1, opt.SampleEvery) == 0;
             var samples = new List<ProbeSample>();
+            // RESERVOIR sample so the displayed examples are REPRESENTATIVE of the whole probe distribution
+            // (every type — arithmetic, fold, predicate, seq, expression, function, retrieval — has an equal
+            // chance), not just the first N (which were always the pool probes a curriculum lists first).
+            var sampleRng = new Random();
+            var sampleSeen = 0;
             double aggQuality = 0, aggConf = 0; int aggN = 0, aggPlatonic = 0;
             foreach (var unit in units)
             {
@@ -85,7 +90,13 @@ public sealed class GenesisModularTrainingOrchestrator
                     var output = res.Result.Output ?? string.Empty;
                     var pq = GenesisGrader.Quality(output, probe.Allowed, probe.RequiredDepth, neural, probe.RequirePlatonic, probe.AnswerVocabulary);
                     uQ += pq; if (!neural) uPlat++; uConf += res.Result.PlatonicConfidence;
-                    if (capture && samples.Count < opt.SampleCount) samples.Add(new ProbeSample(probe.Query, output, pq > 0, !neural));
+                    if (capture)
+                    {
+                        var sample = new ProbeSample(probe.Query, output, pq > 0, !neural);
+                        sampleSeen++;
+                        if (samples.Count < opt.SampleCount) samples.Add(sample);
+                        else { var j = sampleRng.Next(sampleSeen); if (j < opt.SampleCount) samples[j] = sample; } // reservoir
+                    }
                 }
                 unit.RecordCycle(new CycleGrade(uN > 0 ? uQ / uN : 0.0, uN > 0 ? (double)uPlat / uN : 0.0, uN > 0 ? uConf / uN : 0.0));
                 aggQuality += uQ; aggConf += uConf; aggN += uN; aggPlatonic += uPlat;

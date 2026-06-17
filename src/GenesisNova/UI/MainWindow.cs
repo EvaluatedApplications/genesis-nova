@@ -525,22 +525,44 @@ public class MainWindow : Form
         H($"TOKENIZE     {(act.InputTokens.Length == 0 ? "(none)" : string.Join("  |  ", act.InputTokens))}");
         H("");
 
+        var dp = (result.DecisionPath ?? string.Empty).ToLowerInvariant();
         if (mech == "CALCULATED")
         {
-            var arith = ParseArith(input);
-            if (arith is { } a)
+            if (dp.Contains("expression-chain"))
+            {
+                H("HOW IT CHAINED IT  (a multi-operator expression — chained compute-elements, NOT one lookup):");
+                H("   1. the plan head recognised a MULTI-operator expression from context");
+                H("   2. each operator was classified from its OWN local context by the op head (no fixed symbol→op map)");
+                H("   3. evaluated with precedence (×/÷ before +/−); each binary step = ONE substrate R2 compose + homomorphic decode");
+                H($"   4. chained {result.PlatonicHopCount} compute-element step(s)  ->  {result.Output}");
+                H("   => GENERALIZES: the chain computes for any operands, never memorised.");
+            }
+            else if (ParseArith(input) is { } a)
             {
                 var rule = a.Face == "poly" ? "poly(a)+poly(b) = poly(a+b)" : "log(a)+log(b) = log(a*b)";
                 H("HOW IT COMPUTED IT  (calculated, NOT remembered — numbers never form stored edges):");
-                H($"   1. the GRU query head classified:  op = {a.Op},  operands = [{string.Join(", ", a.Operands)}]");
-                H($"   2. routed the op to the {a.Face.ToUpperInvariant()} face — the homomorphic one:  {rule}");
-                H($"   3. composed the operand faces in the geometry and decoded the value  ->  {result.Output}");
-                H("   => it GENERALIZES: the SAME homomorphism computes operands never trained (e.g. 5000 + 2).");
+                H($"   1. classified  op = {a.Op},  operands = [{string.Join(", ", a.Operands)}]  (op inferred from context)");
+                H($"   2. routed to the {a.Face.ToUpperInvariant()} face — the homomorphic one:  {rule}");
+                H($"   3. composed the operand faces in the geometry and decoded  ->  {result.Output}");
+                H("   => GENERALIZES: the SAME homomorphism computes operands never trained (e.g. 5000 + 2).");
             }
             else if (result.RoutedTransform is not null)
-                H($"HOW: applied the learned function transform '{result.RoutedTransform}' to the operand (computed, not stored).");
+            {
+                H("HOW IT COMPUTED IT  (a learned function applied as a transform vector — computed, not recalled):");
+                H($"   1. selected the learned function '{result.RoutedTransform}' from the space (chosen by relation)");
+                H($"   2. applied it by COMPOSITION (embed(x) + T(f)) and decoded  ->  {result.Output}");
+            }
             else
                 H("HOW: computed on the substrate (a homomorphism / transform), not recalled from a stored fact.");
+        }
+        else if (mech == "REMEMBERED" && dp.Contains("geometric"))
+        {
+            H("HOW IT RECALLED IT  (geometric content-addressing — POSITION is identity, NOT a stored edge):");
+            H($"   anchors (your input found in the space): {(act.Anchors.Length == 0 ? "(none)" : string.Join(", ", act.Anchors))}");
+            H("   1. read your input concept's POSITION in the semantic face");
+            H("   2. the lattice VP-Tree returned the NEAREST stored concept by face distance");
+            H($"   3. nearest concept (closeness {result.PlatonicConfidence:F2})  ->  {result.Output}");
+            H("   => positioned by training (message-passing pulled related concepts together; no edge needed).");
         }
         else if (mech == "REMEMBERED")
         {
@@ -556,19 +578,20 @@ public class MainWindow : Form
             }
             if (result.Evidence is { Count: > 0 })
             {
-                H("   graph walk:");
+                H($"   graph walk ({result.PlatonicHopCount} hop(s)):");
                 foreach (var ev in result.Evidence.OrderBy(x => x.Hop).Take(6))
                     H($"     hop {ev.Hop}: {ev.Concept}{(ev.RelatedConcept is not null ? $" -> {ev.RelatedConcept}" : "")}");
             }
         }
         else if (mech == "COMPOSED")
         {
-            H("HOW IT COMPOSED IT  (assembled a glider shape and ran it on the substrate):");
+            H($"HOW IT COMPOSED IT  ({ShapeOf(dp)}):");
+            H("   the GRU plan head SELECTED the shape; the substrate EXECUTED it (the GRU only chooses):");
             if (result.Evidence is { Count: > 0 })
                 foreach (var ev in result.Evidence.OrderBy(x => x.Hop).Take(6))
                     H($"   step {ev.Hop}: {ev.Concept}{(ev.RelatedConcept is not null ? $" -> {ev.RelatedConcept}" : "")}");
             else
-                H("   (a predicate / fold / arith->word shape executed on the platonic blocks)");
+                H($"   executed on the platonic blocks  ->  {result.Output}");
         }
         else
         {
@@ -591,15 +614,41 @@ public class MainWindow : Form
     // edge), composed (glider shape), or generated (neural decoder). Drives the trace's plain-English mechanism.
     private static (string Label, string Why) MechanismOf(GenesisNova.Infer.GenerationResult r)
     {
-        if (r.UsedNeuralFallback) return ("GENERATED", "the neural decoder, not the platonic substrate");
-        var d = r.DecisionPath ?? string.Empty;
-        if (d.Contains("gru-query") || d.Contains("arithmetic") || r.RoutedTransform is not null)
-            return ("CALCULATED", "computed on the substrate (a homomorphism / learned transform) — generalizes, not a stored fact");
-        if (d.Contains("glider") || d.Contains("plan") || d.Contains("fold") || d.Contains("predicate"))
+        if (r.UsedNeuralFallback) return ("GENERATED", "the neural decoder produced it token-by-token — no platonic compute or retrieval");
+        var d = (r.DecisionPath ?? string.Empty).ToLowerInvariant();
+        // Order matters: 'expression-chain' before 'chain'; specific routes before generic substrings.
+        if (d.Contains("expression-chain"))
+            return ("CALCULATED", "chained several compute-elements (a multi-operator expression), each operator classified from context");
+        if (d.Contains("gru-query") || d.Contains("arithmetic"))
+            return ("CALCULATED", "computed via the numeric homomorphism (poly/log) — generalizes, not a stored fact");
+        if (d.Contains("learned-op") || d.Contains("learned-function") || r.RoutedTransform is not null)
+            return ("CALCULATED", "applied a learned function as a transform vector — computed by composition, not recalled");
+        if (d.Contains("glider") || d.Contains("plan") || d.Contains("fold") || d.Contains("predicate") || d.Contains("seq"))
             return ("COMPOSED", "assembled a glider shape and ran it on the substrate");
-        if (d.Contains("relation") || d.Contains("concept") || d.Contains("retriev"))
-            return ("REMEMBERED", "recalled a learned association (a stored relation edge)");
+        if (d.Contains("geometric"))
+            return ("REMEMBERED", "found the nearest concept by POSITION in the semantic face (geometric content-addressing)");
+        if (d.Contains("relation-edge"))
+            return ("REMEMBERED", "followed a learned relation edge (a stored cue↔answer association)");
+        if (d.Contains("concept") || d.Contains("chain") || d.Contains("retriev"))
+            return ("REMEMBERED", "walked the relation graph (multi-hop) from your input concepts");
         return ("PLATONIC", "answered via the platonic substrate");
+    }
+
+    // Human description of the glider SHAPE encoded in a 'platonic-glider-plan:<shape>' decision path.
+    private static string ShapeOf(string decisionPath)
+    {
+        var dp = decisionPath ?? string.Empty;
+        var i = dp.IndexOf(':');
+        var s = (i >= 0 && i + 1 < dp.Length ? dp[(i + 1)..] : dp).ToLowerInvariant();
+        return s switch
+        {
+            "predicate" => "predicate — Compare→Branch (the difference's sign → greater/less/equal)",
+            "fold-sum" => "fold-sum — one N-way R2 compose over all operands (poly-sum)",
+            "fold-product" => "fold-product — one N-way R2 compose over all operands (log-sum)",
+            "seq" => "seq — a mined scaffold chunk ∘ Fold(Add) (Concatenate-composition)",
+            "arith-word" => "arith→word — Compute the value, then Hop the digit to its number-word",
+            _ => "a glider shape"
+        };
     }
 
     // Best-effort op/operand/face extraction for the trace's "how it computed it" explanation.

@@ -46,9 +46,14 @@ internal static class PlatonicFaceComposer
             return new double[dim];
 
         var tokens = input.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        // GEOMETRIC START (getting back to position-as-identity): a non-numeric concept's SEMANTIC face is a
+        // NEUTRAL, whole-string-seeded small start (via SeedLearnableDims) — NOT a lexical chunk-hash — so the
+        // message-passing/contrastive geometry (PlatonicSpaceMemory) is what POSITIONS related concepts near
+        // each other, instead of spelling similarity ("four"≈"fruit") biasing the VP-Tree. Single tokens keep
+        // their char-face spelling identity; multi-word concepts no longer impose the confusable chunk geometry.
         var embedding = tokens.Length >= 2
-            ? GetWordComposedEmbedding(input, dim)   // sentence / large string → word face
-            : GetFreshEmbedding(input.Trim(), dim);  // single token → numeric or char face
+            ? new double[dim]                        // multi-word → neutral start; geometry does the positioning
+            : GetFreshEmbedding(input.Trim(), dim);  // single token → numeric or char-face spelling
 
         SeedLearnableDims(embedding, input, dim);
         return embedding;

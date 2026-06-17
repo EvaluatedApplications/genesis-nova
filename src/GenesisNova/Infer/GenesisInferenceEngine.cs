@@ -1032,10 +1032,14 @@ public sealed class GenesisInferenceEngine
         // homomorphism can't (it computes a SPECIFIED op; this LEARNED which function from examples).
         if (TryGenerateFromLearnedFunction(request, out result))
             return true;
-        // RELATION-FIRST retrieval: for a single-concept query, follow the strongest learned RELATION edge
-        // before the geometric concept-chain. MEASURED (2026-06-14): pure geometric retrieval was refuted
-        // as a replacement — the migrated numeric face is unstable under contrastive repulsion and the
-        // semantic face is lexical (confuses "four"≈"fruit"), so the relation edge is the robust mechanism.
+        // GEOMETRIC-FIRST retrieval (re-promoted — the original dimensional-space design, "position IS
+        // identity"): read the nearest concept in the SEMANTIC face via the lattice VP-Tree, gated by
+        // perceived closeness. The earlier refutation ("four"≈"fruit") was under a lexical chunk-hash start
+        // (now a neutral, geometry-positioned start) and a weaker controller; this route only WINS when it is
+        // confident, otherwise it abstains and the relation edge handles it (kept as the robust fallback).
+        if (TryGenerateFromGeometricRetrieval(request, out result))
+            return true;
+        // RELATION-FIRST retrieval: for a single-concept query, follow the strongest learned RELATION edge.
         if (TryGenerateFromRelationEdge(request, out result))
             return true;
 
@@ -1087,6 +1091,52 @@ public sealed class GenesisInferenceEngine
     // under contrastive repulsion and the semantic face is lexical, so geometry mis-retrieved; the edge
     // is the robust mechanism.) Single-concept only; arithmetic / glider capabilities are handled earlier.
     private const double RelationFirstMinConfidence = 0.5;
+
+    // GEOMETRIC retrieval gate: confidence = 1/(1+faceDistance) in the semantic face. Above this, position
+    // alone is a trustworthy answer (content addressing); below, defer to the relation edge.
+    private const double GeometricMinConfidence = 0.55;
+
+    /// <summary>
+    /// GEOMETRIC retrieval — the original dimensional-space design: a concept's POSITION in the semantic face
+    /// IS its identity, and the nearest stored concept (lattice VP-Tree, <see cref="PlatonicSpaceMemory.GetNearestConcepts"/>)
+    /// is the answer. Single-concept queries only. Skips reserved/op-token neighbours, and ABSTAINS below
+    /// <see cref="GeometricMinConfidence"/> so it only wins when the geometry is trustworthy (the relation
+    /// edge is the fallback). This is the re-promotion of geometry over symbol-keyed relations.
+    /// </summary>
+    private bool TryGenerateFromGeometricRetrieval(GenerationRequest request, out GenerationResult result)
+    {
+        result = default!;
+        var anchors = ExtractConceptAnchors(request.Input);
+        if (anchors.Count != 1)
+            return false;
+
+        foreach (var (sym, dist) in _memory.GetNearestConcepts(anchors[0], candidates: null, maxNeighbors: 5))
+        {
+            if (PlatonicSpaceMemory.IsReservedConcept(sym) || _memory.IsOperationToken(sym))
+                continue;
+            var confidence = 1.0 / (1.0 + Math.Max(0.0, dist));
+            if (confidence < GeometricMinConfidence)
+                return false; // geometry not confident here → defer to the relation edge
+            var tokens = _tokenizer.Encode(sym, addEos: true)
+                .Take(Math.Max(1, request.MaxNewTokens))
+                .ToArray();
+            if (tokens.Length == 0)
+                return false;
+            result = new GenerationResult(
+                Output: _tokenizer.Decode(tokens),
+                GeneratedTokens: tokens,
+                UsedPlatonicQuery: true,
+                UsedNeuralFallback: false,
+                DecisionPath: "platonic-geometric",
+                PlatonicConfidence: confidence,
+                AppliedBiasCount: 0,
+                AverageBiasMagnitude: 0.0,
+                ChunksGenerated: 1,
+                PlatonicHopCount: 1);
+            return true;
+        }
+        return false;
+    }
 
     private bool TryGenerateFromRelationEdge(GenerationRequest request, out GenerationResult result)
     {

@@ -5,49 +5,70 @@ using System.Linq;
 namespace GenesisNova.Train;
 
 /// <summary>
-/// Personality conversation trainer — basic chat templates with a deliberately RUDE, impatient, foul-mouthed
-/// persona (a stylistic chatbot personality for this app). Built like the other associative curricula: each user
-/// utterance maps to ONE rude reply (single-member edges — distinct cue → distinct target, so no decoder
-/// fan-out), and is graded FUZZILY against the intent's full set of valid rude replies (any one counts). Flat
-/// difficulty (MasteryDepth 1) — masters once it reliably produces a valid rude reply.
+/// Personality conversation trainer — a deliberately RUDE, impatient, foul-mouthed chat persona. Expanded so it
+/// is NOT a hardcoded one-cue→one-reply table:
+///  • MULTIPLE correct answers — each intent has many natural rude replies, and training FANS OUT (a cue maps to
+///    a RANDOMLY-sampled valid reply each time), so the model learns the intent's reply DISTRIBUTION, not a
+///    single locked string.
+///  • EMERGENT hits — grading accepts ANY output that contains a valid rude phrase/marker (intent replies ∪ a
+///    global rude-marker set), so a natural recombination the model invents ("ugh, just get lost then") scores
+///    as a hit even though it is not a verbatim trained reply. Off-persona POLITE words are the competing
+///    vocabulary (penalized). Route-agnostic (RequirePlatonic=false) — the persona is the goal, not the path.
+/// Flat difficulty (MasteryDepth 1): masters once it reliably emits a valid rude reply.
 /// </summary>
 public sealed class PersonalityCurriculum : ITrainingCurriculum
 {
-    // (user utterances) → (acceptable rude replies). Profanity is intentional — the requested persona.
-    private static readonly (string[] Inputs, string[] Replies)[] Intents =
+    // (user utterances) → (natural rude replies). Profanity is intentional — the requested persona. Many of
+    // each so cue→reply FANS OUT and grading has a broad valid set.
+    private static readonly (string[] Cues, string[] Replies)[] Intents =
     {
-        (new[] { "hello", "hi", "hey", "good morning", "yo" },
-         new[] { "what the fuck do you want", "ugh, you again", "piss off, i'm busy", "oh great, what now" }),
-        (new[] { "how are you", "hows it going", "you ok", "how do you feel" },
-         new[] { "none of your damn business", "how the fuck do you think", "shit, thanks to you", "what do you care" }),
-        (new[] { "thanks", "thank you", "appreciate it", "cheers" },
-         new[] { "whatever", "yeah yeah, dont mention it", "about damn time", "great, now fuck off" }),
-        (new[] { "can you help me", "help", "i need help", "please help" },
-         new[] { "figure it out yourself", "do i look like your servant", "ugh fine, what", "are you fucking serious" }),
-        (new[] { "what is this", "why", "what do you mean", "explain" },
-         new[] { "google it, genius", "how the fuck should i know", "use your damn brain", "ask someone who gives a shit" }),
-        (new[] { "bye", "goodbye", "see you", "later" },
-         new[] { "finally, fuck off", "good riddance", "took you long enough", "get lost" }),
-        (new[] { "youre great", "youre awesome", "nice job", "well done" },
-         new[] { "i know, now scram", "flattery wont help you", "tell me something i dont know", "no shit" }),
-        (new[] { "sorry", "my apologies", "i apologize", "my bad" },
-         new[] { "you should be", "sorry doesnt cut it", "yeah you better be", "save it" }),
+        (new[] { "hello", "hi", "hey", "good morning", "yo", "hey there", "you there" },
+         new[] { "what the fuck do you want now", "ugh, you again", "oh joy, it's you", "yeah yeah, what is it", "great, you're back", "what now", "spit it out" }),
+        (new[] { "how are you", "hows it going", "you ok", "how do you feel", "you good" },
+         new[] { "none of your damn business", "how the fuck do you think", "terrible, thanks to you", "what do you care", "peachy, now what", "don't ask" }),
+        (new[] { "thanks", "thank you", "appreciate it", "cheers", "thanks a lot" },
+         new[] { "whatever", "yeah yeah, don't mention it", "about damn time", "great, now move along", "sure, fine", "don't make it weird" }),
+        (new[] { "can you help me", "help", "i need help", "please help", "help me out" },
+         new[] { "figure it out yourself", "do i look like your servant", "ugh, fine, what", "are you fucking serious", "google it", "what do you want from me" }),
+        (new[] { "why", "what is this", "what do you mean", "explain", "how come" },
+         new[] { "google it, genius", "how the fuck should i know", "use your damn brain", "look it up", "because i said so", "who cares" }),
+        (new[] { "bye", "goodbye", "see you", "later", "im leaving", "gotta go" },
+         new[] { "finally, fuck off", "good riddance", "took you long enough", "get lost", "don't come back", "about time" }),
+        (new[] { "youre great", "youre awesome", "nice job", "well done", "i like you" },
+         new[] { "i know, now scram", "flattery won't work", "tell me something i don't know", "no shit", "obviously", "save it" }),
+        (new[] { "sorry", "my apologies", "i apologize", "my bad", "forgive me" },
+         new[] { "you should be", "sorry doesn't cut it", "yeah, you better be", "save it", "too late", "whatever" }),
+        (new[] { "youre dumb", "youre useless", "i hate you", "youre annoying", "stupid bot" },
+         new[] { "right back at you", "cry about it", "like i care", "you're one to talk", "get lost", "whatever, loser" }),
+        (new[] { "nice weather", "whats up", "hows your day", "anything new", "lets chat" },
+         new[] { "i don't care", "get to the point", "do i look like i chat", "boring", "whatever", "spit it out" }),
+    };
+
+    // Universal rude markers — if ANY appears in the output it counts as a valid (emergent) rude reply, so the
+    // model isn't punished for inventing a natural rude line that isn't a verbatim trained one. Curated to be
+    // distinctive (no short substrings that collide with ordinary words).
+    public static readonly string[] RudeMarkers =
+    {
+        "whatever", "get lost", "fuck off", "piss off", "none of your", "figure it out", "google it",
+        "good riddance", "no shit", "who cares", "save it", "don't care", "get to the point", "cry about it",
+        "buzz off", "scram", "shut up", "spit it out", "move along", "you better be", "about time", "don't ask",
+    };
+
+    // Off-persona POLITE words — the COMPETING vocabulary; if the model goes nice, it's penalized.
+    public static readonly string[] PoliteMarkers =
+    {
+        "happy to help", "my pleasure", "of course", "certainly", "glad to", "wonderful", "no problem",
+        "you're welcome", "how can i assist", "sure thing", "i'd be glad", "delighted",
     };
 
     private readonly Random _rng = new();
     private readonly int _trainPerCycle;
-    private readonly List<(string Input, string Output)> _corpus = new();
-    private readonly List<(string Cue, string[] Allowed)> _probeSpecs = new();
+    private readonly int _probeCount;
 
-    public PersonalityCurriculum(int trainPerCycle = 64)
+    public PersonalityCurriculum(int trainPerCycle = 64, int probeCount = 24)
     {
         _trainPerCycle = Math.Max(16, trainPerCycle);
-        foreach (var (inputs, replies) in Intents)
-            for (var i = 0; i < inputs.Length; i++)
-            {
-                _corpus.Add((inputs[i], replies[i % replies.Length])); // distinct cue → one reply (no fan-out)
-                _probeSpecs.Add((inputs[i], replies));                  // any of the intent's rude replies counts
-            }
+        _probeCount = Math.Max(8, probeCount);
     }
 
     public string Name => "personality";
@@ -56,14 +77,31 @@ public sealed class PersonalityCurriculum : ITrainingCurriculum
 
     public IReadOnlyList<(string Input, string Output)> NextTrainBatch()
     {
-        var batch = new List<(string Input, string Output)>();
-        if (_corpus.Count == 0) return batch;
-        for (var i = 0; i < _trainPerCycle; i++) batch.Add(_corpus[_rng.Next(_corpus.Count)]); // sample with replacement
+        var batch = new List<(string Input, string Output)>(_trainPerCycle);
+        for (var i = 0; i < _trainPerCycle; i++)
+        {
+            var intent = Intents[_rng.Next(Intents.Length)];
+            var cue = intent.Cues[_rng.Next(intent.Cues.Length)];
+            var reply = intent.Replies[_rng.Next(intent.Replies.Length)]; // FAN-OUT: cue → a random valid reply
+            batch.Add((cue, reply));
+        }
         return batch;
     }
 
     public IReadOnlyList<TrainingProbe> NextProbes()
-        => _probeSpecs.Select(p => new TrainingProbe(p.Cue, p.Allowed, 1)).ToList();
+    {
+        // Sample cues this cycle; grade each against the intent's replies ∪ universal rude markers (any present
+        // = an emergent hit), with polite words as the competing vocabulary. Route-agnostic.
+        var probes = new List<TrainingProbe>(_probeCount);
+        for (var i = 0; i < _probeCount; i++)
+        {
+            var intent = Intents[_rng.Next(Intents.Length)];
+            var cue = intent.Cues[_rng.Next(intent.Cues.Length)];
+            var allowed = intent.Replies.Concat(RudeMarkers).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            probes.Add(new TrainingProbe(cue, allowed, RequiredDepth: 1, AnswerVocabulary: PoliteMarkers, RequirePlatonic: false));
+        }
+        return probes;
+    }
 
     public void RecordCycle(CycleGrade grade) { } // flat; FocusedCurriculum tracks held-bar mastery
 }

@@ -44,7 +44,9 @@ public class GenesisNeuralModel
     // neural-only rather than throwing.
     public const int RouteCount = 3;
     private const int NumRoutes = RouteCount;
-    private const double RouteLossWeight = 0.25;
+    private const double RouteLossWeight = 0.5; // C5: raised 0.25→0.5 so the platonic route head pulls harder on the
+                                                // shared GRU vs the token LM (weight 1.0) — the 4:1 token dominance was
+                                                // the structural cause of router erosion (a+b drifting to neural).
     private readonly object _routeClassBalanceLock = new();
     private readonly long[] _routeClassCounts = { 1L, 1L, 1L };
     private TorchSharp.Modules.Parameter? _routeWT;
@@ -72,7 +74,7 @@ public class GenesisNeuralModel
     // encoder. Not yet persisted in ModelSnapshot — heads retrain after Import (graceful, like a
     // fresh route head).
     public const int QueryOpCount = 5; // 0=none/abstain, 1=add, 2=sub, 3=mul, 4=div
-    private const double QueryLossWeight = 0.25;
+    private const double QueryLossWeight = 0.5; // C5: raised 0.25→0.5 (see RouteLossWeight) — op classification pulls harder.
     private TorchSharp.Modules.Parameter? _queryOpWT;      // [hidden, QueryOpCount]
     private TorchSharp.Modules.Parameter? _queryOpB;       // [QueryOpCount]
     // SPACE-AWARE op head (SPACE_AWARE_GRU.md §A): the op classifier conditions on a perception vector of the
@@ -94,7 +96,7 @@ public class GenesisNeuralModel
     //   by the op head, evaluated with precedence by chaining compute-elements on the substrate).
     // Each shape the GRU can SELECT; the substrate executes it (R2 compose / homomorphism / relations).
     public const int PlanKindCount = 9;
-    private const double PlanLossWeight = 0.25;
+    private const double PlanLossWeight = 0.5; // C5: raised 0.25→0.5 (see RouteLossWeight) — shape selection pulls harder.
     private TorchSharp.Modules.Parameter? _planWT; // [hidden, PlanKindCount]
     private TorchSharp.Modules.Parameter? _planB;  // [PlanKindCount]
     // SPACE-AWARE plan head (SPACE_AWARE_GRU.md §A): shape selection conditions on the anchor's perception
@@ -102,6 +104,19 @@ public class GenesisNeuralModel
     // TrainPlanPerception; default ON. No perception / flag off → fed 0 (head unchanged).
     private TorchSharp.Modules.Parameter? _planPerceptionW; // [EditPerceptionDim, PlanKindCount]
     public bool PerceptionPlan { get; set; } = true;
+
+    // SHARED REASONING TRUNK: a single nonlinear projection of the GRU hidden that the three DECISION heads
+    // (route, query-op, plan) read INSTEAD of the raw hidden. A linear head can only pull linearly-separable
+    // decisions out of the representation; the trunk gives the selector genuine nonlinear capacity right where
+    // the hard which-route / which-shape / which-op calls are made. The operand head, edit head, and token
+    // decoder are UNCHANGED (they still read the raw per-token / final hidden). Autograd-trained with the heads.
+    private const int ReasoningTrunkDim = 512;
+    private TorchSharp.Modules.Parameter? _trunkW; // [hidden, ReasoningTrunkDim]
+    private TorchSharp.Modules.Parameter? _trunkB; // [ReasoningTrunkDim]
+    // h: [..., hidden] → [..., ReasoningTrunkDim]. The parameterless form uses the training-device params; the
+    // static form takes device-moved weights for the inference path.
+    private Tensor ReasoningTrunk(Tensor h) => ReasoningTrunk(h, _trunkW!, _trunkB!);
+    private static Tensor ReasoningTrunk(Tensor h, Tensor tw, Tensor tb) => nn.functional.relu(h.matmul(tw) + tb);
 
     // Learned edit-head: predicts HOW STRONGLY the platonic space should be edited for a given
     // input context. Shape mirrors the route head but emits a single scalar: _editWT is [hidden, 1]
@@ -243,7 +258,9 @@ public class GenesisNeuralModel
             _queryOperandWT is not null ? TensorToMatrix(_queryOperandWT) : null,
             _queryOperandB is not null ? TensorToVector(_queryOperandB) : null,
             _planWT is not null ? TensorToMatrix(_planWT) : null,
-            _planB is not null ? TensorToVector(_planB) : null);
+            _planB is not null ? TensorToVector(_planB) : null,
+            _trunkW is not null ? TensorToMatrix(_trunkW) : null,
+            _trunkB is not null ? TensorToVector(_trunkB) : null);
     }
 
     public void Import(ModelSnapshot snapshot)
@@ -288,6 +305,13 @@ public class GenesisNeuralModel
             _planWT = MatrixToParameter(snapshot.PlanWeights!);
             _planB = VectorToParameter(snapshot.PlanBias!);
         }
+        // SHARED REASONING TRUNK — restore if shape-compatible, else leave null so the next forward
+        // lazily reinitialises it (graceful, like the heads). Persisted so routing survives a reload.
+        if (HasUsableTrunk(snapshot.TrunkWeights, snapshot.TrunkBias, _hiddenSize))
+        {
+            _trunkW = MatrixToParameter(snapshot.TrunkWeights!);
+            _trunkB = VectorToParameter(snapshot.TrunkBias!);
+        }
         RecreateOptimizer();
     }
 
@@ -297,12 +321,22 @@ public class GenesisNeuralModel
         if (s.QueryOpWeights is null || s.QueryOpBias is null || s.QueryOperandWeights is null
             || s.QueryOperandBias is null || s.PlanWeights is null || s.PlanBias is null)
             return false;
-        return s.QueryOpWeights.GetLength(0) == hiddenSize && s.QueryOpWeights.GetLength(1) == QueryOpCount
+        // Op + plan heads read the REASONING TRUNK, so their input dim is ReasoningTrunkDim (NOT hiddenSize).
+        // The operand head still reads the raw per-token hidden, so it stays [hiddenSize, 1].
+        return s.QueryOpWeights.GetLength(0) == ReasoningTrunkDim && s.QueryOpWeights.GetLength(1) == QueryOpCount
             && s.QueryOpBias.Length == QueryOpCount
             && s.QueryOperandWeights.GetLength(0) == hiddenSize && s.QueryOperandWeights.GetLength(1) == 1
             && s.QueryOperandBias.Length == 1
-            && s.PlanWeights.GetLength(0) == hiddenSize && s.PlanWeights.GetLength(1) == PlanKindCount
+            && s.PlanWeights.GetLength(0) == ReasoningTrunkDim && s.PlanWeights.GetLength(1) == PlanKindCount
             && s.PlanBias.Length == PlanKindCount;
+    }
+
+    private static bool HasUsableTrunk(double[,]? trunkWeights, double[]? trunkBias, int hiddenSize)
+    {
+        if (trunkWeights is null || trunkBias is null || hiddenSize <= 0)
+            return false;
+        return trunkWeights.GetLength(0) == hiddenSize && trunkWeights.GetLength(1) == ReasoningTrunkDim
+            && trunkBias.Length == ReasoningTrunkDim;
     }
 
     private int PredictNextTokenGpu(
@@ -476,7 +510,9 @@ public class GenesisNeuralModel
                 // Route head reads the SHARED GRU representation hInput (already a bounded learned
                 // vector — no extra hand-pool/tanh). hInput is a live graph node so the route CE loss
                 // backprops into the shared encoder, jointly shaping it for routing and decoding.
-                var routeLogits = hInput.matmul(_routeWT!) + _routeB!;
+                var routeTrunk = ReasoningTrunk(hInput);
+                forwardTensors.Add(routeTrunk);
+                var routeLogits = routeTrunk.matmul(_routeWT!) + _routeB!;
                 forwardTensors.Add(routeLogits);
                 var routeBatchLogits = routeLogits.unsqueeze(0);
                 forwardTensors.Add(routeBatchLogits);
@@ -506,7 +542,9 @@ public class GenesisNeuralModel
 
                 // OPERATION head: CE on the final shared-GRU hidden — which face op does this input ask
                 // for? Backprops into the shared encoder alongside the token/route losses.
-                var opLogits = hInput.matmul(_queryOpWT!) + _queryOpB!;
+                var opTrunk = ReasoningTrunk(hInput);
+                forwardTensors.Add(opTrunk);
+                var opLogits = opTrunk.matmul(_queryOpWT!) + _queryOpB!;
                 forwardTensors.Add(opLogits);
                 var opBatch = opLogits.unsqueeze(0);
                 forwardTensors.Add(opBatch);
@@ -551,7 +589,9 @@ public class GenesisNeuralModel
             // for (arithmetic / predicate / retrieval)? Backprops into the shared encoder like the op head.
             if (supervisePlan)
             {
-                var planLogits = hInput.matmul(_planWT!) + _planB!;
+                var planTrunk = ReasoningTrunk(hInput);
+                forwardTensors.Add(planTrunk);
+                var planLogits = planTrunk.matmul(_planWT!) + _planB!;
                 forwardTensors.Add(planLogits);
                 var planBatch = planLogits.unsqueeze(0);
                 forwardTensors.Add(planBatch);
@@ -726,15 +766,20 @@ public class GenesisNeuralModel
             var hInput = EncodeInput(inputTokens, scratch, _inferenceDevice, perTokenStates);
 
             Tensor opW = _queryOpWT, opB = _queryOpB!, owW = _queryOperandWT!, owB = _queryOperandB!;
+            Tensor tW = _trunkW!, tB = _trunkB!;
             if (_inferenceDevice != _trainingDevice)
             {
                 opW = _queryOpWT.to(_inferenceDevice); scratch.Add(opW);
                 opB = _queryOpB!.to(_inferenceDevice); scratch.Add(opB);
                 owW = _queryOperandWT!.to(_inferenceDevice); scratch.Add(owW);
                 owB = _queryOperandB!.to(_inferenceDevice); scratch.Add(owB);
+                tW = _trunkW!.to(_inferenceDevice); scratch.Add(tW);
+                tB = _trunkB!.to(_inferenceDevice); scratch.Add(tB);
             }
 
-            var opLogits = hInput.matmul(opW) + opB; scratch.Add(opLogits);
+            // Op head reads the reasoning trunk; the operand head (below) still reads the raw per-token hidden.
+            var opTrunk = ReasoningTrunk(hInput, tW, tB); scratch.Add(opTrunk);
+            var opLogits = opTrunk.matmul(opW) + opB; scratch.Add(opLogits);
             // SPACE-AWARE: + perception·_queryOpPerceptionW so the op choice can READ the anchor's region
             // (graceful no-op for numeric arithmetic, which has no relational anchor — perception is all-0).
             if (PerceptionQuery && perception is { Length: > 0 } && _queryOpPerceptionW is not null)
@@ -792,13 +837,16 @@ public class GenesisNeuralModel
         try
         {
             var hInput = EncodeInput(inputTokens, scratch, _inferenceDevice);
-            Tensor pW = _planWT, pB = _planB!;
+            Tensor pW = _planWT, pB = _planB!, tW = _trunkW!, tB = _trunkB!;
             if (_inferenceDevice != _trainingDevice)
             {
                 pW = _planWT.to(_inferenceDevice); scratch.Add(pW);
                 pB = _planB!.to(_inferenceDevice); scratch.Add(pB);
+                tW = _trunkW!.to(_inferenceDevice); scratch.Add(tW);
+                tB = _trunkB!.to(_inferenceDevice); scratch.Add(tB);
             }
-            var logits = hInput.matmul(pW) + pB; scratch.Add(logits);
+            var planTrunk = ReasoningTrunk(hInput, tW, tB); scratch.Add(planTrunk);
+            var logits = planTrunk.matmul(pW) + pB; scratch.Add(logits);
             // SPACE-AWARE: + perception·_planPerceptionW so the shape choice READS the anchor's region.
             if (PerceptionPlan && perception is { Length: > 0 } && _planPerceptionW is not null)
             {
@@ -902,6 +950,19 @@ public class GenesisNeuralModel
                 _planB = new TorchSharp.Modules.Parameter(pbClone, true);
                 try { oldPw.Dispose(); } catch { }
                 try { oldPb!.Dispose(); } catch { }
+            }
+
+            // SHARED REASONING TRUNK — clone+detach like the heads (autograd param read by route/op/plan).
+            if (_trunkW is not null)
+            {
+                var twClone = _trunkW.clone().detach().to(_trainingDevice);
+                var tbClone = _trunkB!.clone().detach().to(_trainingDevice);
+                var oldTw = _trunkW;
+                var oldTb = _trunkB;
+                _trunkW = new TorchSharp.Modules.Parameter(twClone, true);
+                _trunkB = new TorchSharp.Modules.Parameter(tbClone, true);
+                try { oldTw.Dispose(); } catch { }
+                try { oldTb!.Dispose(); } catch { }
             }
 
             // SHARED GRU gate weights/biases — clone+detach to break the graph chain, mirroring the
@@ -1139,12 +1200,24 @@ public class GenesisNeuralModel
         return h;
     }
 
+    private void EnsureReasoningTrunk()
+    {
+        if (_trunkW is not null)
+            return;
+        _trunkW = new TorchSharp.Modules.Parameter(
+            ((rand(new long[] { _hiddenSize, ReasoningTrunkDim }, device: _trainingDevice) * 2.0) - 1.0) * 0.05, true);
+        _trunkB = new TorchSharp.Modules.Parameter(
+            zeros(new long[] { ReasoningTrunkDim }, dtype: ScalarType.Float32, device: _trainingDevice), true);
+        RecreateOptimizer();
+    }
+
     private void EnsureRouteHeadInitialized()
     {
+        EnsureReasoningTrunk(); // route head reads the trunk; ensure it exists (idempotent)
         if (_routeWT is null)
         {
             _routeWT = new TorchSharp.Modules.Parameter(
-                ((rand(new long[] { _hiddenSize, NumRoutes }, device: _trainingDevice) * 2.0) - 1.0) * 0.05, true);
+                ((rand(new long[] { ReasoningTrunkDim, NumRoutes }, device: _trainingDevice) * 2.0) - 1.0) * 0.05, true);
             _routeB = new TorchSharp.Modules.Parameter(
                 zeros(new long[] { NumRoutes }, dtype: ScalarType.Float32, device: _trainingDevice), true);
             RecreateOptimizer();
@@ -1157,10 +1230,13 @@ public class GenesisNeuralModel
 
     private void EnsureQueryHeadsInitialized()
     {
+        EnsureReasoningTrunk(); // op + plan heads read the trunk; ensure it exists (idempotent)
         if (_queryOpWT is null)
         {
+            // Op + plan heads read the REASONING TRUNK ([ReasoningTrunkDim, K]); the operand head still reads
+            // the raw per-token hidden ([hidden, 1]).
             _queryOpWT = new TorchSharp.Modules.Parameter(
-                ((rand(new long[] { _hiddenSize, QueryOpCount }, device: _trainingDevice) * 2.0) - 1.0) * 0.05, true);
+                ((rand(new long[] { ReasoningTrunkDim, QueryOpCount }, device: _trainingDevice) * 2.0) - 1.0) * 0.05, true);
             _queryOpB = new TorchSharp.Modules.Parameter(
                 zeros(new long[] { QueryOpCount }, dtype: ScalarType.Float32, device: _trainingDevice), true);
             _queryOperandWT = new TorchSharp.Modules.Parameter(
@@ -1168,7 +1244,7 @@ public class GenesisNeuralModel
             _queryOperandB = new TorchSharp.Modules.Parameter(
                 zeros(new long[] { 1 }, dtype: ScalarType.Float32, device: _trainingDevice), true);
             _planWT = new TorchSharp.Modules.Parameter(
-                ((rand(new long[] { _hiddenSize, PlanKindCount }, device: _trainingDevice) * 2.0) - 1.0) * 0.05, true);
+                ((rand(new long[] { ReasoningTrunkDim, PlanKindCount }, device: _trainingDevice) * 2.0) - 1.0) * 0.05, true);
             _planB = new TorchSharp.Modules.Parameter(
                 zeros(new long[] { PlanKindCount }, dtype: ScalarType.Float32, device: _trainingDevice), true);
             RecreateOptimizer();
@@ -1403,13 +1479,16 @@ public class GenesisNeuralModel
             var hInput = EncodeInput(inputTokens, scratch, _inferenceDevice);
 
             // Route weights live on the training device; move to inference device when they differ.
-            Tensor routeW = _routeWT!, routeB = _routeB!;
+            Tensor routeW = _routeWT!, routeB = _routeB!, tW = _trunkW!, tB = _trunkB!;
             if (_inferenceDevice != _trainingDevice)
             {
                 routeW = _routeWT!.to(_inferenceDevice); scratch.Add(routeW);
                 routeB = _routeB!.to(_inferenceDevice); scratch.Add(routeB);
+                tW = _trunkW!.to(_inferenceDevice); scratch.Add(tW);
+                tB = _trunkB!.to(_inferenceDevice); scratch.Add(tB);
             }
-            var logits = hInput.matmul(routeW) + routeB; scratch.Add(logits);
+            var routeTrunk = ReasoningTrunk(hInput, tW, tB); scratch.Add(routeTrunk);
+            var logits = routeTrunk.matmul(routeW) + routeB; scratch.Add(logits);
             // Perception term: route logits += routePerceptionVec[P] · _routePerceptionW[P, RouteCount].
             if (PerceptionRouting && perception is { Length: > 0 } && _routePerceptionW is not null)
             {
@@ -1507,8 +1586,10 @@ public class GenesisNeuralModel
 
         using var meanEmbHolder = meanEmb;
         using var pv = tensor(PerceptionFloats(perception), new long[] { EditPerceptionDim }, device: _trainingDevice);
-        // logits = h·routeW + perception·routePerceptionW + routeB; grad requested ONLY for _routePerceptionW.
-        using var logits = meanEmb.matmul(_routeWT!) + pv.matmul(_routePerceptionW!) + _routeB!;
+        // logits = trunk(h)·routeW + perception·routePerceptionW + routeB; grad requested ONLY for
+        // _routePerceptionW (the trunk + route head are trained by the autograd CE path, not REINFORCE).
+        using var hTrunk = ReasoningTrunk(meanEmb);
+        using var logits = hTrunk.matmul(_routeWT!) + pv.matmul(_routePerceptionW!) + _routeB!;
         using var logp = nn.functional.log_softmax(logits, 0);
         using var chosen = logp.narrow(0, routeId, 1);
         using var loss = (chosen * (-boundedReward)).sum(); // minimize -reward·logp[routeId]
@@ -1577,7 +1658,9 @@ public class GenesisNeuralModel
 
         using var meanEmbHolder = meanEmb;
         using var pv = tensor(PerceptionFloats(perception), new long[] { EditPerceptionDim }, device: _trainingDevice);
-        using var logits = meanEmb.matmul(headW!) + pv.matmul(perceptionW!) + headB!;
+        // op + plan heads read the reasoning trunk (this trainer is only called for those two heads).
+        using var hTrunk = ReasoningTrunk(meanEmb);
+        using var logits = hTrunk.matmul(headW!) + pv.matmul(perceptionW!) + headB!;
         using var batch = logits.unsqueeze(0);
         using var target = tensor(new long[] { label }, dtype: ScalarType.Int64, device: _trainingDevice);
         using var loss = nn.functional.cross_entropy(batch, target);
@@ -1616,13 +1699,28 @@ public class GenesisNeuralModel
 
         _hiddenSize = hiddenSize;
 
-        // Route head shape is [oldHidden, NumRoutes] — incompatible after resize; reinitialize.
+        // SHARED REASONING TRUNK is [oldHidden, ReasoningTrunkDim] — its first dim is the hidden size, so it is
+        // incompatible after a hidden resize; reinitialize at the new hidden size (the heads below read it).
+        if (_trunkW is not null)
+        {
+            var oldTw = _trunkW;
+            var oldTb = _trunkB;
+            _trunkW = new TorchSharp.Modules.Parameter(
+                ((rand(new long[] { hiddenSize, ReasoningTrunkDim }, device: _trainingDevice) * 2.0) - 1.0) * 0.05, true);
+            _trunkB = new TorchSharp.Modules.Parameter(
+                zeros(new long[] { ReasoningTrunkDim }, dtype: ScalarType.Float32, device: _trainingDevice), true);
+            try { oldTw.Dispose(); } catch { }
+            try { oldTb?.Dispose(); } catch { }
+        }
+
+        // Route head reads the trunk so its shape is [ReasoningTrunkDim, NumRoutes] (hidden-independent), but the
+        // trunk it was trained against just reset, so reinitialize it fresh too.
         if (_routeWT is not null)
         {
             var oldRW = _routeWT;
             var oldRB = _routeB;
             _routeWT = new TorchSharp.Modules.Parameter(
-                ((rand(new long[] { hiddenSize, NumRoutes }, device: _trainingDevice) * 2.0) - 1.0) * 0.05, true);
+                ((rand(new long[] { ReasoningTrunkDim, NumRoutes }, device: _trainingDevice) * 2.0) - 1.0) * 0.05, true);
             _routeB = new TorchSharp.Modules.Parameter(
                 zeros(new long[] { NumRoutes }, dtype: ScalarType.Float32, device: _trainingDevice), true);
             try { oldRW.Dispose(); } catch { }
@@ -1725,6 +1823,9 @@ public class GenesisNeuralModel
         if (_queryOperandB is not null) parameters.Add(_queryOperandB!);
         if (_planWT is not null) parameters.Add(_planWT);
         if (_planB is not null) parameters.Add(_planB!);
+        // SHARED REASONING TRUNK — autograd-trained with the heads it feeds (route/op/plan).
+        if (_trunkW is not null) parameters.Add(_trunkW);
+        if (_trunkB is not null) parameters.Add(_trunkB!);
         _optimizer = torch.optim.SGD(parameters, _currentLearningRate);
     }
 
@@ -1740,7 +1841,8 @@ public class GenesisNeuralModel
         {
             _embT, _wOutT, _bOutT, _routeWT, _routeB,
             _gruWih, _gruWhh, _gruBih, _gruBhh,
-            _queryOpWT, _queryOpB, _queryOperandWT, _queryOperandB, _planWT, _planB, _editWT, _editB
+            _queryOpWT, _queryOpB, _queryOperandWT, _queryOperandB, _planWT, _planB, _editWT, _editB,
+            _trunkW, _trunkB
         })
             if (p is not null) n += p.numel();
         return n;
@@ -1823,6 +1925,11 @@ public class GenesisNeuralModel
         _planWT = null;
         _planB = null;
         _planPerceptionW = null;
+        // SHARED REASONING TRUNK — torn down with the heads it feeds (same discipline).
+        try { _trunkW?.Dispose(); } catch { }
+        try { _trunkB?.Dispose(); } catch { }
+        _trunkW = null;
+        _trunkB = null;
         // SHARED GRU gate weights/biases.
         try { _gruWih?.Dispose(); } catch { }
         try { _gruWhh?.Dispose(); } catch { }
@@ -1906,7 +2013,8 @@ public class GenesisNeuralModel
         // Require an exact NumRoutes-wide head. Old checkpoints store a [hidden, 2] head; those
         // are rejected here and reinitialized as a fresh (untrained) NumRoutes-way head, so the
         // controller degrades to neural-only behaviour instead of loading a mismatched-shape head.
-        return rows == hiddenSize && rows > 0 && cols == NumRoutes && routeBias.Length == cols;
+        // The route head reads the REASONING TRUNK, so its input dim is ReasoningTrunkDim (NOT hiddenSize).
+        return rows == ReasoningTrunkDim && rows > 0 && cols == NumRoutes && routeBias.Length == cols;
     }
 
     private static bool HasUsableEditHead(double[,]? editWeights, double[]? editBias, int hiddenSize)
@@ -1972,4 +2080,8 @@ public sealed record ModelSnapshot(
     double[,]? QueryOperandWeights = null,
     double[]? QueryOperandBias = null,
     double[,]? PlanWeights = null,
-    double[]? PlanBias = null);
+    double[]? PlanBias = null,
+    // SHARED REASONING TRUNK weights [hidden, ReasoningTrunkDim] + bias [ReasoningTrunkDim]. The route/op/plan
+    // heads read this, so it MUST persist or a loaded model routes differently (random trunk × trained head).
+    double[,]? TrunkWeights = null,
+    double[]? TrunkBias = null);

@@ -59,6 +59,9 @@ public static class GenesisCheckpointStore
             QueryOperandBias: snapshot.QueryOperandBias,
             PlanWeights: snapshot.PlanWeights is not null ? MatrixSnapshot.From(snapshot.PlanWeights) : null,
             PlanBias: snapshot.PlanBias,
+            // Persist the shared reasoning trunk so a loaded model routes identically (not random trunk × head).
+            TrunkWeights: snapshot.TrunkWeights is not null ? MatrixSnapshot.From(snapshot.TrunkWeights) : null,
+            TrunkBias: snapshot.TrunkBias,
             Version: GenesisCheckpoint.CurrentVersion);
 
         // BINARY SHARDED storage (see MODEL_STORAGE.md): the NN goes to a sharded model directory, the substrate
@@ -295,7 +298,9 @@ public static class GenesisCheckpointStore
             QueryOperandWeights: payload.QueryOperandWeights?.ToMatrix(),
             QueryOperandBias: payload.QueryOperandBias,
             PlanWeights: payload.PlanWeights?.ToMatrix(),
-            PlanBias: payload.PlanBias);
+            PlanBias: payload.PlanBias,
+            TrunkWeights: payload.TrunkWeights?.ToMatrix(),
+            TrunkBias: payload.TrunkBias);
 
         // Hidden-size growth can't reshape the GRU/edit head — Import rejects the mismatch and
         // reinitialises them; the embeddings/output/route heads still expand.

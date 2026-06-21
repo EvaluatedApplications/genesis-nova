@@ -37,6 +37,8 @@ public sealed class GenesisModularTrainingOrchestrator
         public int SampleEvery { get; init; } = 5;            // emit a few example Q→A diagnostics every N cycles
         public int SampleCount { get; init; } = 6;
         public string WorkDir { get; init; } = Path.Combine(Path.GetTempPath(), "genesis-nova-train");
+        public int AutosaveSeconds { get; init; } = 120;      // checkpoint at least this often DURING training (0 = off);
+                                                              // train cycles otherwise never persist (TrainAsync saves nothing)
     }
 
     public async Task RunAsync(GenesisEvalAppRuntime runtime, ITrainingCurriculum curriculum, Options opt, Action<CycleMetrics>? onCycle, CancellationToken ct)
@@ -46,6 +48,7 @@ public sealed class GenesisModularTrainingOrchestrator
         foreach (var op in curriculum.OperationTokens) { try { runtime.RegisterOperationToken(op); } catch { } } // route triggers (find/contains/calls)
         double baseLr = 0; try { baseLr = runtime.LearningRate; } catch { /* runtime owns LR */ }
         double lastAcc = 0; var cycle = 0;
+        var sinceSave = Stopwatch.StartNew();
 
         while (!ct.IsCancellationRequested)
         {
@@ -88,11 +91,14 @@ public sealed class GenesisModularTrainingOrchestrator
                     uN++;
                     var neural = res.Result.UsedNeuralFallback;
                     var output = res.Result.Output ?? string.Empty;
-                    var pq = GenesisGrader.Quality(output, probe.Allowed, probe.RequiredDepth, neural, probe.RequirePlatonic, probe.AnswerVocabulary);
+                    var pq = GenesisGrader.Quality(output, probe.Allowed, probe.RequiredDepth, neural, probe.RequirePlatonic, probe.AnswerVocabulary, probe.SurfaceStrict);
                     uQ += pq; if (!neural) uPlat++; uConf += res.Result.PlatonicConfidence;
                     if (capture)
                     {
-                        var sample = new ProbeSample(probe.Query, output, pq > 0, !neural);
+                        // value-correct ignoring route — lets the display tell "wrong answer" apart from "right
+                        // answer, but via the NEURAL fallback" (which platonic-mastery grading deliberately scores 0).
+                        var valueCorrect = pq > 0 || GenesisGrader.Quality(output, probe.Allowed, probe.RequiredDepth, neural, false, probe.AnswerVocabulary, probe.SurfaceStrict) > 0;
+                        var sample = new ProbeSample(probe.Query, output, pq > 0, !neural, string.Join(" / ", probe.Allowed), valueCorrect);
                         sampleSeen++;
                         if (samples.Count < opt.SampleCount) samples.Add(sample);
                         else { var j = sampleRng.Next(sampleSeen); if (j < opt.SampleCount) samples[j] = sample; } // reservoir
@@ -107,11 +113,25 @@ public sealed class GenesisModularTrainingOrchestrator
             lastAcc = acc;
             onCycle?.Invoke(new CycleMetrics(cycle, curriculum.Difficulty, loss, acc, purity, conf, sw.Elapsed.TotalSeconds, samples));
 
+            // Periodic AUTOSAVE during training — TrainAsync(savePath:null) persists NOTHING, so a long unattended
+            // run otherwise risked losing every cycle on a crash. Time-based so the cadence is stable regardless of
+            // cycle length; best-effort (a failed save never stops training). Writes the FULL checkpoint (NN +
+            // platonic companion) to the gym's autosave path through the model gate (safe vs. REPL/training).
+            if (opt.AutosaveSeconds > 0 && sinceSave.Elapsed.TotalSeconds >= opt.AutosaveSeconds)
+            {
+                try { await runtime.SaveAsync(runtime.AutoCheckpointPath); } catch { }
+                sinceSave.Restart();
+            }
+
             // Throttle: rest this % of the cycle's own time (floor keeps the UI + model gate responsive).
             var pct = opt.ThrottlePercent?.Invoke() ?? 0;
             var restMs = Math.Min(Math.Max(opt.MinRestMs, sw.Elapsed.TotalMilliseconds * (pct / 100.0)), 600000);
             try { await Task.Delay(TimeSpan.FromMilliseconds(restMs), ct); } catch { break; }
         }
+
+        // Final save on pause/stop — the loop only autosaves on the interval, so without this a stop between
+        // intervals would drop the most recent cycles. (SaveAsync ignores the cancelled ct and still runs.)
+        if (opt.AutosaveSeconds > 0) { try { await runtime.SaveAsync(runtime.AutoCheckpointPath); } catch { } }
 
         if (baseLr > 0) { try { runtime.LearningRate = baseLr; } catch { } }
     }

@@ -22,6 +22,8 @@ public sealed class GenesisRuntimeState
             seed: config.Seed,
             maxNodes: config.MaxPlatonicNodes,
             maxRelations: config.MaxPlatonicRelations);
+        Memory.UseInfoNceRepulsion = false; // C4/C2: MANUAL constant-step repulsion is live — InfoNCE's proportional
+                                            // push is unbounded off the unit sphere (normalization is now clamp-only)
         Conversation = new GenesisConversationMemory();
         Trainer = new GenesisTrainer(Tokenizer, Model, Memory, config);
         Orchestrator = new GenesisTrainingOrchestrator(Trainer, config);
@@ -61,6 +63,8 @@ public sealed class GenesisRuntimeState
             seed: config.Seed,
             maxNodes: config.MaxPlatonicNodes,
             maxRelations: config.MaxPlatonicRelations);
+        Memory.UseInfoNceRepulsion = false; // C4/C2: MANUAL constant-step repulsion is live — InfoNCE's proportional
+                                            // push is unbounded off the unit sphere (normalization is now clamp-only)
         if (platonicSpaceSnapshot is not null)
             Memory.ImportSnapshot(platonicSpaceSnapshot);
         Conversation = new GenesisConversationMemory();

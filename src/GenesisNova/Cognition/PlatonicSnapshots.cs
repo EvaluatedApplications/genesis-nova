@@ -32,4 +32,8 @@ public sealed record PlatonicMemorySnapshot(
     int FaceDimension,
     PlatonicNodeSnapshot[] Nodes,
     PlatonicRelationSnapshot[] Relations,
-    PlatonicChunkSnapshot[]? Chunks = null);
+    PlatonicChunkSnapshot[]? Chunks = null,
+    // Op-tokens (framing/function words excluded from relation formation) are PART of the space's identity — the
+    // relation graph was built excluding them, so the space must carry them so a reload stays consistent and the
+    // coupling guard keeps working. Optional → backward-compatible with checkpoints written before this field.
+    string[]? OperationTokens = null);

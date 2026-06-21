@@ -852,7 +852,10 @@ public sealed class GenesisTrainer
             contextLabel: "concept-plan",
             expectedCorrect: null);
          
-        var planned = ParseConceptPlan(generated.Output);
+        // The planner GENERATES concepts and can emit framing/function words that the mirror path already excludes.
+        // Drop op-tokens here too — otherwise generated "kind/of/for/a" couple into the graph as mega-hubs (the
+        // find-hub-collapse class; see [[nova-find-hub-collapse-fix]]). The mirror path is already op-token-filtered.
+        var planned = ParseConceptPlan(generated.Output).Where(w => !_platonicSpace.IsOperationToken(w)).ToList();
         var mode = ConceptPlanSelectionMode.PlannedDirect;
         IReadOnlyList<string> selected;
         double mirrorCoverage;

@@ -45,6 +45,11 @@ public sealed class PlatonicSpaceMemory
     // PlatonicGeometryDynamicsTests (weak-attraction scenario must still separate).
     private const double MinAttractAffinity = 0.5;
 
+    // C2: the free region is NO LONGER pinned to a unit sphere — the RADIAL axis is live so concepts can sit at
+    // different DISTANCES (related pulled in close; unrelated pushed far out). NormaliseFreeRegion only CLAMPS the
+    // norm to this ceiling as a numeric blow-up guard against repeated repulsion; below it, faces roam freely.
+    private const double MaxFreeNorm = 5.0;
+
     // Contrastive repulsion — ported from the genesis source of truth (GraphAligner.NudgeGraphAlignment,
     // which "push[es] away from sampled non-neighbours ... maintain[s] discriminability between unrelated
     // elements"). Nova previously ONLY attracted observed pairs, so unrelated/fringe concepts drifted
@@ -61,7 +66,24 @@ public sealed class PlatonicSpaceMemory
     private const int RepulsionInterval = 4;
     private const int RepulsionSamples = 10;
     private const double RepulsionRate = 0.02;
-    private const double RepulsionRatio = 0.5; // repulsion strength relative to RepulsionRate floor
+    private const double RepulsionRatio = 0.7; // repulsion strength relative to RepulsionRate floor (raised 0.5→0.7
+                                               // for more discriminability — unrelated need to sit FURTHER apart for
+                                               // KNN to separate them; related pairs are repulsion-EXEMPT so the pull holds)
+
+    // INFONCE PUSH (PLATONIC_BACKPROP.md §3-4): the closed-form gradient of the contrastive loss's repulsion
+    // term — push each negative weighted by softmax(-distance/τ), so the HARDEST (nearest) negative gets the
+    // most gradient automatically (self-scaling; the single InfoNceStep replaces RepulsionRate·RepulsionRatio).
+    // The manual fixed-force push is the gradient of an INDEPENDENT squared-distance loss; this is the gradient
+    // of the *softmax* InfoNCE loss — the literal "backprop the geometry" step, computed analytically because
+    // the faces are double[] (same gradient, no per-node torch tensors). Default OFF: opt-in, A/B vs the manual
+    // push on the geometry gate before trusting it on the live model.
+    public bool UseInfoNceRepulsion { get; set; }
+    private const double InfoNceStep = 0.6;   // C4: de-spiked from 0.9. NOTE: InfoNCE is now OFF in the live runtime
+                                              // (UseInfoNceRepulsion=false) because its push is PROPORTIONAL to the gap
+                                              // and so grows unbounded OFF the unit sphere (C2 removed the sphere). The
+                                              // stable MANUAL constant-step push is live. This only matters if InfoNCE
+                                              // is re-enabled — which would require restoring some normalization.
+    private const double InfoNceTau = 0.25;
     private int _observationsSinceRepulsion;
     private int _repulsionPassCount;
 
@@ -337,6 +359,16 @@ public sealed class PlatonicSpaceMemory
         if (left.Equals(right, StringComparison.OrdinalIgnoreCase))
             return;
 
+        // OP-TOKEN COUPLING GUARD — the single choke point for relation formation. An operation/framing token
+        // ("of"/"plus"/"add"/"is"…) may couple ONLY to a reserved face marker (its op→face routing affinity,
+        // e.g. add↔face:poly); it must NEVER couple to a CONTENT concept. Guarding HERE blocks framing-word
+        // mega-hubs (of↔pear, plus↔+, is↔greater) from EVERY caller — the per-caller mirror filter missed the
+        // learning-enabled preview/concept-plan generations, which leaked these edges. See
+        // [[nova-find-hub-collapse-fix]]. (Returning before GetOrCreate also avoids minting the framing-word node.)
+        if ((IsOperationToken(left) && !IsReservedConcept(right)) ||
+            (IsOperationToken(right) && !IsReservedConcept(left)))
+            return;
+
         var a = GetOrCreate(left, new[] { right });
         var b = GetOrCreate(right, new[] { left });
         a.ObservationCount++;
@@ -523,7 +555,8 @@ public sealed class PlatonicSpaceMemory
                    r.FailureCount,
                    r.LastUsedStep))
                .ToArray(),
-            Chunks: _chunks.Export());
+            Chunks: _chunks.Export(),
+            OperationTokens: _operationTokens.ToArray());
     }
 
     public PlatonicQueryResult QueryConceptChain(
@@ -795,6 +828,14 @@ public sealed class PlatonicSpaceMemory
         _nodes.Clear();
         _relationIndex.Clear();
         _lattice.Clear();
+
+        // Restore op-tokens from the snapshot so a mid-run reload (e.g. RefreshLatestStateForReplPredict after an
+        // autosave) doesn't wipe the registry and re-open the framing-word hub leak. Additive: any tokens already
+        // registered for this session are kept, the persisted set is merged in.
+        if (snapshot.OperationTokens is not null)
+            foreach (var token in snapshot.OperationTokens)
+                if (!string.IsNullOrWhiteSpace(token))
+                    _operationTokens.Add(Normalize(token));
 
         foreach (var node in snapshot.Nodes)
         {
@@ -1181,11 +1222,11 @@ public sealed class PlatonicSpaceMemory
     /// </summary>
     private void MessagePassUpdate(ConceptNode node, double[] neighbourFace, double alpha, double affinity)
     {
-        // Numeric concepts are ground truth — never mutated (matches the source vocabulary skip);
-        // their canonical poly/log faces are recomputed on demand.
-        if (IsFrozenConcept(node.Name))
-            return;
-
+        // Numbers move their NON-identity (char/word) region like any concept — pulled toward their word
+        // partners (7<->"seven") and pushed from unrelated — while RestoreFrozenIdentity below keeps the
+        // poly/log VALUE exact (IdentityRange("7") = [0,42), so [42,dim) is its free region). The old
+        // whole-node freeze left every number's word face at the origin (word=0.000), so all numbers were
+        // indistinguishable there and number<->word retrieval collapsed to a single constant.
         var dim = _faceDimension;
         var original = (double[])node.PositiveFace.ToArray();
         var updated = node.PositiveFace;
@@ -1230,10 +1271,12 @@ public sealed class PlatonicSpaceMemory
             return;
 
         var snapshot = _nodes.Values.ToArray();
-        // Repel ONLY from MUTABLE targets. Frozen numbers (often the MAJORITY of nodes at scale — e.g. ~72% in
-        // the live gym) never move AND don't need separating from text concepts; sampling them wasted most of
-        // the repulsion budget, so mutable-vs-mutable separation was starved and the space collapsed. Sampling
-        // the mutable pool restores effective repulsion regardless of how many numbers exist.
+        // Repel ONLY from MUTABLE (non-number) targets, and move only those. Numbers reach their place in the
+        // word face by ATTRACTION to their word partner (7<->"seven"), NOT by repulsion: actively scattering the
+        // ~60% of nodes that are numbers INTO the semantic word-space turns them into distractors that break
+        // text-vs-text retrieval (measured: synonym 100%->19%, category 25%->0%). Attraction-only settles each
+        // number ONTO its (already-separated) word, so digit<->word works without numbers invading unrelated
+        // text retrieval. RestoreFrozenIdentity still keeps every number's poly/log value exact.
         var targets = snapshot.Where(x => !IsFrozenConcept(x.Name) && x.PositiveFace is { Length: > 0 }).ToArray();
         if (targets.Length < 2)
             return;
@@ -1242,38 +1285,69 @@ public sealed class PlatonicSpaceMemory
 
         foreach (var node in snapshot)
         {
-            if (IsFrozenConcept(node.Name)) // ground-truth numerics never move
+            if (IsFrozenConcept(node.Name)) // numbers don't get pushed — they ride attraction to their word
                 continue;
 
             var original = (double[])node.PositiveFace.Clone();
             var updated = node.PositiveFace;
             var rng = new Random(unchecked(StableHash(node.Name) + _repulsionPassCount));
 
-            var samples = Math.Min(RepulsionSamples, targets.Length - 1);
-            for (var s = 0; s < samples; s++)
+            // SEMI-HARD NEGATIVES (PLATONIC_BACKPROP.md §3): sample a candidate pool, score by LIVE distance,
+            // and push from the NEAREST truly-unrelated ones — the confusers actually colliding NOW — rather
+            // than uniform-random draws (which mostly hit already-far concepts and under-cover at scale). Uses
+            // LIVE faces (not the throttled VP-Tree, whose stale targets let attraction collapse the space).
+            // EXEMPT both direct edges (1-hop) AND shared-neighbour pairs (2-hop): co-members of a hub are
+            // related VIA the hub even without a direct edge, so pushing them apart would shred clusters. This
+            // mirrors the pull (anchored on the node's real neighbourhood) — the InfoNCE skeleton.
+            var nodeNbrs = new HashSet<string>(_lattice.GetRelationalNeighbors(node.Name), StringComparer.OrdinalIgnoreCase);
+            var pool = Math.Min(RepulsionSamples * 3, targets.Length);
+            var cands = new List<(ConceptNode Other, double Dist2)>(pool);
+            for (var c = 0; c < pool; c++)
             {
                 var other = targets[rng.Next(targets.Length)];
-                if (ReferenceEquals(other, node))
-                    continue;
-                // Repulsion is ONLY for unrelated pairs — a confirmed relation is exempt (it is what
-                // earns proximity). This is the contrastive half: attract related, repel everything else.
-                if (_relationIndex.ContainsKey(RelationKey(node.Name, other.Name)))
-                    continue;
+                if (ReferenceEquals(other, node)) continue;
+                if (_relationIndex.ContainsKey(RelationKey(node.Name, other.Name))) continue; // 1-hop edged = exempt
+                if (nodeNbrs.Count > 0 && _lattice.GetRelationalNeighbors(other.Name).Any(nodeNbrs.Contains))
+                    continue; // 2-hop (shared neighbour) = related via a hub → exempt
+                var of0 = other.PositiveFace;
+                var d2 = 0.0;
+                for (var d = 0; d < dim && d < of0.Length; d++) { var dx = updated[d] - of0[d]; d2 += dx * dx; }
+                if (d2 >= 1e-12) cands.Add((other, d2));
+            }
+            cands.Sort((x, y) => x.Dist2.CompareTo(y.Dist2)); // nearest first = hardest negatives
+            var pushCount = Math.Min(RepulsionSamples, cands.Count);
 
-                var of = other.PositiveFace;
-                var dist2 = 0.0;
-                for (var d = 0; d < dim && d < of.Length; d++)
+            if (UseInfoNceRepulsion && pushCount > 0)
+            {
+                // INFONCE GRADIENT: weight each negative by softmax(-distance/τ) — the hardest (nearest) negative
+                // gets the most push, self-scaling (Σw=1). This IS backprop of the contrastive loss's repulsion
+                // term (analytic, the faces being double[]). One InfoNceStep replaces the force constants.
+                var w = new double[pushCount];
+                var maxSim = double.NegativeInfinity;
+                for (var s = 0; s < pushCount; s++) { w[s] = -Math.Sqrt(cands[s].Dist2) / InfoNceTau; if (w[s] > maxSim) maxSim = w[s]; }
+                var sumExp = 0.0;
+                for (var s = 0; s < pushCount; s++) { w[s] = Math.Exp(w[s] - maxSim); sumExp += w[s]; }
+                for (var s = 0; s < pushCount; s++)
                 {
-                    var dx = updated[d] - of[d];
-                    dist2 += dx * dx;
+                    var of = cands[s].Other.PositiveFace;
+                    var g = InfoNceStep * (w[s] / sumExp);
+                    for (var d = 0; d < dim && d < of.Length; d++)
+                        updated[d] += g * (updated[d] - of[d]);
                 }
-                if (dist2 < 1e-12)
-                    continue;
-
-                // Repulsive force inversely proportional to distance (genesis: alpha/ max(dist,0.01)).
-                var force = (RepulsionRate * RepulsionRatio) / Math.Max(Math.Sqrt(dist2), 0.01);
-                for (var d = 0; d < dim && d < of.Length; d++)
-                    updated[d] += force * (updated[d] - of[d]);
+            }
+            else
+            {
+                for (var s = 0; s < pushCount; s++)
+                {
+                    var of = cands[s].Other.PositiveFace;
+                    var dist2 = 0.0;
+                    for (var d = 0; d < dim && d < of.Length; d++) { var dx = updated[d] - of[d]; dist2 += dx * dx; }
+                    if (dist2 < 1e-12) continue;
+                    // Repulsive force inversely proportional to distance (genesis: alpha / max(dist, 0.01)).
+                    var force = (RepulsionRate * RepulsionRatio) / Math.Max(Math.Sqrt(dist2), 0.01);
+                    for (var d = 0; d < dim && d < of.Length; d++)
+                        updated[d] += force * (updated[d] - of[d]);
+                }
             }
 
             // Identity never drifts; free region re-normalised; hard G4 complement re-enforced.
@@ -1525,10 +1599,10 @@ public sealed class PlatonicSpaceMemory
         }
 
         var norm = Math.Sqrt(sum);
-        if (norm < 1e-15)
-            return;
+        if (norm <= MaxFreeNorm)
+            return; // C2: free to roam radially below the cap — only clamp the explosive tail
 
-        var inv = 1.0 / norm;
+        var inv = MaxFreeNorm / norm;
         for (var i = 0; i < face.Length; i++)
         {
             if (i >= idStart && i < idEnd) continue;

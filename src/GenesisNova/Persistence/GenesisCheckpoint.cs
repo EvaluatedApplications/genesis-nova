@@ -41,6 +41,9 @@ public sealed record GenesisCheckpoint(
     double[]? QueryOperandBias = null,
     MatrixSnapshot? PlanWeights = null,
     double[]? PlanBias = null,
+    // SHARED REASONING TRUNK (route/op/plan heads read it). Null on pre-trunk checkpoints (lazily reinit on load).
+    MatrixSnapshot? TrunkWeights = null,
+    double[]? TrunkBias = null,
     int Version = 0)
 {
     public const int CurrentVersion = 4;

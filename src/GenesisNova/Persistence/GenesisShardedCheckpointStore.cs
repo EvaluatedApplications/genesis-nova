@@ -50,6 +50,7 @@ public static class GenesisShardedCheckpointStore
             QueryOpWeights = Strip(nn.QueryOpWeights),
             QueryOperandWeights = Strip(nn.QueryOperandWeights),
             PlanWeights = Strip(nn.PlanWeights),
+            TrunkWeights = Strip(nn.TrunkWeights),
             PlatonicSpace = null,
         };
         AddJson(sections, shardsDir, "meta", meta);
@@ -64,6 +65,7 @@ public static class GenesisShardedCheckpointStore
         AddF64(sections, shardsDir, "queryOpWeights", nn.QueryOpWeights);
         AddF64(sections, shardsDir, "queryOperandWeights", nn.QueryOperandWeights);
         AddF64(sections, shardsDir, "planWeights", nn.PlanWeights);
+        AddF64(sections, shardsDir, "trunkWeights", nn.TrunkWeights);
 
         WriteManifest(modelDir, shardsDir, nn.Version, sections);
     }
@@ -100,6 +102,8 @@ public static class GenesisShardedCheckpointStore
             cp = cp with { QueryOperandWeights = cp.QueryOperandWeights with { Values = ReadF64(manifest, shardsDir, "queryOperandWeights") } };
         if (manifest.Sections.ContainsKey("planWeights") && cp.PlanWeights is not null)
             cp = cp with { PlanWeights = cp.PlanWeights with { Values = ReadF64(manifest, shardsDir, "planWeights") } };
+        if (manifest.Sections.ContainsKey("trunkWeights") && cp.TrunkWeights is not null)
+            cp = cp with { TrunkWeights = cp.TrunkWeights with { Values = ReadF64(manifest, shardsDir, "trunkWeights") } };
         return cp;
     }
 

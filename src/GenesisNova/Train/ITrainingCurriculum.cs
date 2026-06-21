@@ -43,7 +43,7 @@ public interface ITrainingCurriculum
 /// valid answers are required at the current difficulty (1 for a single-answer cue).</summary>
 public readonly record struct TrainingProbe(
     string Query, IReadOnlyList<string> Allowed, int RequiredDepth,
-    IReadOnlyList<string>? AnswerVocabulary = null, bool RequirePlatonic = true);
+    IReadOnlyList<string>? AnswerVocabulary = null, bool RequirePlatonic = true, bool SurfaceStrict = false);
 
 /// <summary>The graded result of one cycle, fed back to the curriculum.</summary>
 public readonly record struct CycleGrade(double Accuracy, double RoutePurity, double Confidence);
@@ -55,4 +55,4 @@ public readonly record struct CycleMetrics(
 
 /// <summary>A periodic diagnostic sample — a probe query, the model's output, whether it was correct, and
 /// whether it routed platonic (vs neural fallback).</summary>
-public readonly record struct ProbeSample(string Query, string Output, bool Correct, bool Platonic);
+public readonly record struct ProbeSample(string Query, string Output, bool Correct, bool Platonic, string Expected = "", bool ValueCorrect = false);

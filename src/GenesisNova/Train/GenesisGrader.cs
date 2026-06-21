@@ -23,15 +23,50 @@ public static class GenesisGrader
         NumberWordVocabulary.Entries.ToDictionary(e => e.Word.ToLowerInvariant(), e => (long)e.Value);
 
     public static double Quality(string output, IReadOnlyList<string> allowed, int requiredDepth, bool usedNeuralFallback, bool requirePlatonic,
-        IReadOnlyList<string>? answerVocabulary = null)
+        IReadOnlyList<string>? answerVocabulary = null, bool surfaceStrict = false)
     {
         if (requirePlatonic && usedNeuralFallback) return 0.0;
         if (allowed is null || allowed.Count == 0 || string.IsNullOrWhiteSpace(output)) return 0.0;
+
+        // FORMAT request ("... in words" / "... as a number"): the SURFACE *is* the answer, so grade the literal
+        // form, NOT value-equivalence — otherwise "3 plus 4 in words" would accept "7". Value-grading still rules
+        // every value question (arithmetic/retrieval); this is the narrow format-conversion exception.
+        if (surfaceStrict) return SurfaceQuality(output, allowed, requiredDepth, answerVocabulary);
 
         var expectedValues = allowed.Select(TryValue).Where(v => v.HasValue).Select(v => v!.Value).ToHashSet();
         var numericDomain = expectedValues.Count > 0 && allowed.All(a => TryValue(a).HasValue);
         return numericDomain ? NumericQuality(output, expectedValues, requiredDepth)
                              : SetQuality(output, allowed, requiredDepth, answerVocabulary);
+    }
+
+    // Surface-strict: the requested FORMAT is the answer. TOKEN-level occurrence of the exact form (so "17" does
+    // NOT satisfy "7" and "the answer is seven" DOES satisfy "seven"); NO value-equivalence fallback, so the digit
+    // "7" never satisfies a request for the word "seven" (and vice-versa). Filler is free; runaway length / a
+    // competing same-type form is taxed.
+    private static double SurfaceQuality(string output, IReadOnlyList<string> allowed, int requiredDepth, IReadOnlyList<string>? vocab)
+    {
+        var outTokens = output.Split(new[] { ' ', ',', '.', '!', '?', ';', ':', '\t', '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries)
+            .Select(Canon).Where(t => t.Length > 0).ToList();
+        if (outTokens.Count == 0) return 0.0;
+        var matched = allowed.Where(a => { var c = Canon(a); return c.Length > 0 && outTokens.Contains(c); })
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        if (matched.Count == 0) return 0.0;
+        var required = Math.Max(1, Math.Min(requiredDepth, allowed.Count));
+        var coverage = Math.Min(matched.Count, required) / (double)required;
+
+        double cleanliness;
+        if (vocab is { Count: > 0 })
+        {
+            var allowedSet = new HashSet<string>(allowed.Select(Canon));
+            var competing = outTokens.Distinct().Count(t => !allowedSet.Contains(t) && vocab.Any(v => Canon(v) == t));
+            cleanliness = Math.Clamp(1.0 - 0.5 * competing, 0.2, 1.0);
+        }
+        else
+        {
+            var excess = Math.Max(0, outTokens.Count - matched.Count - 4); // ~4 filler tokens free; runaway taxed
+            cleanliness = Math.Clamp(1.0 - 0.1 * excess, 0.5, 1.0);
+        }
+        return coverage * cleanliness;
     }
 
     // Numeric domain: the answer is a number → grade by which NUMBERS appear, ignore everything else.

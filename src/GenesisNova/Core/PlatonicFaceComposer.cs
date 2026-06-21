@@ -56,6 +56,16 @@ internal static class PlatonicFaceComposer
             : GetFreshEmbedding(input.Trim(), dim);  // single token → numeric or char-face spelling
 
         SeedLearnableDims(embedding, input, dim);
+        // C1: give every NON-numeric concept a distinct near-orthogonal IDENTITY in the word face [202,dim) — the
+        // region FaceAwareDistance actually measures. That region previously held only ±0.01 seed noise
+        // (AddWordIdentity existed but was never called), so concepts were born indistinguishable there and ALL
+        // separation had to be manufactured by push/pull. Now they are born ~orthogonal; attraction pulls related
+        // ones together. Numbers are excluded (their identity is the value face; their word face moves by attraction).
+        var single = input.Trim();
+        var isSingleNumber = tokens.Length == 1 &&
+            double.TryParse(single, NumericStyle, CultureInfo.InvariantCulture, out _);
+        if (!isSingleNumber)
+            AddWordIdentity(embedding, input, dim);
         return embedding;
     }
 

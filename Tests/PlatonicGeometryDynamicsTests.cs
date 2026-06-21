@@ -65,7 +65,28 @@ public sealed class PlatonicGeometryDynamicsTests
             $"star-hub clusters must not collapse; separation={g.Separation:F3} (related {g.RelatedMean:F3}, unrelated {g.UnrelatedMean:F3})");
     }
 
-    [Fact] // AT SCALE — mirrors the live gym (hundreds of sparsely-related concepts). With repulsion sampled at
+    [Fact] // INFONCE PUSH — the closed-form gradient of the contrastive loss's repulsion term (backprop of the
+           // geometry, analytic). Must separate at least as well as the manual fixed-force push on the same hub.
+    public void PushPull_InfoNceGradient_Separates()
+    {
+        var space = new PlatonicSpaceMemory(faceDimension: ProductionDims.FaceDimension, seed: 7)
+        {
+            UseInfoNceRepulsion = true, // softmax-weighted negatives instead of fixed-force
+        };
+        const int C = 4, K = 6;
+        for (var epoch = 0; epoch < 40; epoch++)
+            for (var c = 0; c < C; c++)
+                for (var i = 0; i < K; i++)
+                    space.ObserveContradiction($"c{c}item{i}", $"class{c}", 0.0);
+
+        var g = space.SummarizePushPullGeometry();
+        _out.WriteLine($"[infonce] related(pull) {g.RelatedMean:F3}  unrelated(push) {g.UnrelatedMean:F3}  separation {g.Separation:F3}");
+        Assert.True(g.Separation > 0.10,
+            $"InfoNCE-gradient push must separate (≈ the manual push's hub result); separation={g.Separation:F3} " +
+            $"(related {g.RelatedMean:F3}, unrelated {g.UnrelatedMean:F3})");
+    }
+
+    [SlowFact] // AT SCALE — mirrors the live gym (hundreds of sparsely-related concepts). With repulsion sampled at
            // a FIXED count and run LESS often than attraction, the space collapses at this size even though the
            // tiny 20-node tests pass. This is the gate that actually reflects the running model.
     public void PushPull_AtScale_ManySparseConcepts_DoNotCollapse()

@@ -1595,8 +1595,14 @@ public class MainWindow : Form
             }
             UpdateGymStats(m.Cycle, m.Difficulty, m.Loss, m.Accuracy, m.RoutePurity, m.Confidence);
             AppendAutonomousOutput($"[train] cyc {m.Cycle} diff {m.Difficulty} | loss {m.Loss:F3} acc {m.Accuracy:P0} route {m.RoutePurity:P0} conf {m.Confidence:F2} | {m.CycleSeconds:F0}s");
-            foreach (var s in m.Samples)   // periodic example Q→A diagnostics (✓/✗ correct, P=platonic / n=neural)
-                AppendAutonomousOutput($"      {(s.Correct ? "✓" : "✗")} {(s.Platonic ? "P" : "n")}  \"{s.Query}\"  →  \"{s.Output}\"");
+            foreach (var s in m.Samples)   // ✓ correct+platonic / ~ right value but NEURAL (not platonic) / ✗ wrong
+            {
+                var mark = s.Correct ? "✓" : s.ValueCorrect ? "~" : "✗";
+                var note = s.Correct ? ""
+                         : s.ValueCorrect ? "  (right value, but NEURAL route — gym credits only the platonic path)"
+                         : string.IsNullOrEmpty(s.Expected) ? "" : $"  (want \"{s.Expected}\")";
+                AppendAutonomousOutput($"      {mark} {(s.Platonic ? "P" : "n")}  \"{s.Query}\"  →  \"{s.Output}\"{note}");
+            }
         }, ct);
         AppendAutonomousOutput("[train] paused — model persists (AutoPersist).");
     }

@@ -40,30 +40,7 @@ public sealed class LanguageCreator : IExampleCreator
         => question.Trim();
 
     private static string[] ExpandSynonyms(string[] templates, IReadOnlyDictionary<string, string[]> replacements)
-    {
-        var expanded = templates.ToList();
-        foreach (var (token, values) in replacements)
-        {
-            if (values.Length == 0)
-                continue;
-
-            var next = new List<string>(expanded.Count * values.Length);
-            foreach (var template in expanded)
-            {
-                if (!template.Contains(token, StringComparison.Ordinal))
-                {
-                    next.Add(template);
-                    continue;
-                }
-
-                foreach (var value in values)
-                    next.Add(template.Replace(token, value, StringComparison.Ordinal));
-            }
-            expanded = next;
-        }
-
-        return expanded.Distinct(StringComparer.Ordinal).ToArray();
-    }
+        => CreatorText.ExpandSynonyms(templates, replacements);
 }
 
 /// <summary>Pre-built language creators with common Q&A pairs.</summary>

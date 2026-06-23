@@ -218,41 +218,12 @@ public sealed class ArithmeticCreator : IExampleCreator
     };
 
     private static string[] ExpandSynonyms(string[] templates, IReadOnlyDictionary<string, string[]> replacements)
-    {
-        var expanded = templates.ToList();
-        foreach (var (token, values) in replacements)
-        {
-            if (values.Length == 0)
-                continue;
-
-            var next = new List<string>(expanded.Count * values.Length);
-            foreach (var template in expanded)
-            {
-                if (!template.Contains(token, StringComparison.Ordinal))
-                {
-                    next.Add(template);
-                    continue;
-                }
-
-                foreach (var value in values)
-                    next.Add(template.Replace(token, value, StringComparison.Ordinal));
-            }
-            expanded = next;
-        }
-
-        return expanded.Distinct(StringComparer.Ordinal).ToArray();
-    }
+        => CreatorText.ExpandSynonyms(templates, replacements);
 
     private static string F(double v) =>
         Math.Abs(v - Math.Round(v)) < 1e-9
             ? ((long)Math.Round(v)).ToString(CultureInfo.InvariantCulture)
             : v.ToString("F2", CultureInfo.InvariantCulture);
 
-    private static int StableHash(string s, int extra)
-    {
-        uint h = 2166136261u;
-        foreach (char c in s) { h ^= (uint)c; h *= 16777619u; }
-        h ^= (uint)extra; h *= 16777619u;
-        return (int)h;
-    }
+    private static int StableHash(string s, int extra) => CreatorText.StableHash(s, extra);
 }

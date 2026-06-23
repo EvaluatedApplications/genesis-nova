@@ -1,26 +1,37 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 
 namespace GenesisNova.Train;
 
 /// <summary>
-/// FOCUSED multi-trainer curriculum — the autonomous trainer's proven scheduling, ported: train ONE unit at a
-/// time to mastery while MASTERED (and focus-EXHAUSTED) units ride along as light REPLAY; later units wait their
-/// turn. "Focused converges where mixed oscillates." Each unit is graded independently (orchestrator
-/// <see cref="ITrainingCurriculum.Units"/>) so it tracks its OWN mastery; the focus is the first unit that is
-/// neither mastered nor exhausted, and a regressed unit AUTO-REOPENS (mastery flips → first-unmastered again).
+/// FOCUSED multi-trainer curriculum — the autonomous trainer's proven scheduling, ported: keep EXACTLY ONE unit
+/// in focused depth at a time while the already-introduced units RIDE ALONG as light, CAPPED replay. The focus
+/// ROTATES: a unit holds focus until it masters OR spends its per-turn budget, then hands off to the next
+/// not-yet-mastered unit (round-robin, wrapping). "Focused converges where mixed oscillates."
+///
+/// The rotation is the whole point for UNBOUNDED units (the gym muscles, which never truly "master"): they hand
+/// off by spending a turn, then the focus comes back around and gives them a FRESH turn — so the curriculum
+/// SUSTAINS one-at-a-time depth forever instead of latching every muscle "exhausted" and collapsing into a heavy,
+/// uncapped all-creators mix (the very "mixed oscillates" regime this exists to avoid). Bounded creator curricula
+/// still drive to depth and drop out once genuinely MASTERED; only when ALL units have truly mastered does it go
+/// to terminal light rehearsal. Each unit is graded independently (orchestrator <see cref="ITrainingCurriculum.Units"/>)
+/// so it tracks its OWN mastery; a regressed (un-mastered) unit re-enters the rotation automatically.
 /// </summary>
 public sealed class FocusedCurriculum : ITrainingCurriculum
 {
     private readonly List<FocusUnit> _all;
     private readonly int _replayCap;
+    private readonly int _rehearsalRidersPerCycle;
+    private int _riderCursor;
     private FocusUnit? _focus;
 
     public FocusedCurriculum(IEnumerable<ITrainingCurriculum> children, double masteryBar = 0.80,
-        int stabilityWindow = 3, int focusBudget = 30, int replayCap = 8)
+        int stabilityWindow = 3, int focusBudget = 30, int replayCap = 8, int rehearsalRidersPerCycle = 3)
     {
         _all = children.Select(c => new FocusUnit(c, masteryBar, stabilityWindow, focusBudget)).ToList();
         _replayCap = replayCap;
+        _rehearsalRidersPerCycle = Math.Max(1, rehearsalRidersPerCycle);
     }
 
     public string Name => "focused(" + string.Join(",", _all.Select(u => u.Name)) + ")";
@@ -29,26 +40,60 @@ public sealed class FocusedCurriculum : ITrainingCurriculum
 
     public IReadOnlyList<(string Input, string Output)> NextTrainBatch()
     {
-        // FOCUS = first unit neither mastered nor exhausted (auto-reopen makes a regressed unit first again).
-        _focus = _all.FirstOrDefault(u => !u.Mastered && !u.Exhausted);
+        // ROTATE the focus: the current focus keeps depth until it masters or spends its per-turn budget, then we
+        // hand off (reset its turn so a later pass gives it a fresh budget) to the next not-yet-mastered unit.
+        if (_focus is null || _focus.Mastered || _focus.TurnExhausted)
+        {
+            _focus?.ResetTurn();                  // hand off — the just-finished focus gets a fresh budget next pass
+            _focus = NextNotMastered(_focus);     // round-robin to the next un-mastered unit (null IFF all mastered)
+            _focus?.BeginTurn();                  // marks it introduced + starts its turn counter
+        }
         foreach (var u in _all) u.IsFocus = u == _focus;
+
         var batch = new List<(string Input, string Output)>();
-        if (_focus is null) { foreach (var u in _all) batch.AddRange(u.NextTrainBatch()); return batch; } // all done → maintenance
-        batch.AddRange(_focus.NextTrainBatch());                                                           // the focus trains fully
-        foreach (var u in _all)
-            if (u != _focus && (u.Mastered || u.Exhausted)) batch.AddRange(u.NextTrainBatch().Take(_replayCap)); // riders: light replay
+        if (_focus is null)                                                  // every unit genuinely MASTERED → terminal
+            { AppendRehearsalWindow(batch, _all); return batch; }            // light, rotating rehearsal (no focus left)
+        batch.AddRange(_focus.NextTrainBatch());                             // the focus trains fully (depth) — the majority
+        var riders = _all.Where(u => u != _focus && (u.Mastered || u.HasBeenFocused)).ToList(); // introduced/mastered
+        AppendRehearsalWindow(batch, riders);                                // only a BOUNDED rotating window of them
         return batch;
     }
 
-    // Grade only the ACTIVE set (focus + mastered/exhausted riders) — held-back units don't waste probes; they
-    // are unmastered by definition until it's their turn. Read AFTER NextTrainBatch (which sets the focus).
+    // Rehearse only a bounded, ROTATING WINDOW of the introduced muscles each cycle (not ALL of them): N capped
+    // riders summed across many muscles otherwise outweigh the single focus and the batch reads as a full "mix"
+    // again. The window rotates so every rider is still rehearsed in turn (retention preserved); combined with the
+    // rotating focus, coverage stays complete while the FOCUS remains the clear majority regardless of muscle count.
+    private void AppendRehearsalWindow(List<(string Input, string Output)> batch, IReadOnlyList<FocusUnit> riders)
+    {
+        if (riders.Count == 0) return;
+        var window = Math.Min(riders.Count, _rehearsalRidersPerCycle);
+        for (var i = 0; i < window; i++)
+            batch.AddRange(riders[(_riderCursor + i) % riders.Count].NextTrainBatch().Take(_replayCap));
+        _riderCursor = (_riderCursor + window) % riders.Count;
+    }
+
+    // The next not-yet-mastered unit AFTER `from` in round-robin order (wraps). Null only if every unit mastered.
+    private FocusUnit? NextNotMastered(FocusUnit? from)
+    {
+        if (_all.Count == 0) return null;
+        var start = from is null ? -1 : _all.IndexOf(from);
+        for (var step = 1; step <= _all.Count; step++)
+        {
+            var u = _all[(start + step) % _all.Count];   // start=-1 → begins at index 0 and sweeps once
+            if (!u.Mastered) return u;
+        }
+        return null;
+    }
+
+    // Grade only the ACTIVE set (focus + introduced/mastered riders) — held-back, not-yet-introduced units don't
+    // waste probes; they are unmastered by definition until the rotation reaches them. Read AFTER NextTrainBatch.
     public IReadOnlyList<ITrainingCurriculum> Units
     {
         get
         {
             var active = new List<ITrainingCurriculum>();
             if (_focus is not null) active.Add(_focus);
-            foreach (var u in _all) if (u != _focus && (u.Mastered || u.Exhausted)) active.Add(u);
+            foreach (var u in _all) if (u != _focus && (u.Mastered || u.HasBeenFocused)) active.Add(u);
             return active.Count > 0 ? active : _all.Cast<ITrainingCurriculum>().ToList();
         }
     }
@@ -58,14 +103,15 @@ public sealed class FocusedCurriculum : ITrainingCurriculum
 }
 
 /// <summary>Wraps a child curriculum with mastery tracking for <see cref="FocusedCurriculum"/>: MASTERED = held
-/// the bar for a stability window AND reached the drive-to-depth difficulty; EXHAUSTED = spent its FocusBudget of
-/// focus cycles without mastering (then rides as replay); a regression un-masters it (auto-reopen).</summary>
+/// the bar for a stability window AND reached the drive-to-depth difficulty (then it drops out of the rotation);
+/// a TURN ends when the focus spends its per-turn budget without mastering (hands off, then rides as capped
+/// replay until the rotation comes back); a regression un-masters it so it re-enters the rotation (auto-reopen).</summary>
 public sealed class FocusUnit : ITrainingCurriculum
 {
     private readonly ITrainingCurriculum _inner;
     private readonly double _bar;
     private readonly int _window, _focusBudget;
-    private int _streak;
+    private int _streak, _turnAttempts;
 
     public FocusUnit(ITrainingCurriculum inner, double bar, int window, int focusBudget)
     {
@@ -73,9 +119,12 @@ public sealed class FocusUnit : ITrainingCurriculum
     }
 
     public bool IsFocus { get; set; }
-    public int FocusAttempts { get; private set; }
+    public bool HasBeenFocused { get; private set; }            // introduced at least once → eligible to rehearse
     public bool Mastered { get; private set; }
-    public bool Exhausted => !Mastered && FocusAttempts >= _focusBudget;
+    public bool TurnExhausted => _turnAttempts >= _focusBudget; // this TURN is spent (per-turn, resets on handoff)
+
+    public void BeginTurn() { HasBeenFocused = true; _turnAttempts = 0; } // claim focus: introduce + fresh budget
+    public void ResetTurn() => _turnAttempts = 0;                         // hand off: clear the spent turn counter
 
     public string Name => _inner.Name;
     public int Difficulty => _inner.Difficulty;
@@ -86,7 +135,7 @@ public sealed class FocusUnit : ITrainingCurriculum
     public void RecordCycle(CycleGrade grade)
     {
         _inner.RecordCycle(grade);                       // inner advances its OWN difficulty (drive-to-depth)
-        if (IsFocus && !Mastered) FocusAttempts++;
+        if (IsFocus && !Mastered) _turnAttempts++;       // only the focus spends its turn budget
         if (grade.Accuracy >= _bar)
         {
             _streak++;
@@ -95,7 +144,7 @@ public sealed class FocusUnit : ITrainingCurriculum
         else
         {
             _streak = 0;
-            if (Mastered && grade.Accuracy < _bar - 0.15) Mastered = false; // regression → auto-reopen
+            if (Mastered && grade.Accuracy < _bar - 0.15) Mastered = false; // regression → auto-reopen (re-enters rotation)
         }
     }
 }

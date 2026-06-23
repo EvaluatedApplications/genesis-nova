@@ -84,44 +84,6 @@ public sealed class GenesisTrainingOrchestrator
         _config = config ?? new GenesisNovaConfig();
     }
 
-    /// <summary>Generate training examples from registered creators (no route labels).</summary>
-    public static List<GenesisExample> GenerateExamplesFromCreators(
-        int count,
-        int difficulty = 0,
-        Random? rng = null)
-    {
-        rng ??= new Random();
-        var examples = new List<GenesisExample>();
-        var creators = ExampleCreatorRegistry.All;
-
-        // Distribute examples evenly across creators
-        int perCreator = count / creators.Count;
-        int remainder = count % creators.Count;
-
-        for (int creatorIndex = 0; creatorIndex < creators.Count; creatorIndex++)
-        {
-            var creator = creators[creatorIndex];
-            int toGenerate = perCreator + (remainder > 0 ? 1 : 0);
-            remainder--;
-
-            var generated = creator.Generate(toGenerate, difficulty, forTraining: true);
-            foreach (var (input, output) in generated)
-            {
-                // No route labels - implicit routing emerges from model training
-                examples.Add(new GenesisExample(input, output, creator.TrainingKind, creator.Name));
-            }
-        }
-
-        // Shuffle final list
-        for (int i = examples.Count - 1; i > 0; i--)
-        {
-            int j = rng.Next(i + 1);
-            (examples[i], examples[j]) = (examples[j], examples[i]);
-        }
-
-        return examples.Take(count).ToList();
-    }
-
     // Anneal step size by proximity to mastery — the curve validated in CoreBootstrapRegime. Keep
     // FULL steps until success is genuinely high (a sub-target plateau needs more step, not less);
     // only shrink near the top, where fixed-LR overshoot causes the ~90% oscillation.

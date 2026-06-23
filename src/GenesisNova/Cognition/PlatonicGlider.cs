@@ -98,12 +98,12 @@ public readonly record struct GliderValue(double? Number, string? Text)
 /// </summary>
 public sealed class PlatonicGliderInterpreter
 {
-    private readonly PlatonicSpaceMemory _space;
+    private readonly IPlatonicSpace _space;
     private readonly int _faceDim;
     private readonly IReadOnlyDictionary<string, PlatonicGlider> _library;
 
     public PlatonicGliderInterpreter(
-        PlatonicSpaceMemory space,
+        IPlatonicSpace space,
         IReadOnlyDictionary<string, PlatonicGlider>? library = null)
     {
         _space = space ?? throw new ArgumentNullException(nameof(space));

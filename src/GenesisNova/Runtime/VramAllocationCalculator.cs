@@ -1,16 +1,13 @@
 namespace GenesisNova.Runtime;
 
 /// <summary>
-/// Single source of truth for VRAM allocation and model sizing on user hardware.
-/// 
+/// VRAM allocation and model sizing for user hardware.
+///
 /// User machine: RTX A3000 Laptop (4GB) + shared RAM
-/// Goal: 3GB+ model with safe training headroom on 6GB total VRAM.
-/// 
-/// This calculator unifies:
-/// - Model hidden size allocation
-/// - Batch size recommendations
-/// - Training reserve overhead
-/// - GPU capacity planning
+/// Goal: a model with safe training headroom on 6GB total VRAM.
+///
+/// Provides <see cref="GetOptimal6GbAllocation"/> (training reserve / batch / utilization budget consumed by
+/// <see cref="GpuResourceGatePlanner"/>) and the <see cref="UserTotalAvailableVramMb"/> ceiling.
 /// </summary>
 public static class VramAllocationCalculator
 {
@@ -22,8 +19,8 @@ public static class VramAllocationCalculator
     public const int UserSharedRamAvailableMb = 2048;  // Conservative: leave 29.7GB for OS/apps
 
     // === CAPACITY PLANNING CONSTANTS ===
-    // These replace the scattered defaults from MainWindow, GpuCapacityPlanner, GenesisCli
-    
+    // Sizing inputs used by GetOptimal6GbAllocation to back-calculate the model hidden size and batch budget.
+
     // Model parameter estimation: ~4 bytes per parameter
     // For Genesis Nova: emb(v*h) + out(h*v) + route(h*r) + biases
     // Bytes ~= 4 * (2*vocab + h*r + 2*vocab + h + r)
@@ -78,11 +75,7 @@ public static class VramAllocationCalculator
         // Clamp to training cap for 6GB
         var trainingCap = GetTrainingHiddenCap(totalVramMb);
         hiddenSize = Math.Min(hiddenSize, trainingCap);
-        
-        // Re-estimate actual model size with this hidden size
-        var actualModelBytes = EstimateModelBytes(hiddenSize, VocabularySize, RouteCount, overheadFactor: 1.35);
-        var actualModelMb = (int)Math.Ceiling(actualModelBytes / (1024.0 * 1024.0));
-        
+
         // Batch size: use remaining training headroom
         var remainingMb = trainingOverheadMb;
         var batchSize = EstimateBatchSizeFromBudget(
@@ -91,19 +84,13 @@ public static class VramAllocationCalculator
             sequenceLength: 128,
             vocabSize: VocabularySize
         );
-        
+
         return new VramAllocation
         {
-            TotalVramMb = totalVramMb,
-            HiddenSize = hiddenSize,
-            EstimatedModelMb = actualModelMb,
             TrainingReserveMb = trainingOverheadMb,
             SystemReserveMb = systemReserveMb,
             BatchSize = batchSize,
-            TargetUtilization = 0.75,  // Conservative: leave headroom
-            ReserveVramMb = systemReserveMb,
-            MaxTrainingTokensPerExample = 128,
-            EffectiveVramForTrainingMb = totalVramMb - systemReserveMb
+            TargetUtilization = 0.75  // Conservative: leave headroom
         };
     }
 
@@ -125,19 +112,6 @@ public static class VramAllocationCalculator
     }
     
     /// <summary>
-    /// Estimate model bytes for a given hidden size.
-    /// </summary>
-    private static long EstimateModelBytes(
-        int hiddenSize,
-        int vocab,
-        int routeCount,
-        double overheadFactor = 1.35)
-    {
-        var costPerHidden = BytesPerParameter * (2.0 * vocab + routeCount);
-        return (long)Math.Ceiling(costPerHidden * hiddenSize * overheadFactor);
-    }
-    
-    /// <summary>
     /// Estimate batch size from available VRAM budget for training buffers.
     /// Batch memory ≈ 2 * hidden * sequenceLength * 4 bytes per example
     /// (forward activation + gradient buffer)
@@ -154,85 +128,16 @@ public static class VramAllocationCalculator
         return Math.Clamp(batchSize, 1, 64);
     }
 
-    // === INFERENCE-ONLY SIZING (minimal overhead) ===
-    public static int GetInferenceOnlyHiddenSize()
-    {
-        // For inference: minimal overhead, can use more of the 6GB
-        // Bytes = 4 * h * (2*vocab + r) with ~1.1 overhead
-        const long inferenceTargetBytes = 5816361984;  // 5.5 * 1024 * 1024 * 1024
-        return EstimateHiddenForTargetBytes(
-            targetBytes: inferenceTargetBytes,
-            vocab: VocabularySize,
-            routeCount: RouteCount,
-            overheadFactor: 1.1
-        );
-    }
-
-    // === BACKWARD COMPATIBILITY: Bridge to existing GpuCapacityPlanner ===
-    /// <summary>
-    /// Calculate recommended parameters for existing code paths.
-    /// This bridges VramAllocationCalculator to GpuCapacityPlanner.EstimateTrainingBatchSize().
-    /// </summary>
-    public static (int hidden, int batch, int reserve) GetRecommendedTrainingParams()
-    {
-        var alloc = GetOptimal6GbAllocation();
-        return (alloc.HiddenSize, alloc.BatchSize, alloc.ReserveVramMb);
-    }
-
-    /// <summary>
-    /// UI default for training tab initial values.
-    /// </summary>
-    public static class UiDefaults
-    {
-        public static int HiddenSize => GetOptimal6GbAllocation().HiddenSize;
-        public static int BatchSize => GetOptimal6GbAllocation().BatchSize;
-        public static int Epochs => 3;
-        public static double TargetVramUtilization => 0.75;
-        public static int ReserveVramMb => 1536;
-    }
-
-    /// <summary>
-    /// Autonomous training defaults (replaces scattered logic in GetAutonomousResourceDefaults).
-    /// </summary>
-    public static class AutonomousDefaults
-    {
-        // Initial sample/train counts scaled for 6GB GPU
-        public static int InitialSampleCount => 24;
-        public static int InitialTrainCount => 24;
-        public static int InitialEpochs => 3;
-        public static int MaxSampleCount => 96;
-        public static int MaxTrainCount => 96;
-        public static int MaxDifficulty => 50;
-        public static int RoundBudget => 256;
-    }
 }
 
 /// <summary>
-/// Result from VRAM allocation calculation.
-/// Single authoritative source for all allocation parameters.
+/// Result from VRAM allocation calculation. Only the fields consumed by
+/// <see cref="GpuResourceGatePlanner"/> are retained.
 /// </summary>
 public record VramAllocation
 {
-    public int TotalVramMb { get; init; }
-    public int HiddenSize { get; init; }
-    public int EstimatedModelMb { get; init; }
     public int TrainingReserveMb { get; init; }
     public int SystemReserveMb { get; init; }
     public int BatchSize { get; init; }
     public double TargetUtilization { get; init; }
-    public int ReserveVramMb { get; init; }
-    public int MaxTrainingTokensPerExample { get; init; }
-    public int EffectiveVramForTrainingMb { get; init; }
-
-    public override string ToString()
-    {
-        return $"""
-            VRAM Allocation for {TotalVramMb}MB GPU:
-              Model (Hidden={HiddenSize}): ~{EstimatedModelMb}MB
-              Training Reserve: {TrainingReserveMb}MB (Batch={BatchSize})
-              System Reserve: {SystemReserveMb}MB
-              ---
-              Total Effective: {EffectiveVramForTrainingMb}MB @ {TargetUtilization:P0} util
-            """;
-    }
 }

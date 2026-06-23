@@ -36,12 +36,19 @@ public static class TickExecutor
     {
         var newElements = ImmutableArray.CreateBuilder<PlatonicElement>();
         var elements = state.Elements;
-        var primaryElement = FindElementById(elements, tick.PrimaryElementId);
+        // Build an id->element index ONCE (was an O(n) FirstOrDefault scan per lookup, called inside the
+        // RelatedTo loop → O(n·k) per compose). First-wins semantics preserved: only the FIRST occurrence of
+        // a given id is kept, matching FirstOrDefault(e => e.Id == id).
+        var byId = new Dictionary<int, PlatonicElement>(elements.Length);
+        foreach (var element in elements)
+            byId.TryAdd(element.Id, element);
+
+        var primaryElement = FindElementById(byId, tick.PrimaryElementId);
         if (primaryElement == null)
             return (state, ImmutableArray<PlatonicElement>.Empty);
 
         var result = tick.Kind == TickKind.Compose
-            ? ExecuteR2_Compose(primaryElement, elements, state, newElements)
+            ? ExecuteR2_Compose(primaryElement, byId, state, newElements)
             : new TickResult(null, false, $"Unsupported tick kind {tick.Kind}");
 
         var updatedElements = elements.ToBuilder();
@@ -59,7 +66,7 @@ public static class TickExecutor
     /// <summary>R2: compose an element's related elements (sum-of-embeddings) into a Composition element.</summary>
     private static TickResult ExecuteR2_Compose(
         PlatonicElement element,
-        ImmutableArray<PlatonicElement> elements,
+        IReadOnlyDictionary<int, PlatonicElement> byId,
         PlatonicState state,
         ImmutableArray<PlatonicElement>.Builder newElements)
     {
@@ -69,7 +76,7 @@ public static class TickExecutor
         var relatedElements = new List<PlatonicElement>();
         foreach (var relId in element.RelatedTo)
         {
-            var rel = FindElementById(elements, relId);
+            var rel = FindElementById(byId, relId);
             if (rel != null) relatedElements.Add(rel);
         }
         if (relatedElements.Count < 2)
@@ -93,8 +100,8 @@ public static class TickExecutor
         return new TickResult(composition, true, "R2 compose succeeded");
     }
 
-    private static PlatonicElement? FindElementById(ImmutableArray<PlatonicElement> elements, int id)
-        => elements.FirstOrDefault(e => e.Id == id);
+    private static PlatonicElement? FindElementById(IReadOnlyDictionary<int, PlatonicElement> byId, int id)
+        => byId.TryGetValue(id, out var element) ? element : null;
 
     private static double[] SumEmbeddings(List<PlatonicElement> elements, int dim)
     {

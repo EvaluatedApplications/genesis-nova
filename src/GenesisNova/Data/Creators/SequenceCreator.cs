@@ -60,17 +60,5 @@ public sealed class SequenceCreator : IExampleCreator
         return result;
     }
 
-    private static int StableHash(string source, int extra)
-    {
-        uint h = 2166136261u;
-        foreach (var c in source)
-        {
-            h ^= c;
-            h *= 16777619u;
-        }
-
-        h ^= (uint)extra;
-        h *= 16777619u;
-        return (int)h;
-    }
+    private static int StableHash(string source, int extra) => CreatorText.StableHash(source, extra);
 }

@@ -31,4 +31,24 @@ public static class NumberWordVocabulary
             map[word] = value;
         return map;
     }
+
+    private static readonly string[] Ones =
+        { "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+          "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen" };
+    private static readonly string[] Tens =
+        { "", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety" };
+
+    /// <summary>Compose ANY non-negative integer (0..999,999) into its English words — "forty seven",
+    /// "three hundred two", "twelve thousand five". This is the GENERATIVE extension of the base <see cref="Entries"/>
+    /// table so number↔word difficulty can scale UNBOUNDED with the gym level (bigger numbers, longer phrases),
+    /// instead of capping at the 28 listed single-word values. Ground-truth/deterministic (no model belief).</summary>
+    public static string ToWords(long n)
+    {
+        if (n < 0) return "negative " + ToWords(-n);
+        if (n < 20) return Ones[n];
+        if (n < 100) return Tens[n / 10] + (n % 10 != 0 ? " " + Ones[n % 10] : string.Empty);
+        if (n < 1000) return Ones[n / 100] + " hundred" + (n % 100 != 0 ? " " + ToWords(n % 100) : string.Empty);
+        if (n < 1_000_000) return ToWords(n / 1000) + " thousand" + (n % 1000 != 0 ? " " + ToWords(n % 1000) : string.Empty);
+        return n.ToString(System.Globalization.CultureInfo.InvariantCulture); // beyond range: fall back to digits
+    }
 }

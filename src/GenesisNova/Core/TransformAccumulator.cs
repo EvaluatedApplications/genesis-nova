@@ -204,17 +204,6 @@ public class TransformAccumulator
         return result;
     }
     
-    /// <summary>
-    /// Look up the transform embedding (operation representation) by name.
-    /// Returns the transform vector and confidence.
-    /// </summary>
-    public (double[] Embedding, double Confidence)? LookupOperation(string operationName)
-    {
-        if (_transforms.TryGetValue(operationName, out var t))
-            return (t.Vector, t.Confidence);
-        return null;
-    }
-
     public bool TryGetTransform(string functionName, out Transform transform)
         => _transforms.TryGetValue(functionName, out transform!);
 
@@ -275,36 +264,6 @@ public class TransformAccumulator
         foreach (var name in _transforms.Keys)
             best = Math.Max(best, ReliabilityUcb(name));
         return best;
-    }
-    
-    /// <summary>
-    /// Find the most similar operation to a given embedding (KNN over operation embeddings).
-    /// Used when the model's operation query embedding is ambiguous.
-    /// </summary>
-    public (string Name, double Confidence)? FindSimilarOperation(double[] queryEmbedding)
-    {
-        if (_transforms.Count == 0)
-            return null;
-        
-        double bestDist = double.MaxValue;
-        Transform? best = null;
-        
-        foreach (var t in _transforms.Values)
-        {
-            var dist = EuclideanDistance(queryEmbedding, t.Vector);
-            if (dist < bestDist)
-            {
-                bestDist = dist;
-                best = t;
-            }
-        }
-        
-        if (best is null)
-            return null;
-        
-        // Distance → similarity conversion
-        var similarity = 1.0 / (1.0 + bestDist);
-        return (best.FunctionName, similarity);
     }
     
     /// <summary>

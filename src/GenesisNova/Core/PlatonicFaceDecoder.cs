@@ -11,7 +11,6 @@ namespace GenesisNova.Core;
 /// wrote. Every constant here is derived identically to the matching encode method so decode is the
 /// exact algebraic inverse:
 /// <list type="bullet">
-///   <item><see cref="SlotDecodeString"/> ↔ <see cref="PlatonicFaceComposer.GetCharComposedEmbedding"/></item>
 ///   <item><see cref="DecodeNumericFromPrediction"/> ↔ <see cref="PlatonicFaceComposer.GetFreshNumericEmbedding"/></item>
 ///   <item><see cref="WordSlotDecode"/> ↔ <see cref="PlatonicFaceComposer.GetWordComposedEmbedding"/></item>
 /// </list>
@@ -48,62 +47,6 @@ internal static class PlatonicFaceDecoder
     {
         Polynomial,
         Logarithmic
-    }
-
-    /// <summary>
-    /// Decode a predicted embedding back to a string by reading each clean character slot
-    /// independently — the exact inverse of <see cref="PlatonicFaceComposer.GetCharComposedEmbedding"/>.
-    /// <para>
-    /// Slot i → find the char in <see cref="CharVocab"/> whose regenerated atom is nearest (squared
-    /// distance) in that slot's dimensions, comparing against <c>atom[atomStart + k] * scale</c>.
-    /// Stops at the first near-zero slot (end of string). O(maxSlots × |CharVocab|).
-    /// </para>
-    /// </summary>
-    public static string SlotDecodeString(double[] predicted, int dim)
-    {
-        if (predicted is null || dim <= 0)
-            return string.Empty;
-
-        var charStart = FaceLayout.CharFaceStart(dim);
-        var charDims = FaceLayout.CharFaceDims(dim);
-        var slotDims = FaceLayout.SlotDims(charDims);
-        var maxSlots = slotDims > 0 ? charDims / slotDims : 0;
-        if (maxSlots <= 0)
-            return string.Empty;
-
-        var atomStart = dim / 2; // GetCharAtomEmbedding fills [dim/2..dim)
-        var scale = 1.0 / Math.Sqrt(maxSlots);
-        var zeroThreshold = scale * 0.1;
-
-        var sb = new StringBuilder(maxSlots);
-        for (var i = 0; i < maxSlots; i++)
-        {
-            var slotStart = charStart + (i * slotDims);
-
-            // End of string: first slot whose norm falls below the near-zero threshold.
-            if (RangeNorm(predicted, slotStart, slotStart + slotDims) < zeroThreshold)
-                break;
-
-            var best = CharVocab[0];
-            var bestDist = double.MaxValue;
-            foreach (var c in CharVocab)
-            {
-                var atom = PlatonicFaceComposer.GetCharAtomEmbedding(c, dim);
-                var dist = 0.0;
-                for (var k = 0; k < slotDims && atomStart + k < dim && slotStart + k < dim; k++)
-                {
-                    var diff = predicted[slotStart + k] - (atom[atomStart + k] * scale);
-                    dist += diff * diff;
-                }
-                if (dist < bestDist)
-                {
-                    bestDist = dist;
-                    best = c;
-                }
-            }
-            sb.Append(best);
-        }
-        return sb.ToString();
     }
 
     /// <summary>

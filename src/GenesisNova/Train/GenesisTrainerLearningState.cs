@@ -5,12 +5,10 @@ namespace GenesisNova.Train;
 public sealed record GenesisTrainerLearningState(
     IReadOnlyList<SpaceDecisionJournalEntry>? SpaceDecisionJournalEntries,
     IReadOnlyList<MasteredRehearsalExample>? MasteredRehearsalRing,
-    Dictionary<int, int>? SpacePolicyActionCounters,
     IReadOnlyList<SpacePolicyTransitionSnapshot>? SpacePolicyTrajectory,
     Dictionary<string, int>? ConceptCoverageCounts,
     GenesisTrainerTelemetryState? Telemetry,
     int SpacePolicyStepCounter,
-    int PriorSpaceActionId,
     IReadOnlyList<ConceptPlanDecisionJournalEntry>? ConceptPlanDecisionJournalEntries,
     // Appended (optional) checkpoint-persistence fields. Old JSON without these deserializes to null,
     // and existing positional construction remains valid by passing these last by name.

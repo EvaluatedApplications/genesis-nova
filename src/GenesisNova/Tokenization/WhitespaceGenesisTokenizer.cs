@@ -30,7 +30,8 @@ public sealed class WhitespaceGenesisTokenizer : IGenesisTokenizer
 
     public int[] Encode(string text, bool addBos = false, bool addEos = false)
     {
-        var output = new List<int>();
+        // Pre-size to a rough token estimate (~1 token per 4 chars) + space for BOS/EOS to avoid list growth reallocs.
+        var output = new List<int>((text?.Length ?? 0) / 4 + 2);
         if (addBos)
             output.Add(BosTokenId);
 
@@ -59,9 +60,25 @@ public sealed class WhitespaceGenesisTokenizer : IGenesisTokenizer
         return output.ToArray();
     }
 
+    // Cached interned strings for single-char tokens (ASCII range) so per-digit/per-punct chars don't each
+    // allocate a fresh string via ch.ToString(). char.ToString() always allocates; this reuses one instance
+    // per character. Identical string content, fewer allocations.
+    private static readonly string[] SingleCharStrings = BuildSingleCharStrings();
+
+    private static string[] BuildSingleCharStrings()
+    {
+        var table = new string[128];
+        for (var c = 0; c < table.Length; c++)
+            table[c] = ((char)c).ToString();
+        return table;
+    }
+
+    private static string CharToken(char ch)
+        => ch < 128 ? SingleCharStrings[ch] : ch.ToString();
+
     private static IReadOnlyList<(string Token, bool SpaceBefore)> Tokenize(string text)
     {
-        var tokens = new List<(string, bool)>();
+        var tokens = new List<(string, bool)>(text.Length / 4 + 1);
         var normalized = text; // keep original case; folding happens per-token in Encode
         var buffer = new System.Text.StringBuilder();
         var sawSpace = false;        // whitespace seen since the last char added to a token
@@ -80,7 +97,7 @@ public sealed class WhitespaceGenesisTokenizer : IGenesisTokenizer
             if (IsAsciiDigit(ch))
             {
                 FlushBuffer();
-                tokens.Add((ch.ToString(), sawSpace));
+                tokens.Add((CharToken(ch), sawSpace));
                 sawSpace = false;
                 continue;
             }
@@ -95,7 +112,7 @@ public sealed class WhitespaceGenesisTokenizer : IGenesisTokenizer
             }
 
             FlushBuffer();
-            tokens.Add((ch.ToString(), sawSpace));
+            tokens.Add((CharToken(ch), sawSpace));
             sawSpace = false;
         }
 

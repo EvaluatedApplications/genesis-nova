@@ -24,7 +24,7 @@ public sealed class GenesisTrainer
 {
     private readonly IGenesisTokenizer _tokenizer;
     private readonly GenesisNeuralModel _model;
-    private readonly PlatonicSpaceMemory _platonicSpace;
+    private readonly IPlatonicSpace _platonicSpace;
     private readonly SpaceManager _spaceManager;
     private GenesisInferenceEngine _inferencePolicy;
     private readonly GenesisCompositeObjective _objective;
@@ -33,7 +33,6 @@ public sealed class GenesisTrainer
     private readonly GenesisLabelResolver _labelResolver;
     private readonly Queue<SpacePolicyTransition> _spacePolicyTrajectory = new();
     private int _spacePolicyStepCounter;
-    private int _priorSpaceActionId;
     private int _trainStepCount;
     // Speed throttles: the per-example concept-planner GENERATION and the edit-head REINFORCE are the dominant
     // per-example costs. The planner's output is mostly discarded by the coupling (the deterministic mirror
@@ -58,32 +57,11 @@ public sealed class GenesisTrainer
     private readonly Dictionary<string, int> _conceptCoverageCounts = new(StringComparer.OrdinalIgnoreCase);
     private readonly SpaceDecisionJournal _spaceDecisionJournal = new(MaxSpaceDecisionJournalEntries);
     private readonly Queue<MasteredRehearsalExample> _masteredRehearsalRing = new();
-    private readonly Dictionary<int, int> _spacePolicyActionCounters = new();
     private readonly Queue<ConceptPlanDecisionJournalEntry> _conceptPlanDecisionJournal = new();
-    private static readonly SpaceToolKind[] SpaceToolActions =
-    [
-        SpaceToolKind.DefaultAlgorithm,
-        SpaceToolKind.Observe,
-        SpaceToolKind.Stabilize,
-        SpaceToolKind.Expand,
-        SpaceToolKind.Rebalance,
-        SpaceToolKind.Reinforce,
-        SpaceToolKind.CreateConcept,
-        SpaceToolKind.EditConceptFace,
-        SpaceToolKind.EditRelationContradiction,
-        SpaceToolKind.CreateOrStrengthenRelation,
-        SpaceToolKind.WeakenOrDecayRelation,
-        SpaceToolKind.TriadConsistencyEdit,
-        SpaceToolKind.NeighborhoodRetype,
-        SpaceToolKind.CentroidPullPush,
-        SpaceToolKind.MergeConceptHint,
-        SpaceToolKind.PruneHint,
-        SpaceToolKind.AnchorBindingEdit,
-        SpaceToolKind.AttentionScopeSelect,
-        SpaceToolKind.CommitLevelSet,
-        SpaceToolKind.RewardTagEmit,
-        SpaceToolKind.DiscoverAbstractions
-    ];
+    // Upper bound used when clamping a restored trajectory snapshot's ActionId from an old checkpoint.
+    // Historically this was the length of a 21-entry space-policy tool array (now retired); preserved as a
+    // constant so checkpoint restore stays byte-identical.
+    private const int MaxRestoredActionId = 21;
     private const int MaxSpacePolicyTrajectory = 16;
     private const int MaxConceptCount = 24;
     private const double MinConceptMirrorCoverage = 0.35;
@@ -131,7 +109,7 @@ public sealed class GenesisTrainer
     public GenesisTrainer(
         IGenesisTokenizer tokenizer,
         GenesisNeuralModel model,
-        PlatonicSpaceMemory platonicSpace,
+        IPlatonicSpace platonicSpace,
         GenesisNovaConfig? config = null,
         GenesisCompositeObjective? objective = null)
     {
@@ -228,7 +206,6 @@ public sealed class GenesisTrainer
         => new(
             SpaceDecisionJournalEntries: _spaceDecisionJournal.Entries,
             MasteredRehearsalRing: _masteredRehearsalRing.ToArray(),
-            SpacePolicyActionCounters: new Dictionary<int, int>(_spacePolicyActionCounters),
             SpacePolicyTrajectory: _spacePolicyTrajectory
                 .Select(t => new SpacePolicyTransitionSnapshot(
                     t.State.ToDeterministicEncoding(),
@@ -264,7 +241,6 @@ public sealed class GenesisTrainer
                 _spacePolicyRetrospectiveCreditCount,
                 _conceptPlanRetrospectiveCreditCount),
             SpacePolicyStepCounter: _spacePolicyStepCounter,
-            PriorSpaceActionId: _priorSpaceActionId,
             ConceptPlanDecisionJournalEntries: _conceptPlanDecisionJournal.ToArray(),
             TransformAccumulator: _transformAccumulator.ExportSnapshot(),
             FoldPaths: _foldPathDiscovery.ExportSnapshot());
@@ -279,13 +255,6 @@ public sealed class GenesisTrainer
         foreach (var example in (state.MasteredRehearsalRing ?? Array.Empty<MasteredRehearsalExample>()).Where(e => !string.IsNullOrWhiteSpace(e.Input) && !string.IsNullOrWhiteSpace(e.Output)).TakeLast(MaxMasteredRehearsalEntries))
             _masteredRehearsalRing.Enqueue(example);
 
-        _spacePolicyActionCounters.Clear();
-        foreach (var pair in state.SpacePolicyActionCounters ?? new Dictionary<int, int>())
-        {
-            if (pair.Key >= 0 && pair.Key <= SpaceToolActions.Length)
-                _spacePolicyActionCounters[pair.Key] = Math.Clamp(pair.Value, 0, int.MaxValue);
-        }
-
         _spacePolicyTrajectory.Clear();
         foreach (var item in (state.SpacePolicyTrajectory ?? Array.Empty<SpacePolicyTransitionSnapshot>()).TakeLast(MaxSpacePolicyTrajectory))
         {
@@ -293,7 +262,7 @@ public sealed class GenesisTrainer
                 continue;
             _spacePolicyTrajectory.Enqueue(new SpacePolicyTransition(
                 transitionState,
-                Math.Clamp(item.ActionId, 0, SpaceToolActions.Length),
+                Math.Clamp(item.ActionId, 0, MaxRestoredActionId),
                 Math.Clamp(item.NoiseRatio, 0.0, 2.0),
                 Math.Clamp(item.AverageBridgeConfidence, 0.0, 1.0),
                 Math.Clamp(item.RelationPressure, 0.0, 2.0),
@@ -338,7 +307,6 @@ public sealed class GenesisTrainer
         }
 
         _spacePolicyStepCounter = Math.Max(0, state.SpacePolicyStepCounter);
-        _priorSpaceActionId = Math.Clamp(state.PriorSpaceActionId, 0, SpaceToolActions.Length);
         _conceptPlanDecisionJournal.Clear();
         foreach (var entry in (state.ConceptPlanDecisionJournalEntries ?? Array.Empty<ConceptPlanDecisionJournalEntry>()).TakeLast(MaxConceptPlanDecisionJournalEntries))
         {
@@ -368,22 +336,23 @@ public sealed class GenesisTrainer
         var outputText = _tokenizer.Decode(targetTokens);
         var example = new GenesisExample(inputText, outputText);
         var weight = ComputeTrainingWeight(example);
+        var labels = ResolveLabels(example, inputTokens);
         var baseLoss = _model.TrainExample(
             inputTokens,
             targetTokens,
             _tokenizer.BosTokenId,
             lossScale: weight,
-            routeLabel: ResolveRouteLabel(example),
-            queryLabel: ResolveQueryLabel(inputTokens, example.Output),
-            planLabel: ResolvePlanLabel(example.Input, example.Output));
-        
+            routeLabel: labels.Route,
+            queryLabel: labels.Query,
+            planLabel: labels.Plan);
+
         // Break computation graph after training
         _model.CloneParametersToBreakGraph();
 
         MineComposerShapes(example.Input, example.Output);
         var concepts = ObserveLearningSignals(example);
         RewardEditHead(example, baseLoss.TokenLoss);
-        MaybeReinforceRoute(example, inputTokens);
+        MaybeReinforceRoute(example, inputTokens, labels);
 
         var consistencyLoss = EstimatePlatonicConsistency(concepts, IsNegativeText(outputText));
         var conservationLoss = EstimateConservationDrift(inputTokens);
@@ -414,23 +383,29 @@ public sealed class GenesisTrainer
         _trainStepCount++;
 
         var weight = ComputeTrainingWeight(example);
+        var labels = ResolveLabels(example, inputTokens);
 
         var baseLoss = _model.TrainExample(
             inputTokens,
             targetTokens,
             _tokenizer.BosTokenId,
             lossScale: weight,
-            routeLabel: ResolveRouteLabel(example),
-            queryLabel: ResolveQueryLabel(inputTokens, example.Output),
-            planLabel: ResolvePlanLabel(example.Input, example.Output));
-         
+            routeLabel: labels.Route,
+            queryLabel: labels.Query,
+            planLabel: labels.Plan);
+
         // Break computation graph after each example to allow sequential training
         _model.CloneParametersToBreakGraph();
+
+        // LIVING SELF: fold this lived moment into the persistent self, so the self becomes the accumulating
+        // integral of everything the model learns (PLATONIC_CONSCIOUSNESS.md §5). Gated — inert unless alive.
+        if (_model.SelfConditioned)
+            _model.PerceiveIntoSelf(inputTokens);
 
         MineComposerShapes(example.Input, example.Output);
         var concepts = ObserveLearningSignals(example);
         RewardEditHead(example, baseLoss.TokenLoss);
-        MaybeReinforceRoute(example, inputTokens);
+        MaybeReinforceRoute(example, inputTokens, labels);
 
         var consistencyLoss = EstimatePlatonicConsistency(concepts, IsNegativeText(example.Output));
         var conservationLoss = EstimateConservationDrift(inputTokens);
@@ -474,14 +449,17 @@ public sealed class GenesisTrainer
     private GenerationResult GenerateAndObserveInference(
         GenerationRequest request,
         string contextLabel = "inference",
-        bool? expectedCorrect = null)
+        bool? expectedCorrect = null,
+        bool mutateSpace = true)
     {
         try
         {
-            // Training-context generation: enable learned-store writes ONLY for the duration of this
-            // Generate call. The engine instance is shared with the REPL, which must stay read-only.
+            // Training-context generation: enable learned-store writes ONLY for the duration of this Generate call
+            // (the engine is shared with the read-only REPL). DIAGNOSTIC previews (skip-decision, path-mismatch,
+            // concept-plan) pass mutateSpace:false — they are MEASUREMENTS, and letting them write coupled their
+            // raw generated tokens (framing words included) into the relation graph, a non-discriminative hub leak.
             var previousLearning = _inferencePolicy.LearningEnabled;
-            _inferencePolicy.LearningEnabled = true;
+            _inferencePolicy.LearningEnabled = mutateSpace;
             GenerationResult result;
             try
             {
@@ -495,8 +473,7 @@ public sealed class GenesisTrainer
             var outcome = expectedCorrect.HasValue
                 ? (expectedCorrect.Value ? InferenceOutcome.Success : InferenceOutcome.Failure)
                 : DeriveHeuristicOutcome(result);
-            // Training-context preview generation: space mutation is allowed (this is the training loop).
-            ObserveKnownInferenceOutcome(outcome, result, allowSpaceMutation: true);
+            ObserveKnownInferenceOutcome(outcome, result, allowSpaceMutation: mutateSpace);
 
             return result;
         }
@@ -564,6 +541,7 @@ public sealed class GenesisTrainer
           var targetTokens = item.TargetTokens;
           var example = item.Original;
           var weight = ComputeTrainingWeight(example);
+          var labels = ResolveLabels(example, inputTokens);
           var concepts = ObserveLearningSignals(example);
           var shouldSkip = ShouldSkipTrainingExample(example, targetTokens);
           TrainingLoss loss;
@@ -582,9 +560,9 @@ public sealed class GenesisTrainer
                    targetTokens,
                    _tokenizer.BosTokenId,
                    lossScale: effectiveWeight,
-                   routeLabel: ResolveRouteLabel(example),
-            queryLabel: ResolveQueryLabel(inputTokens, example.Output),
-            planLabel: ResolvePlanLabel(example.Input, example.Output));
+                   routeLabel: labels.Route,
+                   queryLabel: labels.Query,
+                   planLabel: labels.Plan);
                 totalTokenLoss += loss.TokenLoss * targetTokens.Length * effectiveWeight;
                 totalTokenWeight += targetTokens.Length * effectiveWeight;
              }
@@ -600,9 +578,9 @@ public sealed class GenesisTrainer
                 targetTokens,
                 _tokenizer.BosTokenId,
                 lossScale: effectiveWeight,
-                routeLabel: ResolveRouteLabel(example),
-            queryLabel: ResolveQueryLabel(inputTokens, example.Output),
-            planLabel: ResolvePlanLabel(example.Input, example.Output));
+                routeLabel: labels.Route,
+                queryLabel: labels.Query,
+                planLabel: labels.Plan);
              totalTokenLoss += loss.TokenLoss * targetTokens.Length * effectiveWeight;
              totalTokenWeight += targetTokens.Length * effectiveWeight;
           }
@@ -637,7 +615,9 @@ public sealed class GenesisTrainer
           perExample.Add(new GenesisPerExampleLoss(example, stepLoss, isCorrect, shouldSkip));
            
           // Collect gen-0 only periodically to keep memory stable without full collection pauses.
-          if ((i + 1) % gcInterval == 0)
+          // Skip the per-N collect on the FINAL iteration: the batch-boundary collect below always runs there,
+          // so collecting both would be a redundant back-to-back gen-0 pass. (Same cadence otherwise.)
+          if ((i + 1) % gcInterval == 0 && i + 1 < batch.Count)
           {
               GC.Collect(0, GCCollectionMode.Optimized);
           }
@@ -651,7 +631,7 @@ public sealed class GenesisTrainer
           if (_trainStepCount % EditHeadReinforceStride == 0)
           {
              RewardEditHead(example, loss.TokenLoss);
-             MaybeReinforceRoute(example, inputTokens);
+             MaybeReinforceRoute(example, inputTokens, labels);
           }
        }
 
@@ -699,7 +679,8 @@ public sealed class GenesisTrainer
         // then require an EXACT full match — identical to how the REPL output is judged correct/incorrect.
         var preview = GenerateAndObserveInference(
             new GenerationRequest(example.Input, expected.Length + CorrectnessStopProbeTokens),
-            contextLabel: "skip-decision");
+            contextLabel: "skip-decision",
+            mutateSpace: false); // pure correctness measurement — must not couple its generated tokens
         var predicted = preview.GeneratedTokens
            .Where(t => t != _tokenizer.BosTokenId && t != _tokenizer.EosTokenId && t != _tokenizer.PadTokenId)
            .ToArray();
@@ -742,7 +723,8 @@ public sealed class GenesisTrainer
            var preview = GenerateAndObserveInference(
                new GenerationRequest(example.Input, expected.Length + CorrectnessStopProbeTokens),
                contextLabel: "unified-path-mismatch",
-               expectedCorrect: null);  // Let heuristic determine correctness
+               expectedCorrect: null,  // Let heuristic determine correctness
+               mutateSpace: false);    // pure mismatch measurement — must not couple its generated tokens
            var mismatch = ComputeNormalizedTokenDistance(preview.GeneratedTokens, expected);
            return mismatch;
        }
@@ -850,7 +832,8 @@ public sealed class GenesisTrainer
                 MaxNewTokens: maxTokens,
                 ChunkTokenBudget: Math.Min(16, maxTokens)),
             contextLabel: "concept-plan",
-            expectedCorrect: null);
+            expectedCorrect: null,
+            mutateSpace: false); // planning generation — its concept SET is used (parsed below), but it must not couple
          
         // The planner GENERATES concepts and can emit framing/function words that the mirror path already excludes.
         // Drop op-tokens here too — otherwise generated "kind/of/for/a" couple into the graph as mega-hubs (the
@@ -1333,9 +1316,6 @@ public sealed class GenesisTrainer
         var fallbackRate = _telemetryObservationCount > 0
             ? _fallbackCount / (double)_telemetryObservationCount
             : 0.0;
-        var fallbackSuccessRate = _fallbackCount > 0
-            ? _fallbackCorrectCount / (double)_fallbackCount
-            : 0.5;
         var confidenceDelta = 0.0;
         if (_platonicConfidenceCorrectCount > 0 && _platonicConfidenceIncorrectCount > 0)
         {
@@ -1349,12 +1329,9 @@ public sealed class GenesisTrainer
                            (confidenceDelta * 0.20) -
                            (fallbackRate * 0.20);
         var biasScale = Math.Clamp(rawBiasScale, 0.7, 1.4);
-        var enableContextBias = biasAppliedRate + (confidenceDelta * 0.05) >= biasNotAppliedRate - 0.03 &&
-                                fallbackSuccessRate >= 0.20;
 
         return new InferenceTelemetryHint(
-            BiasScale: biasScale,
-            EnableContextBias: enableContextBias);
+            BiasScale: biasScale);
     }
 
     private IReadOnlyList<string> ObserveLearningSignals(
@@ -1664,22 +1641,39 @@ public sealed class GenesisTrainer
         // is winning (a distractor or a prior bad write), repel it (high contradiction = push apart) so the
         // target can take the nearest slot. This is what lets the controller UNDO a bad write — the blind
         // attract-only path below cannot (it never looks at what's already there). Positive examples only.
+        // DISCRIMINATIVE COUPLING (data-driven; NO hardcoded stopword / op-token list). For each output, link it to
+        // its SINGLE most-discriminative input cue = the LOWEST relation-degree partner. A framing/function word
+        // ("of"/"what"/"is") sits near everything and accrues high degree, so it is NEVER chosen — the specific
+        // keyword (low degree) wins. This MEASURES which tokens behave like hubs instead of being told a list, so it
+        // scales to any vocabulary/language. (A numeric result of a computation stays out of the graph — homomorphism.)
+        var outputComputed = inputConcepts.Count > 1;
+        var couplings = new List<(string Cue, string Output)>();
+        foreach (var output in outputConcepts)
+        {
+            var partners = inputConcepts
+                .Where(inp => !inp.Equals(output, StringComparison.OrdinalIgnoreCase))
+                .ToArray();
+            if (partners.Length == 0)
+                continue;
+            var cue = partners.Length == 1 ? partners[0] : SelectDiscriminativePartner(output, partners);
+            if (IsNumericConcept(output) && (outputComputed || IsNumericConcept(cue)))
+                continue;
+            couplings.Add((cue, output));
+        }
+
+        // SPACE-AWARE READ-BEFORE-WRITE: repel the nearest distractors around the DISCRIMINATIVE CUE only (NOT every
+        // input token — that let framing words become repel anchors and hub onto their neighbours), so the target can
+        // take the cue's nearest slot. This is what lets the controller UNDO a bad write. Positive examples only.
         if ((SpaceAwareEdit || PerceptionEdit) && !isNegative)
         {
-            // Repel strength: hand-coded (SpaceAwareEdit oracle) vs LEARNED from the perception-conditioned
-            // magnitude m (PerceptionEdit) — the GRU learns, via reward, how hard to push the distractor away.
             var repel = PerceptionEdit ? Math.Clamp(0.5 + (0.5 * m), 0.5, 1.0) : 0.9;
             var targetSet = new HashSet<string>(outputConcepts.Select(c => c.ToLowerInvariant()), StringComparer.OrdinalIgnoreCase);
-            // LEARNED POINTER COUNT (§D): when perception-driven, the GRU's magnitude m decides HOW MANY of the
-            // nearest distractors to clear (1..RepelNeighbors) — not a fixed count. Hand-coded mode uses the cap.
             var k = PerceptionEdit
                 ? Math.Clamp(1 + (int)Math.Round(m * (RepelNeighbors - 1)), 1, Math.Max(1, RepelNeighbors))
                 : Math.Max(1, RepelNeighbors);
-            foreach (var anchor in inputConcepts)
+            foreach (var anchor in couplings.Select(c => c.Cue).Distinct(StringComparer.OrdinalIgnoreCase))
             {
                 if (IsNumericConcept(anchor)) continue;
-                // POINTER over the neighbourhood: repel the top-k nearest NON-target concepts (distractors), not
-                // just the single nearest — clears multiple competitors so the target can take the nearest slot.
                 var near = _platonicSpace.GetNearestConcepts(anchor, candidates: null, maxNeighbors: k);
                 foreach (var n in near)
                 {
@@ -1690,26 +1684,8 @@ public sealed class GenesisTrainer
             }
         }
 
-        var outputComputed = inputConcepts.Count > 1;
-        foreach (var output in outputConcepts)
-        {
-            var partners = inputConcepts
-                .Where(inp => !inp.Equals(output, StringComparison.OrdinalIgnoreCase))
-                .ToArray();
-            if (partners.Length == 0)
-                continue;
-            // Couple to the MOST DISCRIMINATIVE partner (lowest relation degree), not merely the geometrically
-            // nearest: a ubiquitous COMMAND word (a query verb present in EVERY cue) accrues huge degree by
-            // sitting near everything, and the nearest-partner rule let it monopolise every coupling into one
-            // mega-hub that collapses retrieval (the "op-token must never be a relation participant" bug). The
-            // specific keyword (low degree) now wins, so the real keyword↔answer edge forms instead of verb↔answer.
-            var partner = partners.Length == 1 ? partners[0] : SelectDiscriminativePartner(output, partners);
-            // Skip ANY edge to a numeric result of a computation (multi-concept input), and the
-            // number↔number case generally — both are carried by the homomorphism, not the graph.
-            if (IsNumericConcept(output) && (outputComputed || IsNumericConcept(partner)))
-                continue;
-            _platonicSpace.ObserveContradiction(partner, output, contradiction);
-        }
+        foreach (var (cue, output) in couplings)
+            _platonicSpace.ObserveContradiction(cue, output, contradiction);
 
         _platonicSpace.FineEditFromExample(inputConcepts, outputConcepts, isNegative);
     }
@@ -1749,7 +1725,23 @@ public sealed class GenesisTrainer
     // retrievability. We reinforce the route-perception weight TOWARD the resolved route label (which the space's
     // retrievability determines) given the TARGET-AGNOSTIC route perception of the anchor — so at inference, a
     // query whose anchor "looks answerable" gets routed platonic. No-op unless the model has PerceptionRouting on.
+    /// <summary>
+    /// The route/query/plan supervision labels for one example, all DERIVED from the example's structure.
+    /// Each is a deterministic function of (example, inputTokens), so resolving once and reusing for both the
+    /// <c>TrainExample</c> call and <see cref="MaybeReinforceRoute"/> is byte-identical to re-resolving.
+    /// </summary>
+    private readonly record struct ResolvedLabels(int? Route, GenesisQueryLabel? Query, int? Plan);
+
+    private ResolvedLabels ResolveLabels(GenesisExample example, IReadOnlyList<int> inputTokens)
+        => new(
+            ResolveRouteLabel(example),
+            ResolveQueryLabel(inputTokens, example.Output),
+            ResolvePlanLabel(example.Input, example.Output));
+
     private void MaybeReinforceRoute(GenesisExample example, IReadOnlyList<int> inputTokens)
+        => MaybeReinforceRoute(example, inputTokens, ResolveLabels(example, inputTokens));
+
+    private void MaybeReinforceRoute(GenesisExample example, IReadOnlyList<int> inputTokens, ResolvedLabels labels)
     {
         if (!_model.PerceptionRouting && !_model.PerceptionPlan && !_model.PerceptionQuery)
             return;
@@ -1763,15 +1755,15 @@ public sealed class GenesisTrainer
         // One target-agnostic perception of the anchor's region, shared by all space-aware heads (route/plan/op).
         var perception = _platonicSpace.ComputeRoutePerception(anchor, transformReliability);
 
-        if (_model.PerceptionRouting && ResolveRouteLabel(example) is int routeLabel)
+        if (_model.PerceptionRouting && labels.Route is int routeLabel)
             _model.ReinforceRouteHead(inputTokens, perception, routeLabel, 1.0);
 
         // SPACE-AWARE plan + op heads (SPACE_AWARE_GRU.md §A): supervise their perception weights toward this
         // example's structural labels, so shape + op selection learn to READ the anchor's region rather than
         // deciding blind from tokens. Numeric anchors have no relational edges → perception ≈ 0 → graceful.
-        if (_model.PerceptionPlan && ResolvePlanLabel(example.Input, example.Output) is int planLabel)
+        if (_model.PerceptionPlan && labels.Plan is int planLabel)
             _model.TrainPlanPerception(inputTokens, perception, planLabel);
-        if (_model.PerceptionQuery && ResolveQueryLabel(inputTokens, example.Output) is { } ql)
+        if (_model.PerceptionQuery && labels.Query is { } ql)
             _model.TrainQueryOpPerception(inputTokens, perception, ql.OperationId);
     }
 
@@ -2051,8 +2043,11 @@ public sealed class GenesisTrainer
      private static double Clamp01(double value)
          => Math.Max(0.0, Math.Min(1.0, value));
 
+     // Per-epoch space maintenance — the LIVE eviction path. Maintain() prunes/rebalances when the space is
+     // noisy or over its relation budget (protecting anchors, flooring at Min*), and is a no-op otherwise.
+     // (Manage() remains the read-only assessment used by diagnostics.)
      public SpaceManagementResult ManagePlatonicSpace()
-         => _spaceManager.Manage();
+         => _spaceManager.Maintain();
 
      public (int Nodes, int Relations) GetPlatonicSpaceSize()
          => (_platonicSpace.NodeCount, _platonicSpace.RelationCount);

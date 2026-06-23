@@ -34,15 +34,30 @@ public static class TransformQualityMetrics
 
         // Normalize observation count: 0..1 where 1 = top relation count
         var maxCount = allRelations.Max(r => r.ObservationCount);
+        // Penalize very rare relations (outliers)
+        var avgCount = allRelations.Average(r => r.ObservationCount);
+        return ComputeRelationUtility(relation, maxCount, avgCount);
+    }
+
+    // Hot-loop variant: max/avg observation counts are precomputed ONCE by the caller (GenerateReport scans
+    // allRelations n times otherwise → O(n²)). Returns bit-identical results to the scan-each-time form: the
+    // public overload above derives maxCount/avgCount via the SAME Max/Average and forwards here.
+    private static double ComputeRelationUtility(
+        (string Left, string Right, long ObservationCount) relation,
+        long maxCount,
+        double avgCount)
+    {
+        if (relation.ObservationCount == 0)
+            return 0.0;
+
         var countScore = maxCount > 0 ? relation.ObservationCount / (double)maxCount : 0.0;
 
-        // Penalize very rare relations (outliers)
-        var threshold = allRelations.Average(r => r.ObservationCount) / 2.0;
+        var threshold = avgCount / 2.0;
         var rarity_penalty = relation.ObservationCount < threshold ? 0.3 : 1.0;
 
         // Higher count is good, but diminishing returns after ~1000 obs
         var saturated = Math.Min(1.0, relation.ObservationCount / 1000.0);
-        
+
         // Utility = (normalized count) * (rarity adjustment) * (saturation curve)
         return countScore * rarity_penalty * saturated;
     }
@@ -119,65 +134,6 @@ public static class TransformQualityMetrics
     }
 
     /// <summary>
-    /// Compute generalization score: how well can this relation explain new examples?
-    /// 
-    /// A relation is generalizable if:
-    /// - It has high observation count (seen many times = likely captures real pattern)
-    /// - Its targets are semantically related (arithmetic: numeric-to-numeric, not scattered)
-    /// 
-    /// Returns [0..1] where 1 = perfect generalization, 0 = no generalization.
-    /// </summary>
-    public static double ComputeGeneralizationScore(
-        string sourceOperation,
-        IReadOnlyCollection<(string Left, string Right, long ObservationCount)> allRelations,
-        IReadOnlyCollection<(string Target, int Count)> targetTypes)
-    {
-        // Find all relations from this source
-        var relationsFromSource = allRelations
-            .Where(r => r.Left == sourceOperation)
-            .ToList();
-
-        if (relationsFromSource.Count == 0)
-            return 0.0;
-
-        var totalObs = (double)relationsFromSource.Sum(r => r.ObservationCount);
-
-        // Check: does this operation consistently target one target type?
-        // Example: "add" should mostly target numeric nodes
-        var targetCounts = relationsFromSource
-            .GroupBy(r => ClassifyTarget(r.Right))
-            .Select(g => (Type: g.Key, Count: (double)g.Sum(r => r.ObservationCount)))
-            .OrderByDescending(x => x.Count)
-            .ToList();
-
-        if (targetCounts.Count == 0)
-            return 0.0;
-
-        // If top target type accounts for >80% of observations, it's well-generalized
-        var topTargetRatio = targetCounts[0].Count / totalObs;
-        var concentration = Math.Min(1.0, topTargetRatio * 1.25);  // Reward >80%
-
-        // Also reward high total observation count (seen many times = reliable)
-        var frequency_reward = Math.Min(1.0, totalObs / 500.0);
-
-        return concentration * 0.7 + frequency_reward * 0.3;
-    }
-
-    /// <summary>
-    /// Classify a target symbol (numeric, face, operation, etc).
-    /// </summary>
-    private static string ClassifyTarget(string target)
-    {
-        if (target.StartsWith("face:"))
-            return "face";
-        if (int.TryParse(target, out _))
-            return "numeric";
-        if (target is "add" or "sub" or "mul" or "div" or "+" or "-" or "*" or "/")
-            return "operation";
-        return "other";
-    }
-
-    /// <summary>
     /// Compute quality-adjusted loss term for a newly learned relation.
     /// 
     /// If the relation is high-quality, loss penalty is low (model is rewarded).
@@ -222,8 +178,13 @@ public static class TransformQualityMetrics
                 TopOperations: [],
                 LowestUtilityRelations: []);
 
+        // Precompute the population stats ComputeRelationUtility needs ONCE (was re-scanning allRelations
+        // via .Max/.Average for every relation → O(n²)). Same Max/Average → bit-identical per-relation utility.
+        var maxCount = allRelations.Max(r => r.ObservationCount);
+        var avgCount = allRelations.Average(r => r.ObservationCount);
+
         var utilities = allRelations
-            .Select(r => (Relation: r, Utility: ComputeRelationUtility(r, allRelations)))
+            .Select(r => (Relation: r, Utility: ComputeRelationUtility(r, maxCount, avgCount)))
             .OrderByDescending(x => x.Utility)
             .ToList();
 

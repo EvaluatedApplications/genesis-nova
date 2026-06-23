@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using GenesisNova.Cognition;
 using GenesisNova.Data;
 using GenesisNova.Runtime;
 
@@ -39,6 +40,8 @@ public sealed class GenesisModularTrainingOrchestrator
         public string WorkDir { get; init; } = Path.Combine(Path.GetTempPath(), "genesis-nova-train");
         public int AutosaveSeconds { get; init; } = 120;      // checkpoint at least this often DURING training (0 = off);
                                                               // train cycles otherwise never persist (TrainAsync saves nothing)
+        public bool TrainOnFailureOnly { get; init; }         // predict each example; train ONLY the currently-wrong ones
+                                                              // (skip already-correct — re-checked next cycle, so regressions re-admit)
     }
 
     public async Task RunAsync(GenesisEvalAppRuntime runtime, ITrainingCurriculum curriculum, Options opt, Action<CycleMetrics>? onCycle, CancellationToken ct)
@@ -47,8 +50,19 @@ public sealed class GenesisModularTrainingOrchestrator
         var chunkPath = Path.Combine(opt.WorkDir, "modular-chunk.txt");
         foreach (var op in curriculum.OperationTokens) { try { runtime.RegisterOperationToken(op); } catch { } } // route triggers (find/contains/calls)
         double baseLr = 0; try { baseLr = runtime.LearningRate; } catch { /* runtime owns LR */ }
-        double lastAcc = 0; var cycle = 0;
+        double lastAcc = 0, lastLoss = 0; var cycle = 0;
         var sinceSave = Stopwatch.StartNew();
+
+        // LEARNING MODULES (Open/Closed): the loop iterates these registered mechanisms instead of hardcoding each
+        // one. PRE-TRAIN batch filter (correctness gate) + per-graded-probe reactors (credit assignment → Rung-1
+        // disruption → Rung-2 gradient), in this registry order. Add a mechanism = add a module here.
+        var batchGate = new CorrectnessGateModule(runtime, opt.TrainOnFailureOnly, opt.ProbeRetries, opt.ProbeGateWaitMs);
+        var probeModules = new IProbeOutcomeModule[]
+        {
+            new CreditAssignmentModule(),
+            new DisruptionModule(),       // Rung 1
+            new FunctionGradientModule(), // Rung 2
+        };
 
         while (!ct.IsCancellationRequested)
         {
@@ -57,14 +71,24 @@ public sealed class GenesisModularTrainingOrchestrator
             // Cycle-level LR anneal: full step until near the bar, then shrink (only near-the-top oscillation).
             if (baseLr > 0) { try { runtime.LearningRate = baseLr * AnnealFactor(lastAcc, opt.MasteryBar); } catch { } }
 
-            var batch = curriculum.NextTrainBatch();                       // top-level decides WHAT trains (mix vs focus)
-            if (batch.Count == 0) { try { await Task.Delay(500, ct); } catch { break; } continue; }
-            try { File.WriteAllLines(chunkPath, batch.Select(e => $"{e.Input} => {e.Output}")); } catch { }
+            var generated = curriculum.NextTrainBatch();                   // top-level decides WHAT trains (mix vs focus)
+            if (generated.Count == 0) { try { await Task.Delay(500, ct); } catch { break; } continue; }
 
-            double loss;
-            try { loss = (await runtime.TrainAsync(chunkPath, epochs: 1)).AverageLoss.TotalLoss; }
-            catch (OperationCanceledException) { break; }
-            catch (Exception) { try { await Task.Delay(2000, ct); } catch { break; } continue; } // OOM/autograd handled inside TrainAsync; this is a backstop
+            // CORRECTNESS-GATED TRAINING (the anti-erosion gate, opt-in): keep only the currently-WRONG examples so a
+            // mastered skill trains nothing and gradient pours into the failing ones. Pass-through when disabled.
+            var batch = await batchGate.FilterAsync(generated, ct);
+
+            // Train ONLY the wrong set. When everything's correct, skip the gradient step entirely (carry the last
+            // loss) but STILL fall through to the probe/grade below — that re-check is what catches a regression.
+            var loss = lastLoss;
+            if (batch.Count > 0)
+            {
+                try { File.WriteAllLines(chunkPath, batch.Select(e => $"{e.Input} => {e.Output}")); } catch { }
+                try { loss = (await runtime.TrainAsync(chunkPath, epochs: 1)).AverageLoss.TotalLoss; }
+                catch (OperationCanceledException) { break; }
+                catch (Exception) { try { await Task.Delay(2000, ct); } catch { break; } continue; } // OOM/autograd handled inside TrainAsync; backstop
+                lastLoss = loss;
+            }
             cycle++;
 
             // PER-UNIT probe + grade (read AFTER NextTrainBatch so a focused curriculum has set its active set):
@@ -93,11 +117,19 @@ public sealed class GenesisModularTrainingOrchestrator
                     var output = res.Result.Output ?? string.Empty;
                     var pq = GenesisGrader.Quality(output, probe.Allowed, probe.RequiredDepth, neural, probe.RequirePlatonic, probe.AnswerVocabulary, probe.SurfaceStrict);
                     uQ += pq; if (!neural) uPlat++; uConf += res.Result.PlatonicConfidence;
+                    // VALUE-correct ignoring route — distinguishes "wrong answer" from "right answer via the NEURAL
+                    // fallback" (which platonic-mastery grading scores 0). Gates BOTH the display AND the Rung-1
+                    // disruption: we must NOT repel a value-correct answer that merely routed neural.
+                    var valueCorrect = pq > 0 || GenesisGrader.Quality(output, probe.Allowed, probe.RequiredDepth, neural, false, probe.AnswerVocabulary, probe.SurfaceStrict) > 0;
+                    // LEARNING MODULES react to this graded probe in registry order: credit-assignment (strengthen/
+                    // weaken the edges the answer used) → Rung-1 disruption (repel a value-wrong answer off the anchor)
+                    // → Rung-2 function gradient. Each self-gates; adding a probe-stage mechanism is adding a module.
+                    var outcome = new ProbeOutcome(runtime, probe, output, neural, valueCorrect, pq,
+                        res.Result.Evidence ?? Array.Empty<PlatonicEvidence>());
+                    foreach (var m in probeModules)
+                        try { m.OnGradedProbe(in outcome); } catch { }
                     if (capture)
                     {
-                        // value-correct ignoring route — lets the display tell "wrong answer" apart from "right
-                        // answer, but via the NEURAL fallback" (which platonic-mastery grading deliberately scores 0).
-                        var valueCorrect = pq > 0 || GenesisGrader.Quality(output, probe.Allowed, probe.RequiredDepth, neural, false, probe.AnswerVocabulary, probe.SurfaceStrict) > 0;
                         var sample = new ProbeSample(probe.Query, output, pq > 0, !neural, string.Join(" / ", probe.Allowed), valueCorrect);
                         sampleSeen++;
                         if (samples.Count < opt.SampleCount) samples.Add(sample);
@@ -111,7 +143,15 @@ public sealed class GenesisModularTrainingOrchestrator
             var purity = aggN > 0 ? (double)aggPlatonic / aggN : 0.0;
             var conf = aggN > 0 ? aggConf / aggN : 0.0;
             lastAcc = acc;
-            onCycle?.Invoke(new CycleMetrics(cycle, curriculum.Difficulty, loss, acc, purity, conf, sw.Elapsed.TotalSeconds, samples));
+            // Collect the learning modules' activity counters into one dict (telemetry surface) — namespaced by module.
+            var moduleMetrics = new Dictionary<string, double>();
+            foreach (var kv in batchGate.Metrics()) moduleMetrics[$"{batchGate.Name}.{kv.Key}"] = kv.Value;
+            foreach (var m in probeModules)
+                foreach (var kv in m.Metrics()) moduleMetrics[$"{m.Name}.{kv.Key}"] = kv.Value;
+            IReadOnlyList<long>? opBalance = null;
+            try { opBalance = runtime.OpClassBalance; } catch { }
+            onCycle?.Invoke(new CycleMetrics(cycle, curriculum.Difficulty, loss, acc, purity, conf, sw.Elapsed.TotalSeconds, samples,
+                TrainedCount: batch.Count, GeneratedCount: generated.Count, OpClassBalance: opBalance, ModuleMetrics: moduleMetrics));
 
             // Periodic AUTOSAVE during training — TrainAsync(savePath:null) persists NOTHING, so a long unattended
             // run otherwise risked losing every cycle on a crash. Time-based so the cadence is stable regardless of
@@ -138,5 +178,5 @@ public sealed class GenesisModularTrainingOrchestrator
 
     // Anti-oscillation LR curve (consolidated from the bootstrap regime + daemon): full LR until just below the
     // bar (a sub-target plateau needs MORE step, not less), then damp as it nears/holds the top.
-    private static double AnnealFactor(double acc, double target) => acc < target - 0.03 ? 1.0 : acc < target + 0.02 ? 0.30 : 0.10;
+    private static double AnnealFactor(double acc, double target) => MasteryAnneal.Factor(acc, target);
 }

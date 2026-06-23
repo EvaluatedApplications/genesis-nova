@@ -1,8 +1,7 @@
 namespace GenesisNova.Infer;
 
 public readonly record struct InferenceTelemetryHint(
-    double BiasScale,
-    bool EnableContextBias)
+    double BiasScale)
 {
-    public static InferenceTelemetryHint Default { get; } = new(1.0, true);
+    public static InferenceTelemetryHint Default { get; } = new(1.0);
 }

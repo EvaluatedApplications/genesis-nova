@@ -27,9 +27,9 @@ public sealed class PlatonicShapeRegistry
 
     private readonly Dictionary<string, PlatonicGlider> _shapes =
         new(StringComparer.OrdinalIgnoreCase);
-    private readonly PlatonicSpaceMemory _memory;
+    private readonly IPlatonicSpace _memory;
 
-    public PlatonicShapeRegistry(PlatonicSpaceMemory memory)
+    public PlatonicShapeRegistry(IPlatonicSpace memory)
     {
         _memory = memory ?? throw new ArgumentNullException(nameof(memory));
         SeedPrimitiveShapes();

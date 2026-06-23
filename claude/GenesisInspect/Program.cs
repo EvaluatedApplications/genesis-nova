@@ -208,9 +208,6 @@ async Task GymProbeAsync(int level)
     H($"GYM CAPABILITY PROBE — level {level} curriculum (per-skill quality + dominant route)");
     var rng = new Random(20260618);
     int maxN = 9 + level * 5;
-    int wordCap = Math.Min(20, 9 + level);
-    var words = NumberWordVocabulary.Entries.Where(e => e.Value <= wordCap).ToArray();
-    string? WordOf(int v) => NumberWordVocabulary.Entries.FirstOrDefault(e => e.Value == v).Word;
     const int G = 8; // fresh generalizing instances per skill
     string Frame(string[] f, params object[] a) => string.Format(f[rng.Next(f.Length)], a);
 
@@ -232,13 +229,19 @@ async Task GymProbeAsync(int level)
     Add("synonym (any of group)", syn);
     var cat = New(); foreach (var (item, category) in cats) cat.Add((Frame(GymTrainer.CategoryFrames, item), new[] { category }, catVocab, false));
     Add("category (item->kind)", cat);
-    var nw1 = New(); foreach (var (v, w) in words) nw1.Add((Frame(GymTrainer.DigitWordFrames, v), new[] { w }, null, true)); Add("numword digit->word", nw1);
-    var nw2 = New(); foreach (var (v, w) in words) nw2.Add((Frame(GymTrainer.WordDigitFrames, w), new[] { v.ToString() }, null, true)); Add("numword word->digit", nw2);
+    var nw1 = New(); var nw2 = New(); int numCap = Math.Min(9999, 9 + level * 11); // generative — scales with level
+    for (int i = 0; i < G + 3; i++)
+    {
+        int n = rng.Next(0, numCap + 1); var w = NumberWordVocabulary.ToWords(n);
+        nw1.Add((Frame(GymTrainer.DigitWordFrames, n), new[] { w }, null, true));            // digit→word: surface-strict word
+        nw2.Add((Frame(GymTrainer.WordDigitFrames, w), new[] { n.ToString() }, null, false)); // word→digit: value-graded digit
+    }
+    Add("numword digit->word", nw1); Add("numword word->digit", nw2);
 
     var add = New(); for (int i = 0; i < G; i++) { int x = rng.Next(0, maxN + 1), y = rng.Next(0, maxN + 1); add.Add(($"{x} + {y}", new[] { (x + y).ToString() }, null, false)); } Add("add", add);
     var sub = New(); for (int i = 0; i < G; i++) { int x = rng.Next(0, maxN + 1), y = rng.Next(0, x + 1); sub.Add(($"{x} - {y}", new[] { (x - y).ToString() }, null, false)); } Add("sub", sub);
     var mul = New(); for (int i = 0; i < G; i++) { int x = rng.Next(1, maxN + 1), y = rng.Next(1, maxN + 1); mul.Add(($"{x} x {y}", new[] { (x * y).ToString() }, null, false)); } Add("mul", mul);
-    var a2w = New(); for (int i = 0; i < G; i++) { int x = rng.Next(0, 11), y = rng.Next(0, 20 - x + 1); var s = x + y; a2w.Add((Frame(GymTrainer.ArithWordFrames, x, y), new[] { WordOf(s) ?? s.ToString() }, null, true)); } Add("arith->word", a2w);
+    var a2w = New(); int a2wCap = Math.Min(4999, 9 + level * 6); for (int i = 0; i < G; i++) { int x = rng.Next(0, a2wCap + 1), y = rng.Next(0, a2wCap + 1); a2w.Add((Frame(GymTrainer.ArithWordFrames, x, y), new[] { NumberWordVocabulary.ToWords(x + y) }, null, true)); } Add("arith->word", a2w);
     var foldA = New(); for (int i = 0; i < G; i++) { int k = Math.Max(3, 3 + level / 8); var xs = Enumerable.Range(0, k).Select(_ => rng.Next(0, maxN + 1)).ToArray(); foldA.Add((string.Join(" + ", xs), new[] { xs.Sum().ToString() }, null, false)); } Add("fold-add (a+b+c)", foldA);
     var foldM = New(); for (int i = 0; i < G; i++) { int k = Math.Max(3, 3 + level / 8); int cap2 = Math.Max(2, maxN / 3); var xs = Enumerable.Range(0, k).Select(_ => rng.Next(1, cap2 + 1)).ToArray(); foldM.Add((string.Join(" x ", xs), new[] { xs.Aggregate(1L, (s, v) => s * v).ToString() }, null, false)); } Add("fold-mul (a x b x c)", foldM);
     var expr = New(); for (int i = 0; i < G; i++) { int a = rng.Next(1, Math.Max(2, maxN / 2) + 1), b = rng.Next(1, Math.Max(2, maxN / 3) + 1); int prod = a * b; int c = rng.Next(0, maxN + 1); expr.Add(($"{a} x {b} + {c}", new[] { (prod + c).ToString() }, null, false)); } Add("expr (a x b + c)", expr);
@@ -249,7 +252,8 @@ async Task GymProbeAsync(int level)
     {
         bool m = rng.Next(2) == 0; int kk = m ? rng.Next(2, 5) : rng.Next(2, 7);
         long F(long v) => m ? v * kk : v + kk;
-        var ops = new HashSet<int>(); while (ops.Count < 4) ops.Add(rng.Next(1, 13)); var a = ops.ToArray();
+        int opMax = 8 + level * 2; // operand range grows with level (matches GymTrainer)
+        var ops = new HashSet<int>(); while (ops.Count < 4) ops.Add(rng.Next(1, opMax + 1)); var a = ops.ToArray();
         var demos = string.Join(" ", a.Take(3).Select(o => $"fn {o} is {F(o)}"));
         fns.Add(($"{demos} fn {a[3]} is", new[] { F(a[3]).ToString() }, null, false));
     }

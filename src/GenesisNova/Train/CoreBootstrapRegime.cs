@@ -73,12 +73,7 @@ public sealed class CoreBootstrapRegime
     // Anneal RELATIVE to the lesson's own target so the curve works for both the strict (0.95) and the
     // majority-mastery (0.85, learned/stochastic) bars: full steps until just below target, shrink in the
     // approach band, smallest at/above. (For target 0.95 this reproduces the original 0.92/0.97 cuts.)
-    private static double AnnealFactor(double accuracy, double target)
-    {
-        if (accuracy < target - 0.03) return 1.00;  // still climbing (incl. the plateau zone): full steps
-        if (accuracy < target + 0.02) return 0.30;  // near the top: shrink to settle, stop overshooting
-        return 0.10;                                 // at mastery: small steps to HOLD without bouncing out
-    }
+    private static double AnnealFactor(double accuracy, double target) => MasteryAnneal.Factor(accuracy, target);
 
     public IReadOnlyList<BootstrapLessonOutcome> Run(
         IReadOnlyList<CoreBootstrapLesson>? lessons = null,

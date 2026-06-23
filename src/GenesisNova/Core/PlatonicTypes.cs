@@ -69,11 +69,3 @@ public record PlatonicState(
     public Dictionary<string, double[]> EmbeddingCacheOrEmpty => EmbeddingCache ?? new();
 }
 
-/// <summary>
-/// A sequence of tick actions to execute.
-/// </summary>
-public record TickSequence(
-    ImmutableArray<TickAction> Actions,
-    double[] ActionLogits,
-    double Confidence
-);

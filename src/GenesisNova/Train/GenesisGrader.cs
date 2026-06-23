@@ -39,17 +39,32 @@ public static class GenesisGrader
                              : SetQuality(output, allowed, requiredDepth, answerVocabulary);
     }
 
-    // Surface-strict: the requested FORMAT is the answer. TOKEN-level occurrence of the exact form (so "17" does
-    // NOT satisfy "7" and "the answer is seven" DOES satisfy "seven"); NO value-equivalence fallback, so the digit
-    // "7" never satisfies a request for the word "seven" (and vice-versa). Filler is free; runaway length / a
-    // competing same-type form is taxed.
+    private static readonly char[] TokenSeparators = { ' ', ',', '.', '!', '?', ';', ':', '\t', '\n', '\r' };
+    private static List<string> CanonTokens(string? s) =>
+        (s ?? string.Empty).Split(TokenSeparators, StringSplitOptions.RemoveEmptyEntries).Select(Canon).Where(t => t.Length > 0).ToList();
+
+    // Surface-strict: the requested FORMAT is the answer. An allowed answer matches when its token SEQUENCE appears
+    // CONTIGUOUSLY in the output — so a MULTI-WORD form ("forty seven") matches, while exact per-token equality keeps
+    // "17" from satisfying "7" and the digit "47" from satisfying the word "forty seven" (and vice-versa). NO
+    // value-equivalence fallback. Filler is free; runaway length / a competing same-type form is taxed.
     private static double SurfaceQuality(string output, IReadOnlyList<string> allowed, int requiredDepth, IReadOnlyList<string>? vocab)
     {
-        var outTokens = output.Split(new[] { ' ', ',', '.', '!', '?', ';', ':', '\t', '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries)
-            .Select(Canon).Where(t => t.Length > 0).ToList();
+        var outTokens = CanonTokens(output);
         if (outTokens.Count == 0) return 0.0;
-        var matched = allowed.Where(a => { var c = Canon(a); return c.Length > 0 && outTokens.Contains(c); })
-            .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        bool Has(string a)
+        {
+            var at = CanonTokens(a);
+            if (at.Count == 0) return false;
+            for (var i = 0; i + at.Count <= outTokens.Count; i++)
+            {
+                var ok = true;
+                for (var j = 0; j < at.Count; j++)
+                    if (!string.Equals(outTokens[i + j], at[j], StringComparison.Ordinal)) { ok = false; break; }
+                if (ok) return true;
+            }
+            return false;
+        }
+        var matched = allowed.Where(Has).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         if (matched.Count == 0) return 0.0;
         var required = Math.Max(1, Math.Min(requiredDepth, allowed.Count));
         var coverage = Math.Min(matched.Count, required) / (double)required;
@@ -57,13 +72,14 @@ public static class GenesisGrader
         double cleanliness;
         if (vocab is { Count: > 0 })
         {
-            var allowedSet = new HashSet<string>(allowed.Select(Canon));
-            var competing = outTokens.Distinct().Count(t => !allowedSet.Contains(t) && vocab.Any(v => Canon(v) == t));
+            var allowedTokens = new HashSet<string>(allowed.SelectMany(CanonTokens));
+            var competing = outTokens.Distinct().Count(t => !allowedTokens.Contains(t) && vocab.Any(v => Canon(v) == t));
             cleanliness = Math.Clamp(1.0 - 0.5 * competing, 0.2, 1.0);
         }
         else
         {
-            var excess = Math.Max(0, outTokens.Count - matched.Count - 4); // ~4 filler tokens free; runaway taxed
+            var matchedTokens = matched.Sum(a => CanonTokens(a).Count);
+            var excess = Math.Max(0, outTokens.Count - matchedTokens - 4); // ~4 filler tokens free; runaway taxed
             cleanliness = Math.Clamp(1.0 - 0.1 * excess, 0.5, 1.0);
         }
         return coverage * cleanliness;

@@ -82,20 +82,6 @@ public sealed class VPTree
         return result;
     }
 
-    /// <summary>
-    /// Find all concepts within <paramref name="radius"/> of the query embedding.
-    /// </summary>
-    public IReadOnlyList<(string Name, double Distance)> RangeQuery(double[] query, double radius)
-    {
-        if (_root is null)
-            return Array.Empty<(string, double)>();
-
-        var results = new List<(string, double)>();
-        RangeSearch(_root, query, radius, results);
-        results.Sort((a, b) => a.Item2.CompareTo(b.Item2));
-        return results;
-    }
-
     // ── Build ──
 
     private VPNode? Build(int[] indices, int start, int end, Random rng)
@@ -172,19 +158,6 @@ public sealed class VPTree
             if (node.Left is not null && dist - tau < node.Mu)
                 Search(node.Left, query, k, excludeName, heap, ref tau);
         }
-    }
-
-    private void RangeSearch(VPNode node, double[] query, double radius, List<(string, double)> results)
-    {
-        var dist = EuclideanDistance(_points[node.Index], query);
-
-        if (dist <= radius)
-            results.Add((_ids[node.Index], dist));
-
-        if (node.Left is not null && dist - radius < node.Mu)
-            RangeSearch(node.Left, query, radius, results);
-        if (node.Right is not null && dist + radius >= node.Mu)
-            RangeSearch(node.Right, query, radius, results);
     }
 
     // Face-scoped Euclidean distance: only dims [_rangeStart .. min(_rangeEnd, len)) contribute, so the

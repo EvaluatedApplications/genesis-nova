@@ -17,13 +17,7 @@ public sealed class GenesisRuntimeState
         Config = config;
         Tokenizer = new WhitespaceGenesisTokenizer();
         Model = new GenesisNeuralModel(config);
-        Memory = new PlatonicSpaceMemory(
-            faceDimension: config.FaceDimension,
-            seed: config.Seed,
-            maxNodes: config.MaxPlatonicNodes,
-            maxRelations: config.MaxPlatonicRelations);
-        Memory.UseInfoNceRepulsion = false; // C4/C2: MANUAL constant-step repulsion is live — InfoNCE's proportional
-                                            // push is unbounded off the unit sphere (normalization is now clamp-only)
+        Memory = CreateMemory(config);
         Conversation = new GenesisConversationMemory();
         Trainer = new GenesisTrainer(Tokenizer, Model, Memory, config);
         Orchestrator = new GenesisTrainingOrchestrator(Trainer, config);
@@ -34,13 +28,14 @@ public sealed class GenesisRuntimeState
             ResolvePlatonicCheckpointPath,
             transformAccumulator: Trainer.TransformAccumulator,
             foldPathDiscovery: Trainer.FoldPathDiscovery);
+        NovaConfig.FromLegacy(config).ApplyTo(Model, Memory, Inference, Trainer); // ONE place for every mechanism toggle
         Trainer.SetInferencePolicy(Inference);
     }
 
     public GenesisNovaConfig Config { get; private set; }
     public WhitespaceGenesisTokenizer Tokenizer { get; private set; }
     public GenesisNeuralModel Model { get; private set; }
-    public PlatonicSpaceMemory Memory { get; private set; }
+    public IPlatonicSpace Memory { get; private set; }
     public GenesisConversationMemory Conversation { get; private set; }
     public GenesisTrainer Trainer { get; private set; }
     public GenesisTrainingOrchestrator Orchestrator { get; private set; }
@@ -58,13 +53,7 @@ public sealed class GenesisRuntimeState
         Config = config;
         Tokenizer = tokenizer;
         Model = model;
-        Memory = new PlatonicSpaceMemory(
-            faceDimension: config.FaceDimension,
-            seed: config.Seed,
-            maxNodes: config.MaxPlatonicNodes,
-            maxRelations: config.MaxPlatonicRelations);
-        Memory.UseInfoNceRepulsion = false; // C4/C2: MANUAL constant-step repulsion is live — InfoNCE's proportional
-                                            // push is unbounded off the unit sphere (normalization is now clamp-only)
+        Memory = CreateMemory(config);
         if (platonicSpaceSnapshot is not null)
             Memory.ImportSnapshot(platonicSpaceSnapshot);
         Conversation = new GenesisConversationMemory();
@@ -80,6 +69,7 @@ public sealed class GenesisRuntimeState
             ResolvePlatonicCheckpointPath,
             transformAccumulator: Trainer.TransformAccumulator,
             foldPathDiscovery: Trainer.FoldPathDiscovery);
+        NovaConfig.FromLegacy(config).ApplyTo(Model, Memory, Inference, Trainer); // ONE place for every mechanism toggle
         Trainer.SetInferencePolicy(Inference);
     }
 
@@ -116,6 +106,17 @@ public sealed class GenesisRuntimeState
         if (workerThreads < target)
             ThreadPool.SetMinThreads(target, completionThreads);
     }
+
+    /// <summary>Select the substrate implementation behind the IPlatonicSpace contract (PLATONIC_THEORY.md §11
+    /// rebuild). Default = legacy PlatonicSpaceMemory; <c>UseDialecticalCore</c> = the ground-up DialecticalSpace.</summary>
+    private static IPlatonicSpace CreateMemory(GenesisNovaConfig config)
+        => config.UseDialecticalCore
+            ? new Cognition.Platonic.DialecticalSpace(config.FaceDimension, config.Seed)
+            : new PlatonicSpaceMemory(
+                faceDimension: config.FaceDimension,
+                seed: config.Seed,
+                maxNodes: config.MaxPlatonicNodes,
+                maxRelations: config.MaxPlatonicRelations);
 
     private string? ResolvePlatonicCheckpointPath()
     {

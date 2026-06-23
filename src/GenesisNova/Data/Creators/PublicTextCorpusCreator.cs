@@ -227,14 +227,6 @@ public sealed class PublicTextCorpusCreator : IExampleCreator
         return NormalizeSnippet(input);
     }
 
-    [Obsolete("Use LoadCorpusSnippetsAsync() instead.", false)]
-    private ImmutableArray<string> LoadCorpusSnippets(int minimumSnippetCount, bool trainingPressure)
-    {
-        return LoadCorpusSnippetsAsync(minimumSnippetCount, trainingPressure, CancellationToken.None)
-            .GetAwaiter()
-            .GetResult();
-    }
-
     private async Task<ImmutableArray<string>> LoadCorpusSnippetsAsync(
         int minimumSnippetCount, bool trainingPressure, CancellationToken ct = default)
     {
@@ -292,14 +284,6 @@ public sealed class PublicTextCorpusCreator : IExampleCreator
         return localSnippets.Length > 0 ? localSnippets : _fallbackSnippets;
     }
 
-    [Obsolete("Use LoadCorpusPairsAsync() instead.", false)]
-    private ImmutableArray<(string Input, string Output)> LoadCorpusPairs(int minimumPairCount, bool trainingPressure)
-    {
-        return LoadCorpusPairsAsync(minimumPairCount, trainingPressure, CancellationToken.None)
-            .GetAwaiter()
-            .GetResult();
-    }
-
     private async Task<ImmutableArray<(string Input, string Output)>> LoadCorpusPairsAsync(
         int minimumPairCount, bool trainingPressure, CancellationToken ct = default)
     {
@@ -355,14 +339,6 @@ public sealed class PublicTextCorpusCreator : IExampleCreator
             ClearHydrationCooldown(localFile);
 
         return localPairs.Length > 0 ? localPairs : _fallbackPairs;
-    }
-
-    [Obsolete("Use FetchAndPersistRemoteCorpusAsync() instead.", false)]
-    private (bool Hydrated, string? Error) FetchAndPersistRemoteCorpus(string localPath, int targetRows)
-    {
-        return FetchAndPersistRemoteCorpusAsync(localPath, targetRows, CancellationToken.None)
-            .GetAwaiter()
-            .GetResult();
     }
 
     private async Task<(bool Hydrated, string? Error)> FetchAndPersistRemoteCorpusAsync(
@@ -448,15 +424,6 @@ public sealed class PublicTextCorpusCreator : IExampleCreator
             ClearHydrationCooldown(localPath);
 
         return (wroteAnyRows, firstError);
-    }
-
-    [Obsolete("Use FetchRowsPageAsync() instead.", false)]
-    private (int RawRowsReturned, ImmutableArray<string> Rows, string? Error) FetchRowsPage(
-        string localPath, int offset, int length)
-    {
-        return FetchRowsPageAsync(localPath, offset, length, CancellationToken.None)
-            .GetAwaiter()
-            .GetResult();
     }
 
     private async Task<(int RawRowsReturned, ImmutableArray<string> Rows, string? Error)> FetchRowsPageAsync(

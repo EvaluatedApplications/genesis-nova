@@ -6,15 +6,9 @@ public sealed class RelationCreator : IExampleCreator
 {
     private const int StepSize = 16;
 
-    private static readonly (string item, string category)[] Relations =
-    [
-        ("apple", "fruit"), ("banana", "fruit"), ("orange", "fruit"), ("grape", "fruit"),
-        ("dog", "animal"), ("cat", "animal"), ("wolf", "animal"), ("bear", "animal"),
-        ("red", "color"), ("blue", "color"), ("green", "color"), ("yellow", "color"),
-        ("car", "vehicle"), ("truck", "vehicle"), ("bike", "vehicle"), ("boat", "vehicle"),
-        ("piano", "instrument"), ("drum", "instrument"), ("violin", "instrument"), ("flute", "instrument"),
-        ("oak", "tree"), ("pine", "tree"), ("cedar", "tree"), ("maple", "tree")
-    ];
+    // Shared item→category reference table (see CreatorText.ItemCategories); RelationCreator applies its own
+    // StepSize-rotation level slicing over it.
+    private static readonly (string item, string category)[] Relations = CreatorText.ItemCategories;
 
     public string Name => "relation:category";
     public int EstimatedComplexity => 20;

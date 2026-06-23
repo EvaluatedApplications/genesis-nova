@@ -56,20 +56,17 @@ public sealed record MatrixSnapshot(int Rows, int Cols, double[] Values)
         var rows = matrix.GetLength(0);
         var cols = matrix.GetLength(1);
         var values = new double[rows * cols];
-        var k = 0;
-        for (var i = 0; i < rows; i++)
-            for (var j = 0; j < cols; j++)
-                values[k++] = matrix[i, j];
+        // double[,] is row-major contiguous in the CLR, so its byte layout is identical to the row-major
+        // double[] target — a single BlockCopy reproduces the same values the nested i,j loop did.
+        Buffer.BlockCopy(matrix, 0, values, 0, values.Length * sizeof(double));
         return new MatrixSnapshot(rows, cols, values);
     }
 
     public double[,] ToMatrix()
     {
         var matrix = new double[Rows, Cols];
-        var k = 0;
-        for (var i = 0; i < Rows; i++)
-            for (var j = 0; j < Cols; j++)
-                matrix[i, j] = Values[k++];
+        // Row-major byte layouts match (see From), so this restores exactly what the nested loop would.
+        Buffer.BlockCopy(Values, 0, matrix, 0, Rows * Cols * sizeof(double));
         return matrix;
     }
 }

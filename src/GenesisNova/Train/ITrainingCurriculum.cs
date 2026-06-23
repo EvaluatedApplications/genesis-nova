@@ -51,7 +51,9 @@ public readonly record struct CycleGrade(double Accuracy, double RoutePurity, do
 /// <summary>Per-cycle telemetry emitted by the orchestrator (UI curve / control endpoint consume this).</summary>
 public readonly record struct CycleMetrics(
     int Cycle, int Difficulty, double Loss, double Accuracy, double RoutePurity, double Confidence, double CycleSeconds,
-    IReadOnlyList<ProbeSample> Samples);
+    IReadOnlyList<ProbeSample> Samples, int TrainedCount = 0, int GeneratedCount = 0,
+    IReadOnlyList<long>? OpClassBalance = null,                  // op head window [abstain,add,sub,mul,div] — collapse visible
+    IReadOnlyDictionary<string, double>? ModuleMetrics = null); // per-learning-module activity counters
 
 /// <summary>A periodic diagnostic sample — a probe query, the model's output, whether it was correct, and
 /// whether it routed platonic (vs neural fallback).</summary>

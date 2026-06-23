@@ -223,11 +223,25 @@ public static class GenesisShardedCheckpointStore
     private static void CopyDir(string src, string dst)
     {
         Directory.CreateDirectory(dst);
-        Directory.CreateDirectory(Path.Combine(dst, "shards"));
+        var dstShards = Path.Combine(dst, "shards");
+        Directory.CreateDirectory(dstShards);
         File.Copy(Path.Combine(src, "manifest.json"), Path.Combine(dst, "manifest.json"), overwrite: true);
         var srcShards = Path.Combine(src, "shards");
+        var copied = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         if (Directory.Exists(srcShards))
             foreach (var f in Directory.EnumerateFiles(srcShards, "*.gnv"))
-                File.Copy(f, Path.Combine(dst, "shards", Path.GetFileName(f)), overwrite: true);
+            {
+                var name = Path.GetFileName(f);
+                File.Copy(f, Path.Combine(dstShards, name), overwrite: true);
+                copied.Add(name);
+            }
+
+        // Prune stale shards left in the DESTINATION from a previous copy — the destination must MIRROR the
+        // source (the copied shards are exactly the referenced set). Without this, lastgood accumulated every
+        // shard ever promoted and grew without bound (the Save path already prunes in WriteManifest; this copy
+        // path did not — the lastgood dir reached 100s of GB / ~13k files).
+        foreach (var f in Directory.EnumerateFiles(dstShards, "*.gnv"))
+            if (!copied.Contains(Path.GetFileName(f)))
+                try { File.Delete(f); } catch { /* best-effort */ }
     }
 }

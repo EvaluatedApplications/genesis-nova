@@ -20,17 +20,9 @@ namespace GenesisNova.Data.Creators;
 /// </summary>
 public sealed class CategoryRetrievalCreator : IExampleCreator
 {
-    // Item → category reference table (reference data, like RelationCreator's; the NN still LEARNS the
-    // mapping from the pairs). Ordered so difficulty-0 covers four members each of four categories.
-    private static readonly (string Item, string Category)[] Table =
-    [
-        ("apple", "fruit"), ("banana", "fruit"), ("orange", "fruit"), ("grape", "fruit"),
-        ("dog", "animal"), ("cat", "animal"), ("wolf", "animal"), ("bear", "animal"),
-        ("red", "color"), ("blue", "color"), ("green", "color"), ("yellow", "color"),
-        ("car", "vehicle"), ("truck", "vehicle"), ("bike", "vehicle"), ("boat", "vehicle"),
-        ("piano", "instrument"), ("drum", "instrument"), ("violin", "instrument"), ("flute", "instrument"),
-        ("oak", "tree"), ("pine", "tree"), ("cedar", "tree"), ("maple", "tree"),
-    ];
+    // Item → category reference table (shared CreatorText.ItemCategories; the NN still LEARNS the mapping from
+    // the pairs). Ordered so difficulty-0 covers four members each of four categories.
+    private static readonly (string Item, string Category)[] Table = CreatorText.ItemCategories;
 
     // "corenova:" prefix marks a CORE tool-training lesson (teaches USING the platonic space — here
     // single-answer retrieval), not an outcome-/answer-producing creator. See NumberWordCreator.

@@ -10,8 +10,6 @@ internal sealed class AutonomousHistoryStore
 
     public IReadOnlyList<GenesisAutonomousTrainingRound> History => _history;
 
-    public void Clear() => _history.Clear();
-
     public void Append(GenesisAutonomousTrainingRound round)
     {
         _history.Add(round);

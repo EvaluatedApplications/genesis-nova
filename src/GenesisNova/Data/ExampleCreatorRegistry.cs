@@ -8,20 +8,6 @@ namespace GenesisNova.Data;
 /// </summary>
 public static class ExampleCreatorRegistry
 {
-    /// <summary>
-    /// Legacy creators kept for optional/manual reintegration.
-    /// They are intentionally hidden from default UI and autonomous planning.
-    /// </summary>
-    public static readonly IReadOnlyList<IExampleCreator> Legacy = new List<IExampleCreator>
-    {
-        new ArithmeticCreator("add"),    // arithmetic:add
-        new ArithmeticCreator("sub"),    // arithmetic:sub
-        new ArithmeticCreator("mul"),    // arithmetic:mul
-        new ArithmeticCreator("div"),    // arithmetic:div
-        new SequenceCreator(),           // sequence:next
-        new RelationCreator(),           // relation:category
-    };
-
     public static readonly IReadOnlyList<IExampleCreator> All = new List<IExampleCreator>
     {
         // ── Active autonomous-run curriculum: PLATONIC-MASTERABLE creators only ───────────────────────

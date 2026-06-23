@@ -79,9 +79,26 @@ public sealed class LearnedSpacingModel
     {
         if (token.Length == 1 && (char.IsPunctuation(token[0]) || char.IsSymbol(token[0])))
             return token;
-        if (token.Length > 0 && token.All(char.IsDigit))
+        if (token.Length == 0)
+            return "#O";
+
+        // Single pass with early exit: classify all-digit ("#D") / all-letter ("#W") / mixed-or-other ("#O").
+        // Equivalent to the prior token.All(char.IsDigit) then token.All(char.IsLetter) double-scan, but stops
+        // at the first character that rules a class out instead of scanning the whole string up to twice.
+        var allDigit = true;
+        var allLetter = true;
+        foreach (var ch in token)
+        {
+            if (allDigit && !char.IsDigit(ch))
+                allDigit = false;
+            if (allLetter && !char.IsLetter(ch))
+                allLetter = false;
+            if (!allDigit && !allLetter)
+                return "#O";
+        }
+        if (allDigit)
             return "#D";
-        if (token.Length > 0 && token.All(char.IsLetter))
+        if (allLetter)
             return "#W";
         return "#O";
     }

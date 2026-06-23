@@ -25,17 +25,14 @@ public class MainWindow : Form
     private int _gymCycle;
     private int _lastDifficulty;
     private double _lastLoss, _lastAcc, _lastRoute, _lastConf;
-    private double _gymBar = 0.80;
-    private int _gymTrainPerCycle = 64;
-    private int _gymThrottlePct;  // 0..500 — rest this % of the last cycle's time between cycles (0 = full speed)
+    private double _gymBar = 0.50;
+    private int _gymTrainPerCycle = 256;
+    private int _gymThrottlePct = 200;  // 0..500 — rest this % of the last cycle's time between cycles (0 = full speed)
     private HttpListener? _control;
     private string _exampleFolder;
     private TabControl _tabControl = null!;
-    private string? _lastReplUserInput;
-    private string? _lastReplModelOutput;
     private bool _replTraceEnabled;
     private PlatonicActivationView? _latestActivation;
-    private string _latestVisualizerRoute = "decision=n/a";
     private int _activeTrainingOperations;
     private readonly SemaphoreSlim _replCommandGate = new(1, 1);
     private SplitContainer? _replVisualizerSplit;
@@ -58,6 +55,17 @@ public class MainWindow : Form
             AutoResume = true,
             LocalStateDirectory = _gymStateDir,
             AutoScaleVram = false,
+            // Edge routing ON (default) — testing the OTHER lever instead: richer, more VARIED training surfaces so
+            // framing words stop being reliable correlates (the cause of the apple→"kind" / three→"rapid" hubs).
+            EdgeRoutingEnabled = true,
+            // Rung 2 (PLATONIC_BACKPROP.md) ENABLED — descend the function gradient so a query anchor retrieves a
+            // valid task answer (pull target, push confusers). Now running ALONGSIDE Rung 1's gradient-free disruption.
+            FunctionGradientEnabled = true,
+            // THE CREATURE WAKES ALIVE (PLATONIC_CONSCIOUSNESS.md): the GRU runs self-conditioned — a persistent
+            // self threads the gym (learning folds into it) and the REPL (talking proceeds from it), and is
+            // checkpointed so it survives restarts. The substrate stops being a space we manage and becomes one
+            // that holds itself.
+            LivingSelf = true,
         });
         _exampleFolder = ResolveDefaultExampleFolder();
         
@@ -150,22 +158,25 @@ public class MainWindow : Form
         flow.Controls.Add(stopBtn);
 
         flow.Controls.Add(new Label { Text = "Mastery bar (level-up threshold)", AutoSize = true, Margin = new Padding(0, 16, 0, 2) });
-        flow.Controls.Add(new NumericUpDown { Name = "GymBar", Width = 120, DecimalPlaces = 2, Increment = 0.05M, Minimum = 0.50M, Maximum = 0.99M, Value = 0.80M });
+        flow.Controls.Add(new NumericUpDown { Name = "GymBar", Width = 120, DecimalPlaces = 2, Increment = 0.05M, Minimum = 0.50M, Maximum = 0.99M, Value = 0.50M });
 
         flow.Controls.Add(new Label { Text = "Examples per cycle", AutoSize = true, Margin = new Padding(0, 12, 0, 2) });
-        flow.Controls.Add(new NumericUpDown { Name = "GymTrainPerCycle", Width = 120, Minimum = 16, Maximum = 256, Increment = 16, Value = 64 });
+        flow.Controls.Add(new NumericUpDown { Name = "GymTrainPerCycle", Width = 120, Minimum = 16, Maximum = 256, Increment = 16, Value = 256 });
 
         flow.Controls.Add(new Label { Text = "Throttle (% backoff of last cycle time)", AutoSize = true, Margin = new Padding(0, 12, 0, 2) });
-        var throttleNum = new NumericUpDown { Name = "GymThrottle", Width = 120, Minimum = 0, Maximum = 500, Increment = 25, Value = 0 };
+        var throttleNum = new NumericUpDown { Name = "GymThrottle", Width = 120, Minimum = 0, Maximum = 500, Increment = 25, Value = 200 };
         throttleNum.ValueChanged += (s, e) => _gymThrottlePct = (int)throttleNum.Value; // live — applies next cycle, no restart
         flow.Controls.Add(throttleNum);
 
         flow.Controls.Add(new Label { Text = "Curricula (enable / disable):", AutoSize = true, Margin = new Padding(0, 18, 0, 2), Font = new Font("Segoe UI", 10, FontStyle.Bold) });
         flow.Controls.Add(new CheckBox { Name = "CurGym", Text = "Gym — procedural skills", Checked = true, AutoSize = true });
+        // One checkbox per gym MUSCLE — tick a subset to FOCUS training on those skills (all ticked = the full mix).
+        foreach (var skill in Enum.GetValues<GenesisNova.Train.GymSkill>())
+            flow.Controls.Add(new CheckBox { Name = "GymSkill_" + skill, Text = GymSkillLabel(skill), Checked = true, AutoSize = true, Margin = new Padding(20, 0, 0, 0) });
         flow.Controls.Add(new CheckBox { Name = "CurMemCode", Text = "Memory + Code index", Checked = false, AutoSize = true });
         flow.Controls.Add(new CheckBox { Name = "CurCreators", Text = "Creators (skill ladder: number-word → category → arithmetic)", Checked = false, AutoSize = true });
         flow.Controls.Add(new CheckBox { Name = "CurPersonality", Text = "Personality (rude chatbot)", Checked = false, AutoSize = true });
-        flow.Controls.Add(new CheckBox { Name = "CurFocused", Text = "Focused (one trainer to mastery, then next)", Checked = true, AutoSize = true });
+        flow.Controls.Add(new CheckBox { Name = "CurFocused", Text = "Focused + rehearsal (unticked = all tasks every cycle)", Checked = true, AutoSize = true });
         flow.Controls.Add(new Label { Text = "Memory index file (MEMORY.md):", AutoSize = true, Margin = new Padding(0, 8, 0, 2) });
         flow.Controls.Add(new TextBox { Name = "MemPath", Width = 270, Text = DefaultMemoryIndexPath() });
         flow.Controls.Add(new Label { Text = "Code root directory:", AutoSize = true, Margin = new Padding(0, 6, 0, 2) });
@@ -450,8 +461,6 @@ public class MainWindow : Form
             if (string.IsNullOrWhiteSpace(output))
                 output = "(no response)";
 
-            _lastReplUserInput = trimmed;
-            _lastReplModelOutput = output;
             if (predict.Result is not null)
                 UpdateVisualizer(trimmed, predict.Result);
             if (_replTraceEnabled && predict.Result is not null)
@@ -483,8 +492,11 @@ public class MainWindow : Form
     {
         var inputTokenIds = _runtime.EncodeTokens(input);
         var generatedTokenIds = result.GeneratedTokens ?? [];
-        var inputTokens = inputTokenIds.Select(id => $"{id}:{_runtime.TokenText(id)}");
-        var outputTokens = generatedTokenIds.Select(id => $"{id}:{_runtime.TokenText(id)}");
+        // Batch-decode under one model-gate acquisition instead of one per token (see TokenTexts).
+        var inputTokenTexts = _runtime.TokenTexts(inputTokenIds);
+        var outputTokenTexts = _runtime.TokenTexts(generatedTokenIds);
+        var inputTokens = inputTokenIds.Select((id, i) => $"{id}:{inputTokenTexts[i]}");
+        var outputTokens = generatedTokenIds.Select((id, i) => $"{id}:{outputTokenTexts[i]}");
         var decodedFromTokens = generatedTokenIds.Length == 0
             ? string.Empty
             : _runtime.DecodeTokens(generatedTokenIds);
@@ -512,7 +524,7 @@ public class MainWindow : Form
         if (box is null) return;
         var act = _latestActivation;
         var platonic = !result.UsedNeuralFallback;
-        var (mech, why) = MechanismOf(result);
+        var (mech, why) = InferenceTraceFormatter.MechanismOf(result);
         var sb = new System.Text.StringBuilder();
         void H(string s) => sb.Append(s).Append("\r\n");
 
@@ -537,7 +549,7 @@ public class MainWindow : Form
                 H($"   4. chained {result.PlatonicHopCount} compute-element step(s)  ->  {result.Output}");
                 H("   => GENERALIZES: the chain computes for any operands, never memorised.");
             }
-            else if (ParseArith(input) is { } a)
+            else if (InferenceTraceFormatter.ParseArith(input) is { } a)
             {
                 var rule = a.Face == "poly" ? "poly(a)+poly(b) = poly(a+b)" : "log(a)+log(b) = log(a*b)";
                 H("HOW IT COMPUTED IT  (calculated, NOT remembered — numbers never form stored edges):");
@@ -585,7 +597,7 @@ public class MainWindow : Form
         }
         else if (mech == "COMPOSED")
         {
-            H($"HOW IT COMPOSED IT  ({ShapeOf(dp)}):");
+            H($"HOW IT COMPOSED IT  ({InferenceTraceFormatter.ShapeOf(dp)}):");
             H("   the GRU plan head SELECTED the shape; the substrate EXECUTED it (the GRU only chooses):");
             if (result.Evidence is { Count: > 0 })
                 foreach (var ev in result.Evidence.OrderBy(x => x.Hop).Take(6))
@@ -601,154 +613,14 @@ public class MainWindow : Form
         }
 
         H("");
-        var outToks = (result.GeneratedTokens ?? []).Select(id => _runtime.TokenText(id));
+        // Batch-decode under one model-gate acquisition instead of one per token (see TokenTexts).
+        var outToks = _runtime.TokenTexts(result.GeneratedTokens ?? []);
         H($"DECODE       emitted: {string.Join("  ", outToks)}");
         H($"             platonic bias on {result.AppliedBiasCount} token(s) (avg {result.AverageBiasMagnitude:F3}); hops {result.PlatonicHopCount}; chunks {result.ChunksGenerated}" +
           (result.PlatonicAssistFired > 0 ? $"; mid-gen assists {result.PlatonicAssistFired}/{result.PlatonicAssistInvocations}" : ""));
-        H($"VERDICT      {mech} — {DescribeConfidence(result.PlatonicConfidence)}");
+        H($"VERDICT      {mech} — {InferenceTraceFormatter.DescribeConfidence(result.PlatonicConfidence)}");
 
         box.Text = sb.ToString();
-    }
-
-    // Classify HOW the answer was produced — calculated (homomorphism/transform), remembered (stored relation
-    // edge), composed (glider shape), or generated (neural decoder). Drives the trace's plain-English mechanism.
-    private static (string Label, string Why) MechanismOf(GenesisNova.Infer.GenerationResult r)
-    {
-        if (r.UsedNeuralFallback) return ("GENERATED", "the neural decoder produced it token-by-token — no platonic compute or retrieval");
-        var d = (r.DecisionPath ?? string.Empty).ToLowerInvariant();
-        // Order matters: 'expression-chain' before 'chain'; specific routes before generic substrings.
-        if (d.Contains("expression-chain"))
-            return ("CALCULATED", "chained several compute-elements (a multi-operator expression), each operator classified from context");
-        if (d.Contains("gru-query") || d.Contains("arithmetic"))
-            return ("CALCULATED", "computed via the numeric homomorphism (poly/log) — generalizes, not a stored fact");
-        if (d.Contains("learned-op") || d.Contains("learned-function") || r.RoutedTransform is not null)
-            return ("CALCULATED", "applied a learned function as a transform vector — computed by composition, not recalled");
-        if (d.Contains("glider") || d.Contains("plan") || d.Contains("fold") || d.Contains("predicate") || d.Contains("seq"))
-            return ("COMPOSED", "assembled a glider shape and ran it on the substrate");
-        if (d.Contains("geometric"))
-            return ("REMEMBERED", "found the nearest concept by POSITION in the semantic face (geometric content-addressing)");
-        if (d.Contains("relation-edge"))
-            return ("REMEMBERED", "followed a learned relation edge (a stored cue↔answer association)");
-        if (d.Contains("concept") || d.Contains("chain") || d.Contains("retriev"))
-            return ("REMEMBERED", "walked the relation graph (multi-hop) from your input concepts");
-        return ("PLATONIC", "answered via the platonic substrate");
-    }
-
-    // Human description of the glider SHAPE encoded in a 'platonic-glider-plan:<shape>' decision path.
-    private static string ShapeOf(string decisionPath)
-    {
-        var dp = decisionPath ?? string.Empty;
-        var i = dp.IndexOf(':');
-        var s = (i >= 0 && i + 1 < dp.Length ? dp[(i + 1)..] : dp).ToLowerInvariant();
-        return s switch
-        {
-            "predicate" => "predicate — Compare→Branch (the difference's sign → greater/less/equal)",
-            "fold-sum" => "fold-sum — one N-way R2 compose over all operands (poly-sum)",
-            "fold-product" => "fold-product — one N-way R2 compose over all operands (log-sum)",
-            "seq" => "seq — a mined scaffold chunk ∘ Fold(Add) (Concatenate-composition)",
-            "arith-word" => "arith→word — Compute the value, then Hop the digit to its number-word",
-            _ => "a glider shape"
-        };
-    }
-
-    // Best-effort op/operand/face extraction for the trace's "how it computed it" explanation.
-    private static (string Op, string Face, long[] Operands)? ParseArith(string input)
-    {
-        var t = (input ?? string.Empty).ToLowerInvariant();
-        string? op = t.Contains('+') || t.Contains("plus") || t.Contains("add") || t.Contains("sum") ? "add"
-            : t.Contains('-') || t.Contains("minus") || t.Contains("subtract") || t.Contains("difference") ? "sub"
-            : t.Contains('*') || t.Contains(" x ") || t.Contains("times") || t.Contains("multipl") || t.Contains("product") ? "mul"
-            : t.Contains('/') || t.Contains("divide") || t.Contains("quotient") ? "div"
-            : null;
-        if (op is null) return null;
-        var nums = System.Text.RegularExpressions.Regex.Matches(input ?? string.Empty, @"-?\d+")
-            .Select(m => long.Parse(m.Value)).ToArray();
-        if (nums.Length == 0) return null;
-        return (op, op is "add" or "sub" ? "poly" : "log", nums);
-    }
-
-    private void DrawActivationGraph(Graphics g, Rectangle bounds)
-    {
-        g.Clear(Color.FromArgb(8, 10, 20));
-        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-
-        if (_latestActivation is null || _latestActivation.Nodes.Length == 0)
-        {
-            using var brush = new SolidBrush(Color.FromArgb(180, 180, 180));
-            g.DrawString("No activation yet. Run a REPL query.", new Font("Segoe UI", 10), brush, new PointF(12, 12));
-            return;
-        }
-
-        var nodes = _latestActivation.Nodes.Take(12).ToArray();
-        var nodeSet = new HashSet<string>(nodes.Select(n => n.Name), StringComparer.OrdinalIgnoreCase);
-        var edges = _latestActivation.Edges
-            .Where(e => nodeSet.Contains(e.Left) && nodeSet.Contains(e.Right))
-            .Take(24)
-            .ToArray();
-
-        var centerX = bounds.Width / 2f;
-        var centerY = bounds.Height / 2f;
-        var radius = Math.Max(40f, Math.Min(bounds.Width, bounds.Height) * 0.33f);
-        var positions = new Dictionary<string, PointF>(StringComparer.OrdinalIgnoreCase);
-
-        for (var i = 0; i < nodes.Length; i++)
-        {
-            var angle = (Math.PI * 2 * i) / Math.Max(1, nodes.Length);
-            var x = centerX + (float)(Math.Cos(angle) * radius);
-            var y = centerY + (float)(Math.Sin(angle) * radius);
-            positions[nodes[i].Name] = new PointF(x, y);
-        }
-
-        foreach (var edge in edges)
-        {
-            if (!positions.TryGetValue(edge.Left, out var p1) || !positions.TryGetValue(edge.Right, out var p2))
-                continue;
-
-            var alpha = (int)Math.Clamp(50 + (edge.Score * 180), 50, 230);
-            using var pen = new Pen(Color.FromArgb(alpha, 120, 180, 255), 1.5f);
-            g.DrawLine(pen, p1, p2);
-        }
-
-        foreach (var node in nodes)
-        {
-            if (!positions.TryGetValue(node.Name, out var p))
-                continue;
-
-            var size = 16f + (float)(node.Score * 16f);
-            var rect = new RectangleF(p.X - size / 2f, p.Y - size / 2f, size, size);
-            var fillColor = node.IsAnchor
-                ? Color.FromArgb(255, 190, 90)
-                : Color.FromArgb(90, 160, 255);
-            using var brush = new SolidBrush(fillColor);
-            using var outline = new Pen(Color.FromArgb(20, 20, 20), 1.5f);
-            g.FillEllipse(brush, rect);
-            g.DrawEllipse(outline, rect);
-
-            using var labelBrush = new SolidBrush(Color.FromArgb(230, 230, 230));
-            g.DrawString(node.Name, new Font("Segoe UI", 8), labelBrush, p.X + size / 2f + 2f, p.Y - 8f);
-        }
-    }
-
-    private static string DescribeDecisionPath(GenesisNova.Infer.GenerationResult result)
-    {
-        if (result.UsedPlatonicQuery && !result.UsedNeuralFallback)
-            return "Direct platonic retrieval dominated this answer.";
-        if (result.UsedPlatonicQuery && result.UsedNeuralFallback)
-            return "Hybrid path: platonic retrieval plus neural fallback.";
-        if (result.AppliedBiasCount > 0)
-            return "Neural decode with platonic bias shaping token choices.";
-        return "Pure neural decode path.";
-    }
-
-    private static string DescribeConfidence(double confidence)
-    {
-        if (confidence >= 0.85)
-            return "High confidence: strong structural match.";
-        if (confidence >= 0.60)
-            return "Moderate confidence: useful structure, some ambiguity.";
-        if (confidence > 0.0)
-            return "Low confidence: weak structural support.";
-        return "No platonic confidence signal (neural-only path).";
     }
 
     private void AppendToRepl(string text, Color color)
@@ -1369,9 +1241,9 @@ public class MainWindow : Form
         try
         {
             var roundsLabel = request.MaxRounds <= 0 ? "∞" : request.MaxRounds.ToString();
-            AppendAutonomousOutput($"[auto] starting: rounds={roundsLabel} sample={request.InitialSampleCount} train={request.InitialTrainCount} difficulty={request.InitialDifficulty}");
-            AppendAutonomousOutput($"[auto] datasets enabled: {string.Join(", ", request.EnabledCreators ?? [])}");
-            AppendAutonomousOutput("[auto] device policy: CUDA training when available with CPU fallback, GPU inference (device 0, A3000 preferred)");
+            AppendOutput($"[auto] starting: rounds={roundsLabel} sample={request.InitialSampleCount} train={request.InitialTrainCount} difficulty={request.InitialDifficulty}");
+            AppendOutput($"[auto] datasets enabled: {string.Join(", ", request.EnabledCreators ?? [])}");
+            AppendOutput("[auto] device policy: CUDA training when available with CPU fallback, GPU inference (device 0, A3000 preferred)");
             
             // Estimate and display GPU sizing for this training session using live VRAM.
             var debugLines = new List<string>();
@@ -1380,7 +1252,7 @@ public class MainWindow : Form
             var sizingTargetUtil = 0.72;
             var sizingReserveMb = 1536;
             var sizingHiddenCap = GpuCapacityPlanner.ResolveTrainingHiddenCap(sizingVramMb);
-            AppendAutonomousOutput($"[auto] training headroom cap: {sizingHiddenCap}");
+            AppendOutput($"[auto] training headroom cap: {sizingHiddenCap}");
             var estimatedHidden = GpuCapacityPlanner.EstimateHiddenSizeForInferenceOnly(
                 new[] { new GenesisExample("sample", "output") },
                 routeCount: 8,
@@ -1390,40 +1262,40 @@ public class MainWindow : Form
                 debugOutput: line => debugLines.Add(line),
                 maxHiddenSize: sizingHiddenCap);
             foreach (var line in debugLines)
-                AppendAutonomousOutput(line);
+                AppendOutput(line);
 
             // Extra guard for autonomous rounds on constrained VRAM.
             if (hasCuda)
             {
                 if (estimatedHidden > sizingHiddenCap)
                 {
-                    AppendAutonomousOutput(
+                    AppendOutput(
                         $"[auto] hidden cap applied for training headroom: {estimatedHidden} → {sizingHiddenCap} (usable_vram_mb={sizingVramMb})");
                     estimatedHidden = sizingHiddenCap;
                 }
             }
-            AppendAutonomousOutput(
+            AppendOutput(
                 $"[auto] sizing profile: target_util={sizingTargetUtil:F2} reserve_mb={sizingReserveMb} hidden_cap={sizingHiddenCap} usable_vram_mb={sizingVramMb}");
              
             // CRITICAL: Apply the estimated hidden size BEFORE starting training
-            AppendAutonomousOutput($"[auto] applying hidden size: {_runtime.HiddenSize} → {estimatedHidden}");
+            AppendOutput($"[auto] applying hidden size: {_runtime.HiddenSize} → {estimatedHidden}");
             _runtime.EnsureHiddenSize(estimatedHidden);
-            AppendAutonomousOutput($"[auto] model ready: hidden={_runtime.HiddenSize}");
+            AppendOutput($"[auto] model ready: hidden={_runtime.HiddenSize}");
             
-            AppendAutonomousOutput("[auto] live controls update next round: max rounds, loss threshold, bounds, max difficulty, round budget, and generation concurrency.");
+            AppendOutput("[auto] live controls update next round: max rounds, loss threshold, bounds, max difficulty, round budget, and generation concurrency.");
             // Run entire training pipeline on ThreadPool with reduced priority to prevent UI thread starvation
             var run = await RunLowPriorityTrainingAsync(
                 async () => await _runtime.TrainAutonomousAsync(
                     request,
                     _autonomousTrainingCts.Token,
-                    AppendAutonomousOutput,
+                    AppendOutput,
                     baseRequest => CaptureLiveAutonomousRequest(baseRequest),
                     onRoundProgress: payload => HandleAutonomousTrainingProgress((GenesisAutonomousTrainingEventPayload)payload)),
                 _autonomousTrainingCts.Token);
             var final = run.FinalReport;
             if (final is not null)
             {
-                AppendAutonomousOutput($"[auto] complete: rounds={run.Rounds.Count} final_loss={final.AverageLoss.TokenLoss:F4}");
+                AppendOutput($"[auto] complete: rounds={run.Rounds.Count} final_loss={final.AverageLoss.TokenLoss:F4}");
                 HandleAutonomousTrainingProgress(new GenesisAutonomousTrainingEventPayload(
                     Round: run.Rounds.Count,
                     StepName: "Complete",
@@ -1439,12 +1311,12 @@ public class MainWindow : Form
             }
             else
             {
-                AppendAutonomousOutput("[auto] complete: no report returned");
+                AppendOutput("[auto] complete: no report returned");
             }
         }
         catch (OperationCanceledException)
         {
-            AppendAutonomousOutput("[auto] stopped by user.");
+            AppendOutput("[auto] stopped by user.");
         }
         catch (Exception ex)
         {
@@ -1486,9 +1358,28 @@ public class MainWindow : Form
         if (_autonomousTrainingCts is null || _autonomousTrainingCts.IsCancellationRequested)
             return;
 
-        AppendAutonomousOutput("[auto] stop requested: finishing current round...");
+        AppendOutput("[auto] stop requested: finishing current round...");
         _autonomousTrainingCts.Cancel();
     }
+
+    // Friendly checkbox label for a gym muscle.
+    private static string GymSkillLabel(GenesisNova.Train.GymSkill s) => s switch
+    {
+        GenesisNova.Train.GymSkill.Synonym => "synonym (a synonym for X)",
+        GenesisNova.Train.GymSkill.Category => "category (what kind of thing is X)",
+        GenesisNova.Train.GymSkill.NumberWord => "number ↔ word",
+        GenesisNova.Train.GymSkill.Add => "add (a + b)",
+        GenesisNova.Train.GymSkill.Subtract => "subtract (a - b)",
+        GenesisNova.Train.GymSkill.Multiply => "multiply (a x b)",
+        GenesisNova.Train.GymSkill.FoldAdd => "fold-add (a + b + c)",
+        GenesisNova.Train.GymSkill.FoldMultiply => "fold-mul (a x b x c)",
+        GenesisNova.Train.GymSkill.Expression => "expression (a x b + c)",
+        GenesisNova.Train.GymSkill.Predicate => "predicate (compare)",
+        GenesisNova.Train.GymSkill.WordedAdd => "worded add (what is a plus b)",
+        GenesisNova.Train.GymSkill.ArithToWord => "arith → word (a plus b in words)",
+        GenesisNova.Train.GymSkill.FunctionInduction => "function induction (few-shot)",
+        _ => s.ToString(),
+    };
 
     // ── GYM (in-app skill trainer; replaces the standalone ClaudeMemory daemon) ─────────────────────────────────
     private void StartGym()
@@ -1502,20 +1393,32 @@ public class MainWindow : Form
 
         // Build the ENABLED curricula from the checkboxes; the orchestrator runs them as one composite.
         Directory.CreateDirectory(_gymStateDir);
-        var levelPath = Path.Combine(_gymStateDir, "gym-level.txt");
         var children = new List<ITrainingCurriculum>();
-        GymTrainer? gymChild = null;
+        var gymChildren = new List<GymTrainer>(); // ONE per enabled muscle — each its OWN mastery gate + level
         if (GetControl<CheckBox>("CurCreators")?.Checked ?? false)
         {
             children.AddRange(CreatorUnit.SkillLadder(trainCount: _gymTrainPerCycle));   // each creator = one focusable trainer
-            AppendAutonomousOutput($"[train] creators skill ladder: {string.Join(", ", ExampleCreatorRegistry.All.Select(c => c.Name))}");
+            AppendOutput($"[train] creators skill ladder: {string.Join(", ", ExampleCreatorRegistry.All.Select(c => c.Name))}");
         }
         if (GetControl<CheckBox>("CurGym")?.Checked ?? true)
         {
-            var startLevel = 1;
-            try { if (File.Exists(levelPath) && int.TryParse(File.ReadAllText(levelPath).Trim(), out var lv) && lv >= 1) startLevel = lv; } catch { }
-            gymChild = new GymTrainer(startLevel) { MasteryBar = _gymBar, TrainPerCycle = _gymTrainPerCycle };
-            children.Add(gymChild);
+            // Which MUSCLES to train — the per-skill checkboxes. None ticked falls back to the full mix.
+            var allSkills = Enum.GetValues<GenesisNova.Train.GymSkill>();
+            var enabledSkills = allSkills.Where(s => GetControl<CheckBox>("GymSkill_" + s)?.Checked ?? true).ToList();
+            if (enabledSkills.Count == 0) enabledSkills = allSkills.ToList();
+            // EACH muscle becomes its OWN curriculum unit → its OWN mastery gate + independent level (the
+            // orchestrator grades + gates each unit separately; Focused drives one to mastery then the next,
+            // Composite trains all but still levels each on its own). Each keeps its own level file.
+            foreach (var skill in enabledSkills)
+            {
+                var lvlPath = Path.Combine(_gymStateDir, "gym-" + skill.ToString().ToLowerInvariant() + "-level.txt");
+                var startLevel = 1;
+                try { if (File.Exists(lvlPath) && int.TryParse(File.ReadAllText(lvlPath).Trim(), out var lv) && lv >= 1) startLevel = lv; } catch { }
+                var child = new GymTrainer(startLevel, skills: new[] { skill }) { MasteryBar = _gymBar, TrainPerCycle = _gymTrainPerCycle };
+                children.Add(child);
+                gymChildren.Add(child);
+            }
+            AppendOutput($"[train] gym muscles ({enabledSkills.Count}, each its own gate): {string.Join(", ", enabledSkills)}");
         }
         if (GetControl<CheckBox>("CurMemCode")?.Checked ?? false)
         {
@@ -1525,40 +1428,45 @@ public class MainWindow : Form
             {
                 var mc = new MemoryCodeCurriculum(mem, code, trainPerCycle: _gymTrainPerCycle);
                 children.Add(mc);
-                AppendAutonomousOutput($"[train] memory+code: {mc.Stats.Cues} cues, {mc.Stats.Edges} edges, {mc.Stats.Probes} probes");
+                AppendOutput($"[train] memory+code: {mc.Stats.Cues} cues, {mc.Stats.Edges} edges, {mc.Stats.Probes} probes");
             }
-            catch (Exception ex) { AppendAutonomousOutput($"[train] memory+code load failed: {ex.Message}"); }
+            catch (Exception ex) { AppendOutput($"[train] memory+code load failed: {ex.Message}"); }
         }
         if (GetControl<CheckBox>("CurPersonality")?.Checked ?? false)
         {
             children.Add(new PersonalityCurriculum(trainPerCycle: _gymTrainPerCycle));
-            AppendAutonomousOutput("[train] personality (rude chatbot) conversation trainer");
+            AppendOutput("[train] personality (rude chatbot) conversation trainer");
         }
         if (children.Count == 0)
         {
-            AppendAutonomousOutput("[train] no curriculum enabled — tick Gym and/or Memory+Code.");
+            AppendOutput("[train] no curriculum enabled — tick Gym and/or Memory+Code.");
             _gymCts.Cancel();
             return;
         }
-        _gym = gymChild; // for level persistence + /status (null when gym is disabled)
+        _gym = gymChildren.FirstOrDefault(); // for /status (first muscle; each muscle persists its own level below)
 
         var startBtn = GetControl<Button>("AutoTrainBtn"); if (startBtn != null) startBtn.Enabled = false;
         var stopBtn = GetControl<Button>("AutoStopBtn"); if (stopBtn != null) stopBtn.Enabled = true;
-        // Multiple trainers: FOCUSED (one to mastery, then next — autonomous's proven scheduling) by default,
-        // or mixed (CompositeCurriculum) if Focused is unticked. One trainer → just run it.
+        // Multiple trainers: FOCUSED with REHEARSAL (FocusedCurriculum) by default — it focuses one muscle, hands
+        // off via EXHAUSTION (gym muscles are UNBOUNDED so they never "master"; a low focusBudget makes the handoff
+        // prompt instead of trapping on the first), and the already-touched muscles RIDE ALONG as light replay,
+        // converging to full interleave once every muscle has had its turn. That built-in rehearsal is what keeps
+        // the thin SHARED heads (op-classifier, decode) from mode-collapsing toward the current skill — the
+        // catastrophic forgetting a plain rotate-one-at-a-time scheduler caused. Untick → CompositeCurriculum
+        // (every muscle, full batch, every cycle). One trainer → just run it.
         ITrainingCurriculum curriculum = children.Count == 1
             ? children[0]
             : (GetControl<CheckBox>("CurFocused")?.Checked ?? true)
-                ? new FocusedCurriculum(children, masteryBar: _gymBar)   // per-unit drive-to-depth via MasteryDepth
+                ? new FocusedCurriculum(children, focusBudget: 8) // focus + rider-replay; prompt handoff for unbounded muscles
                 : new CompositeCurriculum(children);
         var ct = _gymCts.Token;
-        _ = RunLowPriorityTrainingAsync(async () => { await GymLoopAsync(curriculum, gymChild, levelPath, ct); return 0; }, ct);
+        _ = RunLowPriorityTrainingAsync(async () => { await GymLoopAsync(curriculum, gymChildren, ct); return 0; }, ct);
     }
 
     private void StopGym()
     {
         if (_gymCts is null || _gymCts.IsCancellationRequested) return;
-        AppendAutonomousOutput("[gym] pause requested...");
+        AppendOutput("[gym] pause requested...");
         _gymCts.Cancel();
         var startBtn = GetControl<Button>("AutoTrainBtn"); if (startBtn != null) startBtn.Enabled = true;
         var stopBtn = GetControl<Button>("AutoStopBtn"); if (stopBtn != null) stopBtn.Enabled = false;
@@ -1570,9 +1478,9 @@ public class MainWindow : Form
     /// UNBOUNDED difficulty level. Runs on a low-priority background thread; renders to the training panels.
     /// REPL queries share the runtime safely via its internal model-ops gate.
     /// </summary>
-    private async Task GymLoopAsync(ITrainingCurriculum curriculum, GymTrainer? gymChild, string levelPath, CancellationToken ct)
+    private async Task GymLoopAsync(ITrainingCurriculum curriculum, IReadOnlyList<GymTrainer> gymChildren, CancellationToken ct)
     {
-        AppendAutonomousOutput($"[train] started: {curriculum.Name} (model {_gymStateDir})");
+        AppendOutput($"[train] started: {curriculum.Name} (model {_gymStateDir})");
 
         // The unified MODULAR orchestrator drives the chosen curriculum (gym, memory+code, or a composite).
         var orchestrator = new GenesisModularTrainingOrchestrator();
@@ -1582,29 +1490,35 @@ public class MainWindow : Form
             RequirePlatonic = true,
             ThrottlePercent = () => _gymThrottlePct,   // live 0..500% backoff knob
             WorkDir = _gymStateDir,
+            TrainOnFailureOnly = true,                 // don't reinforce already-correct answers; train only failures
         };
-        var lastLevel = gymChild?.Level ?? -1;
+        var lastLevels = gymChildren.ToDictionary(g => g, g => g.Level);
         await orchestrator.RunAsync(_runtime, curriculum, options, m =>
         {
             _gymCycle = m.Cycle; _lastDifficulty = m.Difficulty; _lastLoss = m.Loss; _lastAcc = m.Accuracy; _lastRoute = m.RoutePurity; _lastConf = m.Confidence;
-            if (gymChild is not null && gymChild.Level != lastLevel)
+            // Each muscle advances + persists its OWN level independently (Name = "gym-<skill>").
+            foreach (var g in gymChildren)
             {
-                lastLevel = gymChild.Level;
-                try { File.WriteAllText(levelPath, gymChild.Level.ToString()); } catch { }
-                AppendAutonomousOutput($"[train] gym LEVEL → {gymChild.Level}");
+                if (g.Level == lastLevels[g]) continue;
+                lastLevels[g] = g.Level;
+                try { File.WriteAllText(Path.Combine(_gymStateDir, g.Name + "-level.txt"), g.Level.ToString()); } catch { }
+                AppendOutput($"[train] {g.Name} LEVEL → {g.Level}");
             }
             UpdateGymStats(m.Cycle, m.Difficulty, m.Loss, m.Accuracy, m.RoutePurity, m.Confidence);
-            AppendAutonomousOutput($"[train] cyc {m.Cycle} diff {m.Difficulty} | loss {m.Loss:F3} acc {m.Accuracy:P0} route {m.RoutePurity:P0} conf {m.Confidence:F2} | {m.CycleSeconds:F0}s");
+            // Op-head class-balance window [abstain,add,sub,mul,div] — one dominant entry = the head COLLAPSING (the
+            // erosion failure mode, now visible live). Shown as the four operator shares.
+            var opStr = m.OpClassBalance is { Count: 5 } op ? $" | op +{op[1]} -{op[2]} x{op[3]} /{op[4]}" : "";
+            AppendOutput($"[train] cyc {m.Cycle} diff {m.Difficulty} | loss {m.Loss:F3} acc {m.Accuracy:P0} route {m.RoutePurity:P0} conf {m.Confidence:F2} | trained {m.TrainedCount}/{m.GeneratedCount}{opStr} | {m.CycleSeconds:F0}s");
             foreach (var s in m.Samples)   // ✓ correct+platonic / ~ right value but NEURAL (not platonic) / ✗ wrong
             {
                 var mark = s.Correct ? "✓" : s.ValueCorrect ? "~" : "✗";
                 var note = s.Correct ? ""
                          : s.ValueCorrect ? "  (right value, but NEURAL route — gym credits only the platonic path)"
                          : string.IsNullOrEmpty(s.Expected) ? "" : $"  (want \"{s.Expected}\")";
-                AppendAutonomousOutput($"      {mark} {(s.Platonic ? "P" : "n")}  \"{s.Query}\"  →  \"{s.Output}\"{note}");
+                AppendOutput($"      {mark} {(s.Platonic ? "P" : "n")}  \"{s.Query}\"  →  \"{s.Output}\"{note}");
             }
         }, ct);
-        AppendAutonomousOutput("[train] paused — model persists (AutoPersist).");
+        AppendOutput("[train] paused — model persists (AutoPersist).");
     }
 
     private void UpdateGymStats(int cycle, int level, double loss, double acc, double purity, double conf)
@@ -1618,8 +1532,6 @@ public class MainWindow : Form
                 $"Loss: {loss:F3}   |   Accuracy: {acc:P0}   |   Route purity: {purity:P0}   |   Confidence: {conf:F2}";
     }
 
-    private static string CanonGym(string s) => new((s ?? string.Empty).ToLowerInvariant().Where(char.IsLetterOrDigit).ToArray());
-
     // ── Control endpoint: a tiny localhost HTTP server so headless tools (and Claude) can drive the LIVE in-app
     // model — recall against it, read gym status, pause/resume — without a second process fighting for the GPU.
     private void StartControlServer(int port = 8787)
@@ -1629,7 +1541,7 @@ public class MainWindow : Form
             _control = new HttpListener();
             _control.Prefixes.Add($"http://127.0.0.1:{port}/");
             _control.Start();
-            AppendAutonomousOutput($"[ctrl] http://127.0.0.1:{port}/   endpoints: /status  /recall?q=...  /gym/pause  /gym/resume");
+            AppendOutput($"[ctrl] http://127.0.0.1:{port}/   endpoints: /status  /recall?q=...  /gym/pause  /gym/resume");
             _ = Task.Run(async () =>
             {
                 while (_control.IsListening)
@@ -1641,7 +1553,7 @@ public class MainWindow : Form
                 }
             });
         }
-        catch (Exception ex) { AppendAutonomousOutput($"[ctrl] control server failed: {ex.Message}"); }
+        catch (Exception ex) { AppendOutput($"[ctrl] control server failed: {ex.Message}"); }
     }
 
     private async Task HandleControlRequest(HttpListenerContext ctx)
@@ -1742,7 +1654,7 @@ public class MainWindow : Form
         }
         catch (Exception ex)
         {
-            AppendAutonomousOutput($"[ui] Error updating progress: {ex.Message}");
+            AppendOutput($"[ui] Error updating progress: {ex.Message}");
         }
     }
 
@@ -1918,11 +1830,6 @@ public class MainWindow : Form
         AppendToLogBox("AutoOutputBox", message);
     }
 
-    private void AppendAutonomousOutput(string message)
-    {
-        AppendToLogBox("AutoOutputBox", message);
-    }
-
      private void AppendToLogBox(string boxName, string message)
      {
          if (InvokeRequired)
@@ -1972,17 +1879,6 @@ public class MainWindow : Form
              System.Diagnostics.Debug.WriteLine($"[log] Error in AppendToLogBox ({boxName}): {ex.GetType().Name}: {ex.Message}");
          }
      }
-
-    private static void TrimRichTextHistory(RichTextBox box, int maxChars, int targetChars)
-    {
-        // Deprecated: ListBox handles trimming internally in AppendToLogBox
-    }
-
-    private static bool IsNearBottom(RichTextBox box)
-    {
-        // Deprecated: ListBox auto-scrolls in AppendToLogBox
-        return true;
-    }
 
     private void AppendExceptionReport(string context, Exception ex, string boxName = "AutoOutputBox")
     {

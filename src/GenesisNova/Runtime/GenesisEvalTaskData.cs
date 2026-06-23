@@ -23,32 +23,8 @@ public sealed record GenesisPredictTaskData(
     int MaxNewTokens = 48,
     GenerationResult? Result = null);
 
-public sealed record GenesisRelateTaskData(
-    string Left,
-    string Right,
-    double Contradiction,
-    int QueueDepth = 0);
-
-public sealed record GenesisConceptTaskData(
-    string Concept,
-    string Description = "");
-
 public sealed record GenesisSaveTaskData(string Path, bool Saved = false);
 public sealed record GenesisLoadTaskData(string Path, bool Loaded = false);
-public sealed record GenesisConversationTaskData(
-    string UserInput,
-    string AssistantOutput,
-    bool ResetSignal = false,
-    string? Note = null,
-    string? ContextBrief = null,
-    int RecentTurnCount = 0);
-
-public sealed record GenesisCompactConversationTaskData(
-    string? Note = null,
-    bool Compacted = false,
-    string? ContextBrief = null,
-    int RecentTurnCount = 0);
-
 public sealed record GenesisEvaluationReport(
     int SampleCount,
     int ExactMatchCount,

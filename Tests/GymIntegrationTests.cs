@@ -31,17 +31,18 @@ public sealed class GymIntegrationTests
         Directory.CreateDirectory(tempDir);
         _out.WriteLine($"=== FULL GYM (living self) — {minutes} min — temp checkpoint {tempDir} ===");
 
+        // Run the ACTUAL production architecture (WithProductionMechanisms — conscious field + keep-core + the self +
+        // the director-gated generative routes), exactly as MainWindow ships it. HiddenSize is env-tunable (GYM_HIDDEN)
+        // so a long stability validation can trade faithful size for more cycles.
+        var hidden = int.TryParse(Environment.GetEnvironmentVariable("GYM_HIDDEN"), out var hh) ? hh : ProductionDims.HiddenSize;
+        var backend = Environment.GetEnvironmentVariable("GYM_GPU") == "1" ? ComputeBackend.Gpu : ComputeBackend.Cpu;
         var config = new GenesisNovaConfig(
-            Backend: ComputeBackend.Cpu,
-            HiddenSize: ProductionDims.HiddenSize,
-            FaceDimensionOverride: ProductionDims.FaceDimension,
+            Backend: backend,
+            HiddenSize: hidden,
+            FaceDimensionOverride: Math.Min(hidden, ProductionDims.FaceDimension),
             AutoResume: false,
             AutoPersist: true,
-            LocalStateDirectory: tempDir,
-            UseDialecticalCore: true,
-            LivingSelf: true,
-            EdgeRoutingEnabled: true,
-            FunctionGradientEnabled: true);
+            LocalStateDirectory: tempDir).WithProductionMechanisms();
 
         var runtime = new GenesisEvalAppRuntime(config);
 

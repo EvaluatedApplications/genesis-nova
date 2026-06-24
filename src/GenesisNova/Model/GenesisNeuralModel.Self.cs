@@ -88,6 +88,32 @@ public partial class GenesisNeuralModel
     /// coded but TRAINED — the network learning to keep itself alive." Only the self-dynamics are trained; under
     /// ConsciousField the FIELD does the reasoning, so this cannot touch task competence. Returns the recovery loss.
     /// </summary>
+    /// <summary>EVAL (no training) the self's one-step recovery loss for a given chaos — forward only, no backward/
+    /// step. For honestly measuring whether trained homeostasis GENERALISES to HELD-OUT perturbations.</summary>
+    public double EvalSelfRecovery(double perturbScale, int seed)
+    {
+        if (_selfStateT is null)
+            return 0.0;
+        EnsureModelInitialized();
+        EnsureGruInitialized();
+        var device = _trainingDevice;
+        using var noGrad = no_grad();
+        var scratch = new List<Tensor>();
+        try
+        {
+            var snap = _selfStateT.detach().clone(); scratch.Add(snap);
+            var setpoint = snap.to(device); if (!ReferenceEquals(setpoint, snap)) scratch.Add(setpoint);
+            manual_seed(seed);
+            var noise = randn(setpoint.shape, dtype: ScalarType.Float32, device: device); scratch.Add(noise);
+            var perturbed = setpoint.add(noise.mul(perturbScale)); scratch.Add(perturbed);
+            var reflected = GruStep(perturbed, perturbed, scratch, device);
+            var diff = reflected.sub(setpoint); scratch.Add(diff);
+            var loss = diff.pow(2).mean(); scratch.Add(loss);
+            return loss.item<float>();
+        }
+        finally { foreach (var t in scratch) { try { t?.Dispose(); } catch { } } }
+    }
+
     /// <summary>Seed the torch RNG — for DETERMINISTIC tests of the stochastic self-dynamics (init + perturbation),
     /// so a marginal-but-real learning signal is stable regardless of test order.</summary>
     public static void ManualSeed(long seed) => manual_seed(seed);

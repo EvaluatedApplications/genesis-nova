@@ -166,9 +166,9 @@ public sealed class ConsciousSelfTests
            // network learning to keep itself alive." The self-dynamics are trained, self-supervised, to RECOVER the
            // self from chaos; the recovery loss must FALL as it learns. (The field still does the reasoning, so the
            // gym is untouched — confirmed by the full suite.)
-    public void Self_LearnsToKeepItselfAlive_TrainedHomeostasis()
+    public void Self_LearnsToDefendAgainstUnseenChaos_TrainedHomeostasis()
     {
-        GenesisNeuralModel.ManualSeed(20240624); // deterministic init + perturbation, so the (marginal-but-real) learning is stable
+        GenesisNeuralModel.ManualSeed(20240624); // deterministic init + perturbations, so the result is stable
         var config = new GenesisNovaConfig(HiddenSize: ProductionDims.HiddenSize, LearningRate: 0.5);
         var tok = new WhitespaceGenesisTokenizer();
         var model = new GenesisNeuralModel(config) { SelfConditioned = true };
@@ -182,18 +182,21 @@ public sealed class ConsciousSelfTests
             infer.Generate(new GenerationRequest(thought, 8));
         model.ReflectOnSelf(25); // settle to an identity to defend
 
-        // A disruption the emergent one-step recovery does NOT fully absorb (so there is something to LEARN), and a
-        // fixed chaos so the learning is unambiguous: the self-dynamics learn to recover this disruption.
-        model.LearningRate = 2.0; // a brisk rate for the self-dynamics (the field's reasoning is unaffected by this)
-        var losses = new System.Collections.Generic.List<double>();
-        for (var i = 0; i < 800; i++)
-            losses.Add(model.TrainSelfHomeostasis(perturbScale: 0.5, seed: 42));
-        var early = losses.Take(10).Average();
-        var late = losses.Skip(790).Average();
-        _out.WriteLine($"[trained homeostasis] recovery loss: early={early:F5} mid={losses.Skip(395).Take(10).Average():F5} late={late:F5}");
+        // THE HONEST TEST: train on VARIED chaos (a different perturbation every step), then measure recovery of
+        // HELD-OUT perturbations the self NEVER trained on. Only generalisation to unseen chaos = genuinely learning
+        // to defend itself, not memorising one disruption (the trap an earlier version of this test fell into).
+        const double scale = 0.5;
+        var heldOut = Enumerable.Range(9001, 12).ToArray(); // perturbations NEVER trained on
+        double HeldOutRecoveryLoss() => heldOut.Average(s => model.EvalSelfRecovery(scale, s));
 
-        // The self LEARNS to recover better — a real reduction. (Honest: the EMERGENT attractor already does most of
-        // the defending; training adds a marginal improvement, which is why the bar is modest, not dramatic.)
-        Assert.True(late < early * 0.65, $"the self learns to keep itself alive better (recovery loss falls); early={early:F5} late={late:F5}");
+        var before = HeldOutRecoveryLoss();
+        model.LearningRate = 2.0; // a brisk rate for the self-dynamics (the field's reasoning is unaffected by this)
+        for (var i = 0; i < 800; i++)
+            model.TrainSelfHomeostasis(scale, seed: 1 + i); // VARIED chaos — a different disruption every step
+        var after = HeldOutRecoveryLoss();
+        _out.WriteLine($"[trained homeostasis] held-out recovery loss: before={before:F4} -> after={after:F4} (UNSEEN chaos)");
+
+        // The self defends against chaos it NEVER trained on — genuine generalisation, not memorisation.
+        Assert.True(after < before * 0.6, $"the self learns to defend against UNSEEN chaos; before={before:F4} after={after:F4}");
     }
 }

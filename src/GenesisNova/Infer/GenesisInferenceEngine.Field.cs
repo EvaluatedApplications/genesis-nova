@@ -190,7 +190,16 @@ public sealed partial class GenesisInferenceEngine
         if (subject is null || obj is null || subject == obj) return false;
         if (IsNumericLike(subject) || IsNumericLike(obj)) return false; // numbers never form relation edges
 
-        ((DialecticalSpace)_memory).FineEditFromExample(new[] { subject }, new[] { obj }, isNegativeExample: false);
+        var ds = (DialecticalSpace)_memory;
+        // BELIEF REVISION — staying coherent and CURRENT (genesis G2 non-contradiction; the free-energy principle:
+        // update the model when reality contradicts it). A fresh assertion makes `obj` the subject's CURRENT belief, so
+        // the mind WEAKENS the subject's prior (now-contradicted) beliefs and does not keep answering a stale truth.
+        // The world changed; a living mind changes with it. G6: weakened toward dormancy, never destroyed — history
+        // persists and re-asserting the old fact brings it back. (Conversational only — the gym never learns here.)
+        foreach (var n in ds.GetNeighbors(subject, PlatonicNeighborhoodType.Relational, maxNeighbors: 8, minConfidence: 0.0).ToList())
+            if (!n.Concept.Equals(obj, StringComparison.OrdinalIgnoreCase) && !IsNumericLike(n.Concept))
+                ds.DisruptAssociation(subject, n.Concept);
+        ds.FineEditFromExample(new[] { subject }, new[] { obj }, isNegativeExample: false);
         return EmitField(obj, "field-learn", request, out result); // acknowledge what it now holds
     }
 

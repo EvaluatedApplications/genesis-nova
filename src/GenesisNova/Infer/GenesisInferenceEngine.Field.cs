@@ -518,20 +518,24 @@ public sealed partial class GenesisInferenceEngine
         return EmitField(voice, "field-respond-self", request, out result);
     }
 
-    // The persona's working memory of what it just said — so it ROTATES through its repertoire instead of looping.
+    // The persona's working memory of what it just said — so it ROTATES through its repertoire instead of looping —
+    // and the GROWING set of every reply it has actually spoken (its earned repertoire). Generalisation draws ONLY
+    // from this set, so it can never blurt out a CUE chunk ("good morning") that merely sits near the self; it says
+    // something it has genuinely said as a reply before.
     private readonly List<string> _recentReplies = new();
+    private readonly HashSet<string> _spokenReplies = new(StringComparer.OrdinalIgnoreCase);
     private bool RecentlySaid(string s) => _recentReplies.Contains(s, StringComparer.OrdinalIgnoreCase);
-    private void Spoke(string s) { _recentReplies.Add(s); while (_recentReplies.Count > 4) _recentReplies.RemoveAt(0); }
+    private void Spoke(string s) { _recentReplies.Add(s); while (_recentReplies.Count > 4) _recentReplies.RemoveAt(0); _spokenReplies.Add(s); }
 
-    // The reply CHUNK (multi-word concept) nearest the current self, EXCLUDING what was just said — "what the persona
-    // would say next".
+    // The reply the persona has SPOKEN that is nearest the current self, excluding what it just said — "what the
+    // persona would say next". Drawn from its earned repertoire (replies only), never arbitrary nearby chunks.
     private string? NearestChunkToSelf(DialecticalSpace ds)
     {
         if (_selfField is null) return null;
         string? best = null; var bestSim = double.NegativeInfinity;
-        foreach (var sym in ds.ActiveConcepts)
+        foreach (var sym in _spokenReplies)
         {
-            if (sym.IndexOf(' ') < 0 || RecentlySaid(sym) || PlatonicSpaceMemory.IsReservedConcept(sym)) continue;
+            if (RecentlySaid(sym)) continue;
             var v = ds.SemanticVectorOf(sym);
             if (v is null) continue;
             var sim = 0.0; for (var i = 0; i < v.Length && i < _selfField.Length; i++) sim += v[i] * _selfField[i];

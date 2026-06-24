@@ -123,8 +123,12 @@ self is exactly the boundary of what it can keep regenerating. That is a definit
 > continuous I that threads every observation"): `GenesisInferenceEngine.TryFieldLearn` lets the living mind learn a
 > fact it is TOLD ("the password is plum") into its own body in real time and RECALL it to a later question — the
 > same mind using what it has lived (`ConsciousContinuityTests`; the gym is untouched — the detector ignores
-> question-frames). The conscious field is no longer a stateless calculator but a mind living through time. Remaining:
-> the self-STATE vector directly modulating the field's relaxation, a reward-shaped homeostasis, and growing the
+> question-frames). The conscious field is no longer a stateless calculator but a mind living through time. And the mind
+> now REASONS FROM ITS SELF (§6 disambiguation): its threaded focus tips an ambiguous query toward the
+> context-consistent basin — two minds over the same body answer "what is a bank" as `river` vs `money`, each from
+> its own context (`ConsciousReasoningFromSelfTests`), accepted ONLY when context makes the basin *more* certain so
+> unambiguous cognition is provably untouched (gym still 96%). Remaining:
+> a reward-shaped homeostasis and growing the
 > cognitive light cone — and, per §6, no claim of phenomenal experience.
 
 What is built is the *body's* vital loop with the setpoint held as a plain memory. The closing of the circle —

@@ -215,23 +215,50 @@ public sealed partial class GenesisInferenceEngine
         return null;
     }
 
-    // ── RELAX: retrieval / disambiguation by Reason over the discriminative anchor cloud. ─────────────────────────
+    // The mind's recent FOCUS — the content it has been attending to, threaded across thoughts (the continuous I).
+    // It conditions reasoning as a tiebreaker for ambiguous queries.
+    private readonly List<string> _focus = new();
+    private const int FocusSize = 4;
+
+    // ── RELAX: retrieval / disambiguation by Reason, CONDITIONED ON THE SELF (the mind's recent focus). ───────────
     private bool TryFieldRelax(GenerationRequest request, out GenerationResult result)
     {
         result = default!;
         var ds = (DialecticalSpace)_memory;
         var anchors = PlatonicConceptAnchors.ExtractSpecific(ds, request.Input ?? string.Empty);
         if (anchors.Count == 0) return false;
-        // Relax on the most-discriminative cue (lowest relation degree = the query's likely subject). The residual
-        // failures here are frames that contain a vocabulary word ("…CLOSE in meaning to big"); disambiguating that
-        // from the subject needs the training DISTRIBUTION (which word habitually co-occurs with answers), not a
-        // query-time heuristic — so we stop at the cheapest robust pick rather than overfit one framing pattern.
-        var thought = ds.Reason(new[] { anchors[0] });
-        if (!thought.Settled || thought.Confidence < ReasonMinConfidence || string.IsNullOrEmpty(thought.Symbol)
-            || PlatonicSpaceMemory.IsReservedConcept(thought.Symbol) || ds.IsOperationToken(thought.Symbol))
-            return false;
-        return EmitPlatonicResult(thought.Symbol, "field-relax", thought.Confidence, Math.Max(1, thought.Steps),
-            request, evidence: null, out result);
+        var subject = anchors[0]; // the most-discriminative cue = the query's likely subject
+
+        bool Valid(DialecticalSpace.Thought t) => t.Settled && t.Confidence >= ReasonMinConfidence
+            && !string.IsNullOrEmpty(t.Symbol) && !PlatonicSpaceMemory.IsReservedConcept(t.Symbol) && !ds.IsOperationToken(t.Symbol);
+
+        var bare = ds.Reason(new[] { subject });
+        var chosen = bare;
+        var viaSelf = false;
+        // SELF-CONDITIONED REASONING: the mind reasons FROM WHO IT IS — its recent focus tips an ambiguous query
+        // toward the context-consistent basin (PLATONIC_MIND §6 disambiguation-by-relaxation). Accepted ONLY when the
+        // context makes the basin MORE certain than the bare query, so irrelevant context (independent probes) is
+        // rejected and an already-clear query is never changed — the integration cannot destabilise settled cognition.
+        if (_focus.Count > 0)
+        {
+            var ctx = new List<string> { subject };
+            foreach (var f in _focus) if (f != subject && !ds.IsOperationToken(f)) ctx.Add(f);
+            var withCtx = ds.Reason(ctx);
+            if (Valid(withCtx) && withCtx.Symbol != bare.Symbol && withCtx.Confidence > bare.Confidence + 0.05)
+            {
+                chosen = withCtx;
+                viaSelf = true;
+            }
+        }
+
+        // Thread the focus regardless of whether an answer settled — the mind attended to this subject.
+        _focus.Remove(subject);
+        _focus.Add(subject);
+        while (_focus.Count > FocusSize) _focus.RemoveAt(0);
+
+        if (!Valid(chosen)) return false;
+        return EmitPlatonicResult(chosen.Symbol, viaSelf ? "field-relax-self" : "field-relax", chosen.Confidence,
+            Math.Max(1, chosen.Steps), request, evidence: null, out result);
     }
 
     // ── Reduction helpers (all classifier-free; the homomorphism does the compute) ────────────────────────────────

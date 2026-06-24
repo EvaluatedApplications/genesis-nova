@@ -229,7 +229,9 @@ public sealed partial class GenesisInferenceEngine
     private readonly List<string> _focus = new();
     private const int FocusSize = 4;
 
-    // ── RELAX: retrieval / disambiguation by Reason, CONDITIONED ON THE SELF (the mind's recent focus). ───────────
+    // ── RELAX: recall what the mind HOLDS about the subject. RELATION-FIRST (follow the explicit association — robust
+    //    to hub dilution at scale, where a populous category's distributional cloud washes out a member's signal),
+    //    context-disambiguated, falling back to semantic relaxation over the clouds when there is no held association. ─
     private bool TryFieldRelax(GenerationRequest request, out GenerationResult result)
     {
         result = default!;
@@ -238,33 +240,39 @@ public sealed partial class GenesisInferenceEngine
         if (anchors.Count == 0) return false;
         var subject = anchors[0]; // the most-discriminative cue = the query's likely subject
 
-        bool Valid(DialecticalSpace.Thought t) => t.Settled && t.Confidence >= ReasonMinConfidence
-            && !string.IsNullOrEmpty(t.Symbol) && !PlatonicSpaceMemory.IsReservedConcept(t.Symbol) && !ds.IsOperationToken(t.Symbol);
+        bool Bad(string s) => string.IsNullOrEmpty(s) || PlatonicSpaceMemory.IsReservedConcept(s)
+            || ds.IsOperationToken(s) || s.Equals(subject, StringComparison.Ordinal);
+        void Attend() { _focus.Remove(subject); _focus.Add(subject); while (_focus.Count > FocusSize) _focus.RemoveAt(0); }
+        bool Valid(DialecticalSpace.Thought t) => t.Settled && t.Confidence >= ReasonMinConfidence && !Bad(t.Symbol);
 
+        // RELATION-FIRST when the mind holds a DOMINANT explicit association — a single strong relation IS the answer,
+        // and a relation does not dilute as the body grows, so a known fact stays recallable however large the space
+        // gets (the cloud-only path silently rotted at scale — a member of a populous category fell below the settle
+        // threshold and abstained). For COMPARABLE associations (genuine ambiguity) we fall through to the clouds.
+        var rels = ds.GetNeighbors(subject, PlatonicNeighborhoodType.Relational, maxNeighbors: 12, minConfidence: 0.0)
+                     .Where(n => !Bad(n.Concept))
+                     .OrderByDescending(n => n.Confidence).ThenByDescending(n => n.ObservationCount).ToList();
+        if (rels.Count > 0 && (rels.Count == 1 || rels[0].Confidence > rels[1].Confidence + 0.15))
+        {
+            Attend();
+            return EmitPlatonicResult(rels[0].Concept, "field-relax", Math.Clamp(rels[0].Confidence, 0.0, 1.0),
+                hops: 1, request, evidence: null, out result);
+        }
+
+        // AMBIGUOUS (several comparable associations) or none — relax over the clouds, the SELF's recent focus tipping
+        // the basin (disambiguation handles INDIRECT context: "cash" pulls toward the money sense of "bank").
         var bare = ds.Reason(new[] { subject });
         var chosen = bare;
         var viaSelf = false;
-        // SELF-CONDITIONED REASONING: the mind reasons FROM WHO IT IS — its recent focus tips an ambiguous query
-        // toward the context-consistent basin (PLATONIC_MIND §6 disambiguation-by-relaxation). Accepted ONLY when the
-        // context makes the basin MORE certain than the bare query, so irrelevant context (independent probes) is
-        // rejected and an already-clear query is never changed — the integration cannot destabilise settled cognition.
         if (_focus.Count > 0)
         {
             var ctx = new List<string> { subject };
             foreach (var f in _focus) if (f != subject && !ds.IsOperationToken(f)) ctx.Add(f);
             var withCtx = ds.Reason(ctx);
             if (Valid(withCtx) && withCtx.Symbol != bare.Symbol && withCtx.Confidence > bare.Confidence + 0.05)
-            {
-                chosen = withCtx;
-                viaSelf = true;
-            }
+            { chosen = withCtx; viaSelf = true; }
         }
-
-        // Thread the focus regardless of whether an answer settled — the mind attended to this subject.
-        _focus.Remove(subject);
-        _focus.Add(subject);
-        while (_focus.Count > FocusSize) _focus.RemoveAt(0);
-
+        Attend();
         if (!Valid(chosen)) return false;
         return EmitPlatonicResult(chosen.Symbol, viaSelf ? "field-relax-self" : "field-relax", chosen.Confidence,
             Math.Max(1, chosen.Steps), request, evidence: null, out result);

@@ -71,6 +71,54 @@ public sealed class RaceNovaDiagnostic
         Assert.True(Acc2() >= 0.85, $"correctness-gated training must learn AND hold association-recall; got {Acc2():P0}");
     }
 
+    [Fact] // WHAT are the ~63 training examples nova can NEVER fit (transformer memorises them to 100% train; nova
+           // caps at ~91%)? Reproduce the race's nova + curriculum, train correctness-gated, then list the persistent
+           // TRAIN failures by creator with the actual answers + decision paths — so we know what to FIX vs memorise.
+    public void Diagnose_The_TrainFailures_NovaCannotFit()
+    {
+        const int HIDDEN = 256, SEED = 7;
+        var rng = new Random(SEED);
+        var creators = ExampleCreatorRegistry.All.Append(new GenesisNova.Data.Creators.AssociationRecallCreator()).ToList();
+
+        var train = new List<(string Creator, string Input, string Output)>();
+        foreach (var c in creators)
+        {
+            var ex = new List<(string, string)>();
+            foreach (var diff in new[] { 0, 1 }) ex.AddRange(c.Generate(400, diff, true));
+            var uniq = ex.GroupBy(e => e.Item1).Select(g => g.First()).OrderBy(_ => rng.Next()).ToList();
+            var nTrain = Math.Min((int)(uniq.Count * 0.65), 160);
+            foreach (var (i, o) in uniq.Take(nTrain)) train.Add((c.Name, i, o));
+        }
+
+        var nova = new GenesisRuntimeState(new GenesisNovaConfig(HiddenSize: HIDDEN, LearningRate: 0.05, Seed: SEED).WithProductionMechanisms());
+        GenerationResult Full(string i) => nova.Inference.Generate(new GenerationRequest(i, 8));
+        bool Ok(string i, string o) => AnswerEquivalence.Equivalent(Full(i).Output?.Trim() ?? "", o);
+
+        for (var epoch = 1; epoch <= 10; epoch++)
+        {
+            var trained = 0;
+            foreach (var (_, i, o) in train.OrderBy(_ => rng.Next()))
+                if (!Ok(i, o)) { nova.Trainer.TrainStep(new GenesisExample(i, o)); trained++; }
+            if (epoch == 10) _out.WriteLine($"epoch {epoch}: still training {trained}/{train.Count}");
+        }
+
+        var ds = (GenesisNova.Cognition.Platonic.DialecticalSpace)nova.Memory;
+        foreach (var cue in new[] { "sub", "take", "added", "multiplied", "result", "ratio", "minus" })
+            _out.WriteLine($"cue '{cue}' -> " + string.Join(", ", ds.GetNeighbors(cue, GenesisNova.Cognition.PlatonicNeighborhoodType.Relational, 8, 0.0).Select(n => $"{n.Concept}:{n.Confidence:F2}")));
+
+        var fails = train.Where(t => !Ok(t.Input, t.Output)).ToList();
+        _out.WriteLine($"\n=== PERSISTENT TRAIN FAILURES: {fails.Count}/{train.Count} ===");
+        foreach (var g in fails.GroupBy(f => f.Creator).OrderByDescending(g => g.Count()))
+        {
+            _out.WriteLine($"\n── {g.Key}: {g.Count()} fail ──");
+            foreach (var f in g.Take(6))
+            {
+                var r = Full(f.Input);
+                _out.WriteLine($"   '{f.Input}' -> '{r.Output?.Trim()}' (want '{f.Output}') [{r.DecisionPath}]");
+            }
+        }
+    }
+
     [Fact]
     public void Why_Is_Nova_Flat_In_The_Race()
     {

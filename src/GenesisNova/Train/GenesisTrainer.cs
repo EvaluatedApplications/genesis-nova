@@ -1350,6 +1350,10 @@ public sealed class GenesisTrainer
     {
         var concepts = ResolveConcepts(example);
         ObservePlatonicSpace(example, concepts);
+        // LEARN the operation-cue from this example (genesis "op from context", done in the field): if it is an
+        // arithmetic example, nova infers which operation reproduces the answer and relates the cue word/symbol to it,
+        // so worded/synonym/coined forms resolve by what was LEARNED — no hardcoded op vocabulary. No-op otherwise.
+        _inferencePolicy.LearnArithmeticCue(example.Input, example.Output);
         if (allowTransformDiscovery)
             UpdateTransformDiscovery(example);
 

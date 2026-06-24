@@ -32,14 +32,7 @@ public sealed partial class GenesisInferenceEngine
         ResetRouteTelemetry();
         // Separate operator symbols from digits so compact arithmetic ("1+1", "5>3") tokenises like the spaced form
         // ("1 + 1") — the field handles either, which the gym writes spaced but a person at the REPL may not.
-        var prepped = request.Input ?? string.Empty;
-        foreach (var sym in new[] { "+", "-", "*", "/", ">", "<", "=" })
-            prepped = prepped.Replace(sym, $" {sym} ");
-        var toks = prepped
-            .Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Select(t => t.Trim('?', '!', '.', ',', ';', ':', '(', ')', '[', ']', '"', '\'').ToLowerInvariant())
-            .Where(t => t.Length > 0)
-            .ToList();
+        var toks = TokenizeField(request.Input);
 
         if (TryFieldInduction(toks, request, out var r) ||
             TryFieldPredicate(toks, request, out r) ||
@@ -115,28 +108,7 @@ public sealed partial class GenesisInferenceEngine
     private bool TryFieldArithmetic(IReadOnlyList<string> toks, GenerationRequest request, out GenerationResult result)
     {
         result = default!;
-        // UNARY SIGN: a +/- in OPERAND position (the start, or right after another operator / cue / separator — any
-        // place the parser is NOT immediately after a number) is the SIGN of the following number, not a binary op.
-        // The shared tokenizer split every '-' into its own token, which made "-7 plus -1", "6 - -5" and "product of
-        // -3 and -4" look like a malformed operand/operator shape and fall through to relaxation. Walking with an
-        // expect-operand flag re-merges the negative literals so the homomorphism can compute them.
-        var merged = new List<string>(toks.Count);
-        var expectOperand = true;
-        for (var i = 0; i < toks.Count; i++)
-        {
-            var t = toks[i];
-            if ((t == "-" || t == "+") && expectOperand && i + 1 < toks.Count
-                && double.TryParse(toks[i + 1], NumberStyles.Float, CultureInfo.InvariantCulture, out var signed))
-            {
-                merged.Add((t == "-" ? -signed : signed).ToString(CultureInfo.InvariantCulture));
-                i++;                            // consumed the number this sign belongs to
-                expectOperand = false;          // ...now a binary operator is expected
-                continue;
-            }
-            merged.Add(t);
-            // after a NUMBER expect an operator; after anything else (op token, cue, separator, filler) expect an operand
-            expectOperand = !double.TryParse(t, NumberStyles.Float, CultureInfo.InvariantCulture, out _);
-        }
+        var merged = SignMerge(toks);
 
         var operands = new List<double>();
         var infixOps = new List<GliderOp>();
@@ -154,9 +126,14 @@ public sealed partial class GenesisInferenceEngine
         }
         else if (infixOps.Count == 0)
         {
-            var cueOps = merged.Select(t => TryOpCue(t, out var o) ? (GliderOp?)o : null)
-                             .Where(o => o.HasValue).Select(o => o!.Value).Distinct().ToList();
-            if (cueOps.Count != 1) return false;                    // "the total of 3 and 4", "add 3 and 4"
+            // Resolve the op-cue: the canonical primitives first (bootstrap), then the LEARNED cue→op relation — so a
+            // word or symbol the field has been TAUGHT ("result"→×, "ratio"→÷, a coined operator) resolves by what it
+            // learned, not by a hardcoded synonym list.
+            GliderOp? ResolveOp(string t)
+                => TryOpCue(t, out var o) ? o
+                 : (_memory is DialecticalSpace d && ResolveLearnedOp(d, t, out var lop)) ? lop : (GliderOp?)null;
+            var cueOps = merged.Select(ResolveOp).Where(o => o.HasValue).Select(o => o!.Value).Distinct().ToList();
+            if (cueOps.Count != 1) return false;                    // "the total of 3 and 4", "add 3 and 4", learned cues
             value = EvalFold(operands, cueOps[0]);
         }
         else return false;                                          // malformed operand/operator shape
@@ -171,6 +148,91 @@ public sealed partial class GenesisInferenceEngine
             return EmitField(word, "field-compute-word", request, out result);
         }
         return EmitField(FieldFormat(value), "field-compute", request, out result);
+    }
+
+    // Field tokenizer: separate operator symbols from digits ("1+1" → "1 + 1"), strip punctuation, lowercase — so a
+    // compact form tokenises like the spaced one. Shared by the dispatch and the cue learner.
+    private static List<string> TokenizeField(string? input)
+    {
+        var prepped = input ?? string.Empty;
+        foreach (var sym in new[] { "+", "-", "*", "/", ">", "<", "=" })
+            prepped = prepped.Replace(sym, $" {sym} ");
+        return prepped
+            .Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(t => t.Trim('?', '!', '.', ',', ';', ':', '(', ')', '[', ']', '"', '\'').ToLowerInvariant())
+            .Where(t => t.Length > 0)
+            .ToList();
+    }
+
+    // UNARY SIGN re-merge: a +/- in OPERAND position (start, or after an operator/cue/separator — not right after a
+    // number) is the SIGN of the following number, not a binary op. The tokenizer split every '-' into its own token,
+    // which made "-7 plus -1" / "6 - -5" look malformed. An expect-operand walk re-merges the negative literals so the
+    // homomorphism (and the cue learner) read the operands correctly.
+    private static List<string> SignMerge(IReadOnlyList<string> toks)
+    {
+        var merged = new List<string>(toks.Count);
+        var expectOperand = true;
+        for (var i = 0; i < toks.Count; i++)
+        {
+            var t = toks[i];
+            if ((t == "-" || t == "+") && expectOperand && i + 1 < toks.Count
+                && double.TryParse(toks[i + 1], NumberStyles.Float, CultureInfo.InvariantCulture, out var signed))
+            {
+                merged.Add((t == "-" ? -signed : signed).ToString(CultureInfo.InvariantCulture));
+                i++; expectOperand = false; continue;
+            }
+            merged.Add(t);
+            expectOperand = !double.TryParse(t, NumberStyles.Float, CultureInfo.InvariantCulture, out _);
+        }
+        return merged;
+    }
+
+    // The four arithmetic OPERATIONS — the irreducible MATH the substrate computes via the homomorphism. Their NAMES
+    // (words AND symbols) are NOT hardcoded: the cue for each is LEARNED as a relation to these internal "∘" anchors,
+    // so "result"/"ratio"/"+"/a novel coined operator all resolve by what the field LEARNED, none baked in.
+    private static readonly (string Anchor, GliderOp Op)[] OpAnchors =
+        { ("∘add", GliderOp.Add), ("∘sub", GliderOp.Subtract), ("∘mul", GliderOp.Multiply), ("∘div", GliderOp.Divide) };
+
+    /// <summary>LEARN an arithmetic cue from ONE example — the genesis "op classified from context", done in the field
+    /// (not the GRU's stateless head, not a hardcoded list): infer which of the four operations reproduces the answer
+    /// from the operands, then relate the example's cue token(s) to that operation's anchor in the space ("the result
+    /// of 8 and 5" → 40 ⇒ multiply ⇒ relate result ↔ ∘mul). At inference the field resolves the op by this learned
+    /// relation, self-conditioned, generalising to any word/symbol/synonym. Conversational/training-time only.</summary>
+    public void LearnArithmeticCue(string input, string output)
+    {
+        if (_memory is not DialecticalSpace ds || string.IsNullOrWhiteSpace(input)) return;
+        var inv = CultureInfo.InvariantCulture;
+        const NumberStyles ns = NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint;
+        var merged = SignMerge(TokenizeField(input)); // sign-merged so "added to -7" reads operand -7, not +7
+        // Skip examples with an EXPLICIT operator token ("sub 3 -2" tokenises as 3, -, 2 — the op is ambiguous between
+        // a cue-fold and an infix expression, and learning from it taught the wrong op). Learn only clean cue examples.
+        if (merged.Any(t => TryOpToken(t, out _))) return;
+        var nums = merged.Where(t => double.TryParse(t, ns, inv, out _)).Select(t => double.Parse(t, ns, inv)).ToList();
+        if (nums.Count != 2 || !double.TryParse(output.Trim(), ns, inv, out var answer)) return;
+
+        // Learn ONLY from an UNAMBIGUOUS example — exactly one operation reproduces the answer. Skip cases like
+        // "sub 8 0" (add ≡ sub) that would teach a confused cue→op relation (the bug that made "sub" compute as add).
+        var matches = OpAnchors.Where(a => Math.Abs(FieldStep(nums[0], a.Op, nums[1]) - answer) < 1e-6).ToList();
+        if (matches.Count != 1) return;
+        var anchor = matches[0].Anchor;
+        foreach (var t in merged)
+            if (!IsNumericLike(t) && !IsFunctionWord(t)) // the cue token(s): non-operand, non-framing (word OR symbol)
+                ds.FineEditFromExample(new[] { t }, new[] { anchor }, isNegativeExample: false);
+    }
+
+    // Resolve a cue token to an operation by its LEARNED "∘" op-anchor relations. ABSTAINS (returns false) when the
+    // cue maps to COMPETING operations — honest over a confident wrong answer (the sub→{add,sub} contamination case).
+    private static bool ResolveLearnedOp(DialecticalSpace ds, string token, out GliderOp op)
+    {
+        op = default;
+        var ops = ds.GetNeighbors(token, PlatonicNeighborhoodType.Relational, maxNeighbors: 12, minConfidence: 0.0)
+            .Where(n => n.Concept.StartsWith("∘", StringComparison.Ordinal))
+            .Select(n => (Op: OpAnchors.First(a => a.Anchor == n.Concept).Op, n.Confidence))
+            .OrderByDescending(x => x.Confidence).ToList();
+        if (ops.Count == 0) return false;
+        if (ops.Any(x => x.Op != ops[0].Op && x.Confidence >= ops[0].Confidence - 1e-6)) return false; // ambiguous → abstain
+        op = ops[0].Op;
+        return true;
     }
 
     // ── NUMBER-WORD: single value ↔ word via the codec ("5 in words" → five ; "five as a number" → 5). ───────────

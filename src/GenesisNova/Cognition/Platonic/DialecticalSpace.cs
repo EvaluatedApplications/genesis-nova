@@ -586,10 +586,11 @@ public sealed class DialecticalSpace : IPlatonicSpace
         return new Thought(best, Math.Clamp(bestSim, 0.0, 1.0), bestSim >= settleThreshold, 1);
     }
 
-    // Reserved internal symbols (the codec's face anchors and any "∴"-prefixed reflexive elements) — observed by the
-    // mind, never retrieved as an answer, so they never pollute ordinary retrieval.
+    // Reserved internal symbols (the codec's face anchors, "∴"-prefixed reflexive elements, and "∘"-prefixed operation
+    // anchors that learned cue→op relations point at) — observed/related by the mind, never retrieved as an answer.
     private static bool IsReservedConcept(string s)
-        => s.StartsWith("face:", StringComparison.Ordinal) || s.StartsWith("∴", StringComparison.Ordinal);
+        => s.StartsWith("face:", StringComparison.Ordinal) || s.StartsWith("∴", StringComparison.Ordinal)
+        || s.StartsWith("∘", StringComparison.Ordinal);
     private double[] CloudOf(Element e)
     {
         var face = FullFace(e.Symbol, e); // semantic region already normalized by FullFace

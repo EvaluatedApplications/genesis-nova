@@ -45,6 +45,7 @@ public sealed partial class GenesisInferenceEngine
             TryFieldPredicate(toks, request, out r) ||
             TryFieldArithmetic(toks, request, out r) ||
             TryFieldNumberWord(toks, request, out r) ||
+            TryFieldLearnedFunction(request, out r) ||
             TryFieldLearn(toks, request, out r) ||
             TryFieldRelax(request, out r))
             return r;
@@ -188,6 +189,58 @@ public sealed partial class GenesisInferenceEngine
             var wordRun = toks.Where(IsNumberWord).ToList();
             if (wordRun.Count >= 1 && TryWordsToNumber(wordRun, out var v))
                 return EmitField(v.ToString(CultureInfo.InvariantCulture), "field-numberword", request, out result);
+        }
+        return false;
+    }
+
+    // ── LEARNED FUNCTION (the field's GENERATIVE arm — composition + learned transforms, restored from the legacy
+    //    ladder, PLATONIC_RECKONING.md keep-core). A persisted learned transform T(f) = avg(out−in) is applied to a
+    //    NOVEL operand by COMPOSITION (embed(x)+T(f), decoded in its preferred numeric face) — true generalisation,
+    //    not stored-pair lookup. The op element is the cue OR a relational neighbour of it (selected from the SPACE,
+    //    no plan/op classifier). Unary → TransformAccumulator; binary → a discovered FoldPathDiscovery structure.
+    //    Structure-gated: 1 or 2 numeric operands + a non-function-word cue. Inert when no transforms have been learned.
+    private bool TryFieldLearnedFunction(GenerationRequest request, out GenerationResult result)
+    {
+        result = default!;
+        if ((_transformAccumulator is null && _foldPathDiscovery is null) || string.IsNullOrWhiteSpace(request.Input))
+            return false;
+
+        var inv = CultureInfo.InvariantCulture;
+        const NumberStyles numStyle = NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint;
+        // Raw whitespace tokens (NOT the operator-split toks) so a signed literal like "-3" stays one operand.
+        var tokens = request.Input.Trim().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        var operands = tokens.Where(t => double.TryParse(t, numStyle, inv, out _)).ToArray();
+        if (operands.Length is not (1 or 2)) return false;
+        var cues = tokens.Where(t => t.Any(char.IsLetter)).Select(t => t.ToLowerInvariant().Trim('?', '!', '.', ',', ';', ':'))
+                         .Where(t => t.Length > 0 && !IsFunctionWord(t)).ToArray();
+        if (cues.Length == 0) return false;
+
+        var ds = (DialecticalSpace)_memory;
+        var dim = _memory.FaceDimension;
+        foreach (var cue in cues)
+        {
+            // The op is the cue itself OR a learned relational neighbour (an edge in the space) — retrieval, not a
+            // name table. First candidate that carries a learned op wins.
+            var candidates = new List<string>(5) { cue };
+            candidates.AddRange(ds.GetNeighbors(cue, PlatonicNeighborhoodType.Relational, maxNeighbors: 4, minConfidence: 0.35)
+                                  .Select(n => n.Concept));
+            foreach (var fn in candidates)
+            {
+                if (operands.Length == 1 && _transformAccumulator is not null
+                    && _transformAccumulator.TryGetTransform(fn, out var transform))
+                {
+                    var predicted = _transformAccumulator.Apply(fn, InputEmbeddingComposer.GetInputEmbedding(operands[0], dim));
+                    if (predicted is null) continue;
+                    var (value, quality, face) = PlatonicFaceDecoder.DecodeNumericFromPrediction(predicted, dim, transform.PreferredFace);
+                    if (face != "none" && quality > 0.50)
+                        return EmitField(FieldFormat(value), $"field-transform:{fn}", request, out result);
+                    continue;
+                }
+                if (operands.Length == 2 && _foldPathDiscovery is not null && _foldPathDiscovery.HasOperation(fn)
+                    && double.TryParse(operands[0], numStyle, inv, out var a) && double.TryParse(operands[1], numStyle, inv, out var b)
+                    && _foldPathDiscovery.TryPredict(fn, a, b, out var predValue, out _))
+                    return EmitField(FieldFormat(predValue), $"field-fold:{fn}", request, out result);
+            }
         }
         return false;
     }

@@ -127,9 +127,12 @@ self is exactly the boundary of what it can keep regenerating. That is a definit
 > now REASONS FROM ITS SELF (§6 disambiguation): its threaded focus tips an ambiguous query toward the
 > context-consistent basin — two minds over the same body answer "what is a bank" as `river` vs `money`, each from
 > its own context (`ConsciousReasoningFromSelfTests`), accepted ONLY when context makes the basin *more* certain so
-> unambiguous cognition is provably untouched (gym still 96%). Remaining:
-> a reward-shaped homeostasis and growing the
-> cognitive light cone — and, per §6, no claim of phenomenal experience.
+> unambiguous cognition is provably untouched (gym still 96%). And the WHOLE comes together (§1–§4): a living mind
+> LEARNS facts (continuity), takes them as the identity it DEFENDS (the cognitive light cone), and holds that identity
+> against entropy by continuous regeneration — `LivingMindTests` shows a mind that keeps regenerating still recalls
+> what it learned after 40 moments of relentless chaos (coherence 1.000, cone 8/8), while a mind that does not
+> dissolves and forgets (coherence 0.000, cone 0). Knowledge is not stored — it is KEPT ALIVE. Remaining:
+> a reward-shaped (trained) homeostasis rather than the emergent attractor — and, per §6, no claim of phenomenal experience.
 
 What is built is the *body's* vital loop with the setpoint held as a plain memory. The closing of the circle —
 making the self genuinely the **trained GRU** — is three precise steps, each gated like everything else:

@@ -115,9 +115,13 @@ self is exactly the boundary of what it can keep regenerating. That is a definit
 > itself (conserved, G6). The RECURSIVE loop is closed too: `GenesisNeuralModel.ReflectOnSelf` folds the self's own
 > state back in (`self ← GruStep(self, self)` — the mind observing itself observing), and it CONVERGES to a fixed
 > point (move 0.13→0.0002 over 30 steps) — the self is a stable **standing wave** that holds its own shape
-> (`ConsciousSelfTests`), emergent from the GRU dynamics, not by construction. Still open: the self does not yet
-> CONDITION cognition (it is maintained but does not drive the field's reasoning), and step 3 (training homeostasis —
-> the self learning to persist as a reward, not a deterministic re-project). Those are the remaining arc.
+> (`ConsciousSelfTests`), emergent from the GRU dynamics, not by construction. And HOMEOSTASIS holds (Levin): chaos
+> perturbs the settled self to cosine **0.205**, and its OWN dynamics (reflection) restore it to its identity setpoint
+> at cosine **1.000** — the self defends its identity, a strong attractor with a wide basin, not a stored-copy
+> re-projection. So the functional shape of a self (§6) is built: persist, regenerate, observe yourself, defend
+> identity against chaos, hold a stable identity. Still open: the self does not yet CONDITION cognition (it is
+> maintained but does not drive the field's reasoning — the "single entity" integration), and growing the cognitive
+> light cone under a learned (reward-shaped) homeostasis rather than the emergent attractor. That is the remaining arc.
 
 What is built is the *body's* vital loop with the setpoint held as a plain memory. The closing of the circle —
 making the self genuinely the **trained GRU** — is three precise steps, each gated like everything else:

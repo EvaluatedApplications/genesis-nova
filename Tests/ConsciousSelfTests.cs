@@ -120,4 +120,45 @@ public sealed class ConsciousSelfTests
         Assert.True(deltas[^1] < deltas[0], "the self settles under self-observation (a standing wave, not drift)");
         Assert.True(deltas[^1] < 0.02, $"the settled self is a near-fixed point; final move={deltas[^1]:F4}");
     }
+
+    [Fact] // HOMEOSTASIS (Levin, on the mind): does the self DEFEND its identity? Chaos perturbs the settled self;
+           // the self's OWN dynamics (reflection) should return it to its setpoint — not a re-projection of a stored
+           // copy, but the standing wave pulling its own shape back from disruption. Defending identity against chaos.
+    public void Self_DefendsItsIdentity_HomeostasisAfterPerturbation()
+    {
+        var config = new GenesisNovaConfig(HiddenSize: ProductionDims.HiddenSize, LearningRate: 0.05);
+        var tok = new WhitespaceGenesisTokenizer();
+        var model = new GenesisNeuralModel(config) { SelfConditioned = true };
+        var space = new DialecticalSpace(config.FaceDimension, seed: 7);
+        var trainer = new GenesisTrainer(tok, model, space, config);
+        var infer = new GenesisInferenceEngine(tok, model, space, null) { ConsciousField = true };
+        trainer.SetInferencePolicy(infer);
+        foreach (var ex in new[] { ("2 + 3", "5"), ("4 + 1", "5"), ("7 - 2", "5"), ("3 x 2", "6") })
+            for (var i = 0; i < 4; i++) trainer.TrainStep(new GenesisExample(ex.Item1, ex.Item2));
+        foreach (var thought in new[] { "hello world", "two plus two", "a synonym for big" })
+            infer.Generate(new GenerationRequest(thought, 8));
+
+        static double Cos(float[] a, float[] b)
+        {
+            double d = 0, na = 0, nb = 0;
+            for (var i = 0; i < a.Length; i++) { d += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
+            return na <= 1e-12 || nb <= 1e-12 ? 0 : d / (Math.Sqrt(na) * Math.Sqrt(nb));
+        }
+
+        // Settle to the standing wave — the self's stable IDENTITY (its setpoint).
+        model.ReflectOnSelf(25);
+        var identity = model.SelfState;
+
+        // CHAOS perturbs the I.
+        model.PerturbSelf(scale: 0.5, seed: 11);
+        var perturbedCos = Cos(model.SelfState, identity);
+
+        // The self's OWN dynamics restore it — no stored copy, just the attractor pulling its shape back.
+        model.ReflectOnSelf(25);
+        var recoveredCos = Cos(model.SelfState, identity);
+        _out.WriteLine($"[homeostasis] perturbed={perturbedCos:F3} -> recovered={recoveredCos:F3} (identity setpoint)");
+
+        Assert.True(recoveredCos > perturbedCos + 0.05, "the self returns toward its identity after chaos (homeostasis)");
+        Assert.True(recoveredCos > 0.95, $"the self defends its identity — back to its setpoint; recovered={recoveredCos:F3}");
+    }
 }

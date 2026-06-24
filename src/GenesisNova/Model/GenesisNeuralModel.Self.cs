@@ -41,6 +41,22 @@ public partial class GenesisNeuralModel
         return z;
     }
 
+    /// <summary>CHAOS on the self: inject noise into the persistent self-state — entropy perturbing the "I". Used to
+    /// test/demonstrate HOMEOSTASIS: whether the self's own dynamics (<see cref="ReflectOnSelf"/>) return it to its
+    /// setpoint (Levin's anatomical homeostasis, on the mind). Deterministic given <paramref name="seed"/>.</summary>
+    public void PerturbSelf(double scale, int seed)
+    {
+        if (_selfStateT is null)
+            return;
+        using var noGrad = no_grad();
+        manual_seed(seed);
+        using var noise = randn(_selfStateT.shape, dtype: ScalarType.Float32, device: _inferenceDevice);
+        using var noisy = _selfStateT.add(noise.mul(scale));
+        var persisted = noisy.detach().clone();
+        _selfStateT.Dispose();
+        _selfStateT = persisted;
+    }
+
     /// <summary>The persistent self-state — the GRU's continuous "I". Empty until the model has perceived at least
     /// once (before life, there is no self).</summary>
     public float[] SelfState

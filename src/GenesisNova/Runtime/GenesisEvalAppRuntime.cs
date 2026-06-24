@@ -144,6 +144,14 @@ public sealed partial class GenesisEvalAppRuntime : ILearningRuntime
     /// </summary>
     public void RegisterOperationToken(string token) => _state.Memory.RegisterOperationToken(token);
 
+    /// <summary>Turn the CONVERSATIONAL talk route (<c>TryFieldRespond</c>) on/off on the live engine. The gym
+    /// enables it while the PersonalityCurriculum is in the mix so the persona is GRADED in-character — it follows
+    /// the learned cue→reply CHUNK relation instead of relaxation (which drifts to a cue word, ~8%), so the
+    /// FocusedCurriculum sees real progress and reinforces the talk edges rather than thrashing. Scoped to
+    /// chat-training sessions; off otherwise so non-chat deployments are byte-identical. Model-ops gated.</summary>
+    public void SetConversationalMode(bool on)
+        => WithModelGate(() => { _state.Inference.TalkEnabled = on; return 0; });
+
     /// <summary>CREDIT ASSIGNMENT on edges: reward the relation edges an answer USED when it was graded CORRECT,
     /// penalise them when WRONG (strengthen / weaken / — via the utility-based pruner — detach). Lets the gym's
     /// graded outcome flow back to the space so a framing-word hub that yields wrong answers decays. Gated by the

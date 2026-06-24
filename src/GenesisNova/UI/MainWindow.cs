@@ -1424,11 +1424,16 @@ public class MainWindow : Form
             }
             catch (Exception ex) { AppendOutput($"[train] memory+code load failed: {ex.Message}"); }
         }
-        if (GetControl<CheckBox>("CurPersonality")?.Checked ?? false)
+        var personalityOn = GetControl<CheckBox>("CurPersonality")?.Checked ?? false;
+        if (personalityOn)
         {
             children.Add(new PersonalityCurriculum(trainPerCycle: _gymTrainPerCycle));
             AppendOutput("[train] personality (rude chatbot) conversation trainer");
         }
+        // The talk route is GRADED only when active: enable conversational mode iff the persona is being trained, so
+        // it's scored in-character (cue→reply chunk) and the focus loop reinforces talk edges instead of thrashing on
+        // the ~8% relaxation drift. Off when the persona isn't in the mix (non-chat training stays byte-identical).
+        try { _runtime.SetConversationalMode(personalityOn); } catch { }
         if (children.Count == 0)
         {
             AppendOutput("[train] no curriculum enabled — tick Gym and/or Memory+Code.");

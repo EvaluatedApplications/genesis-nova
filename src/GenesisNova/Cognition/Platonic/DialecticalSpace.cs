@@ -547,6 +547,45 @@ public sealed class DialecticalSpace : IPlatonicSpace
         return new Thought(ranked[best].Sym, Dot(q, ranked[best].Cloud), settled, steps);
     }
 
+    /// <summary>
+    /// MEANING-TRANSFORM / ANALOGY in the LARGE (word) face — generative reasoning over the distributional cloud, NOT
+    /// the numeric homomorphism. From example pairs it forms the relation vector Δ = avg(cloud(to) − cloud(from)) and
+    /// applies it to the query's MEANING: target = cloud(query) + Δ, then retrieves the nearest concept. "Paris is to
+    /// France as Tokyo is to ___", as vector arithmetic in meaning space — the same T(f) the numeric faces use, on the
+    /// large face. Endpoints + query must be known concepts (they need an accumulated cloud).
+    /// </summary>
+    public Thought Analogy(IReadOnlyList<(string From, string To)> pairs, string query, double settleThreshold = 0.3)
+    {
+        if (pairs is null || pairs.Count == 0) return new Thought(string.Empty, 0.0, false, 0);
+        var delta = new double[_semLen];
+        var n = 0;
+        var exclude = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var (from, to) in pairs)
+        {
+            exclude.Add(Normalize(from)); exclude.Add(Normalize(to));
+            var cf = SemanticVectorOf(from); var ct = SemanticVectorOf(to);
+            if (cf is null || ct is null) continue;
+            for (var i = 0; i < _semLen; i++) delta[i] += ct[i] - cf[i];
+            n++;
+        }
+        var cq = SemanticVectorOf(query);
+        if (n == 0 || cq is null) return new Thought(string.Empty, 0.0, false, 0);
+        var target = new double[_semLen];
+        for (var i = 0; i < _semLen; i++) target[i] = cq[i] + delta[i] / n;
+        if (!NormalizeVec(target)) return new Thought(string.Empty, 0.0, false, 0);
+        exclude.Add(Normalize(query));
+
+        var best = string.Empty; var bestSim = double.NegativeInfinity;
+        foreach (var e in _concepts.All)
+        {
+            if (e.Archived || e.Kind == ElementKind.Atom || FaceCodec.IsNumeric(e.Symbol)) continue;
+            if (IsReservedConcept(e.Symbol) || IsOperationToken(e.Symbol) || exclude.Contains(e.Symbol)) continue;
+            var sim = Dot(target, CloudOf(e));
+            if (sim > bestSim) { bestSim = sim; best = e.Symbol; }
+        }
+        return new Thought(best, Math.Clamp(bestSim, 0.0, 1.0), bestSim >= settleThreshold, 1);
+    }
+
     // Reserved internal symbols (the codec's face anchors and any "∴"-prefixed reflexive elements) — observed by the
     // mind, never retrieved as an answer, so they never pollute ordinary retrieval.
     private static bool IsReservedConcept(string s)

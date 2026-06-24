@@ -2,6 +2,7 @@ using System.Globalization;
 using GenesisNova.Cognition;
 using GenesisNova.Core;
 using GenesisNova.Data;
+using GenesisNova.Data.Creators;
 using GenesisNova.Infer;
 using GenesisNova.Model;
 using GenesisNova.Runtime;
@@ -13,8 +14,9 @@ using static TorchSharp.torch;
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════════
 //  GENESIS-NOVA  vs  TRANSFORMER  — full curriculum (every creator), equal budget.
-//  Same tokenizer, same pooled examples, same epochs, matched parameter count. Both trained FLAT (nova's
-//  mastery-gated regime is NOT used here, to keep the training procedure identical — conservative for nova).
+//  Same tokenizer, same pooled examples, same epochs, matched parameter count. Each model is trained in ITS OWN
+//  real regime: nova correctness-gated (train only what's wrong — the production gym's TrainOnFailureOnly, which
+//  stops flat re-training from eroding its relations), the transformer flat SGD (it needs the repetition).
 // ════════════════════════════════════════════════════════════════════════════════════════════════════
 
 // Redirect libtorch's native stderr to a log BEFORE any torch call loads the native library. libtorch emits
@@ -34,7 +36,10 @@ const int HIDDEN = 256, SEED = 7;  // SMALL: nova keeps all faces (poly/log/char
 var rng = new Random(SEED);
 
 // ── Full curriculum: pool every creator, split disjoint train / held-out per creator ─────────────────
-var creators = ExampleCreatorRegistry.All;
+// Plus a LEARNABLE association-recall task (race-local): arithmetic/number-word are computed/codec (nothing to
+// learn), so they can't show a learning curve — this one CAN ONLY be learned, and its held-out is inferrable
+// (seen entities, new phrasings), so we measure LEARNING, not just built-in compute.
+var creators = ExampleCreatorRegistry.All.Append(new AssociationRecallCreator()).ToList();
 var train = new List<(string Input, string Output)>();
 var heldByCreator = new Dictionary<string, List<(string Input, string Output)>>();
 foreach (var c in creators)
@@ -109,6 +114,14 @@ double Acc(Func<string, string> gen, List<(string Input, string Output)> data)
 }
 string NovaGen(string i) => inference.Generate(new GenerationRequest(i, 8)).Output.Trim();
 
+// EPOCH 0 — the UNTRAINED baseline, printed so LEARNING is visible at a glance: skills that are COMPUTED
+// (arithmetic) or CODEC already score here with ZERO training, while skills that must be LEARNED (association-
+// recall) start near zero. A line that's already high at epoch 0 was never learned; a line that climbs from
+// epoch 0 is the model actually learning.
+P($"  {"NOVA",-11} ep   0   train {Acc(NovaGen, evalTrain),5:P0}   held-out {Acc(NovaGen, evalHeld),5:P0}   (untrained baseline)");
+P($"  {"TRANSFORMER",-11} ep   0   train {Acc(xf.Generate, evalTrain),5:P0}   held-out {Acc(xf.Generate, evalHeld),5:P0}   (untrained baseline)");
+P("  ──────────────────────────────────────────────────────────────────────────────────────────────────────────");
+
 // Two locks: `gpu` serializes ALL GPU/model work (one CUDA stream — concurrent kernel launches are unsafe),
 // `outLock` serializes console+log output. Each model runs its OWN epoch loop in its OWN task and reports the
 // instant it finishes an epoch, so the faster model gets through the GPU lock more often and pulls ahead.
@@ -123,10 +136,11 @@ const int CHUNK = 32; // GPU-lock granularity: hand the GPU back every CHUNK exa
 // then exit at the top of the next iteration (no deadlock).
 var epochBarrier = new System.Threading.Barrier(2);
 
-void Post(string who, ConsoleColor color, int ep, double tr, double held, double otherHeld, double epochSecs)
+void Post(string who, ConsoleColor color, int ep, double tr, double held, double otherHeld, double epochSecs, string extra = "")
 {
     var lead = held > otherHeld + 1e-9 ? "▲ ahead" : held < otherHeld - 1e-9 ? "▼ behind" : "= even";
-    var line = $"  {who,-11} ep {ep,3}   train {tr,5:P0}   held-out {held,5:P0}   {lead,-8} (epoch {epochSecs,5:F1}s)";
+    var tail = extra.Length > 0 ? "  " + extra : "";
+    var line = $"  {who,-11} ep {ep,3}   train {tr,5:P0}   held-out {held,5:P0}   {lead,-8} (epoch {epochSecs,5:F1}s){tail}";
     lock (outLock)
     {
         log.WriteLine(line);
@@ -152,12 +166,22 @@ var novaTask = Task.Run(() =>
     {
         var epSw = System.Diagnostics.Stopwatch.StartNew(); // time THIS epoch's work (train + eval), not wall clock
         var order = train.OrderBy(_ => rngN.Next()).ToList();
+        // CORRECTNESS-GATED, exactly like the production gym (TrainOnFailureOnly): predict each example and train ONLY
+        // the currently-WRONG ones. This is nova's REAL training regime — flat re-training of already-correct examples
+        // ERODES the platonic relations (framing-word/entity hubs accumulate and drown the signal); the gate stops
+        // touching a skill once mastered, so it holds instead of rotting. The transformer keeps its flat SGD regime
+        // (it NEEDS repetition) — each model is trained the way it actually is.
+        var trained = 0;
         for (var b = 0; b < order.Count; b += CHUNK)
-            lock (gpu) { foreach (var (i, o) in order.Skip(b).Take(CHUNK)) novaTrainer.TrainStep(new GenesisExample(i, o)); }
+            lock (gpu)
+            {
+                foreach (var (i, o) in order.Skip(b).Take(CHUNK))
+                    if (!AnswerEquivalence.Equivalent(NovaGen(i), o)) { novaTrainer.TrainStep(new GenesisExample(i, o)); trained++; }
+            }
         double nt, nh;
         lock (gpu) { nt = Acc(NovaGen, evalTrain); nh = Acc(NovaGen, evalHeld); }
         lastNovaHeld = nh;
-        Post("NOVA", ConsoleColor.Cyan, ep, nt, nh, lastXfHeld, epSw.Elapsed.TotalSeconds);
+        Post("NOVA", ConsoleColor.Cyan, ep, nt, nh, lastXfHeld, epSw.Elapsed.TotalSeconds, $"trained {trained,3}/{order.Count}");
         try { epochBarrier.SignalAndWait(cts.Token); } catch (OperationCanceledException) { break; }
     }
 });
@@ -195,8 +219,8 @@ var novaAll = Acc(NovaGen, heldAll); var xfAll = Acc(xf.Generate, heldAll);
 Rule();
 P($"  OVERALL held-out : nova {novaAll:P1}  vs  transformer {xfAll:P1}");
 P($"  footprint        : nova ~{NovaMB:F1} MB   transformer ~{XfMB:F1} MB   (equal params; nova half the VRAM)");
-P($"  note             : both trained FLAT until stopped (nova's mastery-gated regime not used here);");
-P($"                     a transformer needs far more epochs to fit train — this is the equal-budget result.");
+P($"  note             : each model trained in its OWN regime — nova correctness-gated (the production gym's");
+P($"                     TrainOnFailureOnly), the transformer flat SGD; equal epochs, equal params.");
 Rule();
 Console.WriteLine($"\n(log written to {logPath})");
 

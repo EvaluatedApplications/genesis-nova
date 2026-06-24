@@ -47,6 +47,7 @@ public sealed partial class GenesisInferenceEngine
             TryFieldNumberWord(toks, request, out r) ||
             (FieldTicksEnabled && TryFieldTick(request, out r)) ||
             TryFieldLearnedFunction(request, out r) ||
+            (FieldTicksEnabled && TryFieldMeaningTick(toks, request, out r)) ||
             (MeaningOpsEnabled && TryFieldAnalogy(toks, request, out r)) ||
             (MeaningOpsEnabled && TryFieldComposeMeaning(toks, request, out r)) ||
             TryFieldLearn(toks, request, out r) ||
@@ -353,6 +354,35 @@ public sealed partial class GenesisInferenceEngine
         if (!t2.Settled || t2.Confidence < ReasonMinConfidence
             || PlatonicSpaceMemory.IsReservedConcept(t2.Symbol) || ds.IsOperationToken(t2.Symbol)) return false;
         return EmitField(t2.Symbol, "field-compose", request, out result);
+    }
+
+    // ── THE TICK OVER MEANING — the genesis cascade in the LARGE face. A frontier of content concepts is reduced over
+    //    ticks: each tick COMPOSES the first two concepts (relax over both clouds) into the concept that fits them,
+    //    MANUFACTURING a new MEANING element that re-enters the frontier as the next operand. So "red fruit dessert"
+    //    builds (red+fruit)=apple, then (apple+dessert)=pie — a multi-step CONCEPTUAL derivation a one-shot compose
+    //    (which sums all clouds at once) can't isolate. Needs 3+ concepts (2 is the one-shot compose's job).
+    private bool TryFieldMeaningTick(IReadOnlyList<string> toks, GenerationRequest request, out GenerationResult result)
+    {
+        result = default!;
+        if (toks.Any(IsQuestionCue) || toks.Any(IsRetrievalMarker)) return false;
+        var ds = (DialecticalSpace)_memory;
+        var frontier = toks.Where(t => IsContentWord(t) && !IsFunctionWord(t) && !IsNumericLike(t) && ds.ContainsConcept(t))
+                          .Distinct(StringComparer.Ordinal).ToList();
+        if (frontier.Count < 3) return false;
+
+        var trace = new List<string>();
+        var guard = 0;
+        while (frontier.Count > 1 && guard++ < 16)
+        {
+            var a = frontier[0]; var b = frontier[1];
+            var t = ds.Reason(new[] { a, b }); // compose the two meanings → the concept that fits both
+            if (!t.Settled || string.IsNullOrEmpty(t.Symbol)
+                || PlatonicSpaceMemory.IsReservedConcept(t.Symbol) || ds.IsOperationToken(t.Symbol)) return false;
+            trace.Add($"({a}+{b})={t.Symbol}");      // the manufactured intermediate concept
+            frontier[0] = t.Symbol; frontier.RemoveAt(1); // it replaces the pair and re-enters the frontier
+        }
+        if (trace.Count < 2) return false;
+        return EmitField(frontier[0], $"field-meaning-tick[{string.Join(" -> ", trace)}]", request, out result);
     }
 
     // ── LEARN (continuity / the continuous I): the mind is TOLD a fact ("the password is plum") and remembers it,

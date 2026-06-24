@@ -90,4 +90,35 @@ public sealed class MeaningGenerativeTests
         Assert.Equal("japan", analogy.Output?.Trim());
         Assert.Equal("field-analogy", analogy.DecisionPath);
     }
+
+    // THE TICK OVER MEANING — a multi-step CONCEPTUAL derivation: compose a description into a concept, then compose
+    // THAT concept further. The intermediate (apple) is manufactured mid-inference and fed forward — exactly what a
+    // one-shot compose (summing all clouds at once) can't isolate.
+    [Fact]
+    public void MeaningTick_DerivesAConcept_AcrossTicks()
+    {
+        var config = new GenesisNovaConfig(HiddenSize: ProductionDims.HiddenSize);
+        var tok = new WhitespaceGenesisTokenizer();
+        var model = new GenesisNeuralModel(config);
+        var space = new DialecticalSpace(config.FaceDimension, seed: 7);
+        void Rel(string a, string b) { for (var i = 0; i < 3; i++) space.FineEditFromExample(new[] { a }, new[] { b }, false); }
+        Rel("apple", "red"); Rel("apple", "fruit"); Rel("apple", "sweet");
+        Rel("pie", "apple"); Rel("pie", "dessert"); Rel("pie", "baked");
+        Rel("jam", "fruit"); Rel("jam", "sweet"); Rel("jam", "spread");
+        Rel("brick", "red"); Rel("brick", "stone");
+
+        // ONE-SHOT compose (sums red+fruit+dessert at once) lands on the red fruit itself — it can't isolate the
+        // intermediate, so it never reaches the dessert.
+        var oneShot = new GenesisInferenceEngine(tok, model, space, null) { ConsciousField = true, MeaningOpsEnabled = true };
+        var flat = oneShot.Generate(new GenerationRequest("red fruit dessert", 6));
+        _out.WriteLine($"one-shot 'red fruit dessert' -> '{flat.Output?.Trim()}' [{flat.DecisionPath}]");
+
+        // THE MEANING TICK: (red+fruit)=apple manufactured on tick 1, (apple+dessert)=pie on tick 2.
+        var mind = new GenesisInferenceEngine(tok, model, space, null) { ConsciousField = true, FieldTicksEnabled = true };
+        var ticked = mind.Generate(new GenerationRequest("red fruit dessert", 6));
+        _out.WriteLine($"meaning-tick 'red fruit dessert' -> '{ticked.Output?.Trim()}' [{ticked.DecisionPath}]");
+        Assert.Equal("pie", ticked.Output?.Trim());
+        Assert.StartsWith("field-meaning-tick", ticked.DecisionPath);
+        Assert.NotEqual("pie", flat.Output?.Trim()); // the cascade reached a concept the one-shot couldn't
+    }
 }

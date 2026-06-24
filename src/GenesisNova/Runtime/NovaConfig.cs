@@ -23,7 +23,9 @@ public sealed record NovaConfig(
     RoutingOptions Routing,
     LearningOptions Learning,
     bool KeepCoreControl = false, // PLATONIC_RECKONING.md keep-core: substrate-confidence routing + seam fix + abstention
-    bool ConsciousField = false)  // PLATONIC_MIND.md: think by field-relaxation, bypass the route/plan/op classifier
+    bool ConsciousField = false,  // PLATONIC_MIND.md: think by field-relaxation, bypass the route/plan/op classifier
+    bool FieldTicks = false,       // the genesis tick cascade (numeric + meaning) runs queries as multi-step derivations
+    bool MeaningOps = false)       // generative compose/analogy in the large (meaning) face
 {
     /// <summary>The default-on/off profile — every field is set to today's live value, so applying it is a no-op
     /// against the historical scattered defaults. Change a default HERE, not in seven places.</summary>
@@ -42,6 +44,8 @@ public sealed record NovaConfig(
         Controller = StableDefault.Controller with { SelfConditioned = c.LivingSelf },
         KeepCoreControl = c.KeepCoreControl,
         ConsciousField = c.ConsciousField,
+        FieldTicks = c.FieldTicks,
+        MeaningOps = c.MeaningOps,
     };
 
     /// <summary>Push every mechanism toggle onto the live subsystems in ONE place (replaces the old scattered
@@ -71,6 +75,11 @@ public sealed record NovaConfig(
 
         // Conscious field (PLATONIC_MIND.md) — inference thinks by relaxation; the classifier path is bypassed.
         inference.ConsciousField = ConsciousField;
+
+        // Generative field routes — the genesis tick cascade + large-face meaning ops (compose/analogy). The field
+        // REASONS over the substrate (manufactures intermediate elements, operates in meaning-space), not just retrieves.
+        inference.FieldTicksEnabled = FieldTicks;
+        inference.MeaningOpsEnabled = MeaningOps;
 
         // Learning (task→space mechanisms + edit head)
         inference.FunctionDisruptionEnabled = Learning.FunctionDisruptionEnabled; // Rung 1

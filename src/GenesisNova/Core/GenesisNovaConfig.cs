@@ -57,7 +57,13 @@ public sealed record GenesisNovaConfig(
     // thinks by the field RELAXING to a settled state (compute → relax → abstain) and the route/plan/op classifier
     // is bypassed ENTIRELY (no "neural vs platonic" head). false (default) keeps the legacy classifier path for
     // existing tests; the desktop app turns it on. This is the subtraction the reckoning pointed at, made real.
-    bool ConsciousField = false)
+    bool ConsciousField = false,
+    // GENERATIVE field routes (PLATONIC_MIND.md). FieldTicks = the genesis tick cascade (numeric + meaning) runs a
+    // query as a frontier reduced over ticks, manufacturing intermediate elements. MeaningOps = generative ops in the
+    // large/word face (compose two meanings, analogy by relation-vector). Default false (byte-identical); the app
+    // turns them on so the field REASONS over the substrate instead of only retrieving from it.
+    bool FieldTicks = false,
+    bool MeaningOps = false)
 {
     /// <summary>
     /// Platonic face (embedding) width. By default equals the GRU width (HiddenSize); when
@@ -84,5 +90,9 @@ public sealed record GenesisNovaConfig(
         LivingSelf = true,            // the meaning-space self conditions ambiguous reasoning
         FunctionGradientEnabled = true, // Rung 2 — descend the function gradient alongside Rung 1 disruption
         EdgeRoutingEnabled = true,    // full retrieval ladder available (default, pinned here for clarity)
+        // FieldTicks / MeaningOps stay OFF in production for now — the generative tick + large-face meaning ops are
+        // proven (tests) but their FREE-FORM detection misfires (field-compose grabs verb+noun phrasings like
+        // "describe otter"). Kept experimental (flip via config) until the detection is hardened. The plumbing is
+        // wired through NovaConfig so they can be turned on per-run without code changes.
     };
 }

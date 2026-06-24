@@ -65,6 +65,42 @@ public partial class GenesisNeuralModel
     }
 
     /// <summary>
+    /// REFLECT — the mind observes its OWN state and integrates it: <c>self ← GruStep(self, self)</c>. This closes the
+    /// strange loop internally — the input to perception is the self that it just made immanent (∴self), so the GRU
+    /// observes itself observing (PLATONIC_CONSCIOUSNESS.md §5 step 2 / PLATONIC_MIND.md §2-II). A self that is a
+    /// stable attractor of this map holds its own shape — a self-evidencing STANDING WAVE; iterate to let it settle.
+    /// No-grad: reflecting is living, not training. Inert before a self has formed.
+    /// </summary>
+    public void ReflectOnSelf(int steps = 1)
+    {
+        if (_selfStateT is null)
+            return;
+        EnsureModelInitialized();
+        EnsureGruInitialized();
+        using var noGrad = no_grad();
+        for (var s = 0; s < Math.Max(1, steps); s++)
+        {
+            var scratch = new List<Tensor>();
+            try
+            {
+                var input = _selfStateT.detach().clone(); // the mind observes its OWN state as the input to perception
+                scratch.Add(input);
+                var newSelf = GruStep(input, _selfStateT, scratch, _inferenceDevice);
+                var persisted = newSelf.detach().clone();
+                _selfStateT.Dispose();
+                _selfStateT = persisted;
+            }
+            finally
+            {
+                foreach (var t in scratch)
+                {
+                    try { t?.Dispose(); } catch { }
+                }
+            }
+        }
+    }
+
+    /// <summary>
     /// PERCEIVE — fold one observation into the persistent self. Encodes the input through the shared GRU to hInput
     /// (the same representation the router reads), then advances the self by ONE learned recurrence step
     /// <c>self ← GruStep(hInput, self)</c>. The self thereby INTEGRATES experience and PERSISTS across calls: it is

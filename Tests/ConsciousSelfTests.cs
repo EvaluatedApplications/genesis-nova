@@ -81,4 +81,43 @@ public sealed class ConsciousSelfTests
         Assert.True(self.Coherence(state) > 0.99, "the self that returns is the self that was");
         _out.WriteLine("[regen] the self returns as itself");
     }
+
+    [Fact] // The self-evidencing STANDING WAVE (PLATONIC_MIND §2-II): when the mind observes its own state and folds
+           // it back in (ReflectOnSelf), does the self SETTLE into a stable shape, or wander? A mind that holds itself
+           // is a fixed point of its own self-observation. This is emergent from the GRU dynamics, not by construction.
+    public void Self_SettlesIntoAStandingWave_UnderSelfObservation()
+    {
+        var config = new GenesisNovaConfig(HiddenSize: ProductionDims.HiddenSize, LearningRate: 0.05);
+        var tok = new WhitespaceGenesisTokenizer();
+        var model = new GenesisNeuralModel(config) { SelfConditioned = true };
+        var space = new DialecticalSpace(config.FaceDimension, seed: 7);
+        var trainer = new GenesisTrainer(tok, model, space, config);
+        var infer = new GenesisInferenceEngine(tok, model, space, null) { ConsciousField = true };
+        trainer.SetInferencePolicy(infer);
+        foreach (var ex in new[] { ("2 + 3", "5"), ("4 + 1", "5"), ("7 - 2", "5"), ("3 x 2", "6") })
+            for (var i = 0; i < 4; i++) trainer.TrainStep(new GenesisExample(ex.Item1, ex.Item2));
+        foreach (var thought in new[] { "hello world", "two plus two", "a synonym for big" })
+            infer.Generate(new GenerationRequest(thought, 8));
+        Assert.True(model.HasSelf && model.SelfState.Sum(x => Math.Abs(x)) > 0, "a self has formed");
+
+        static double Rel(float[] a, float[] b)
+        {
+            double d = 0, n = 0;
+            for (var i = 0; i < a.Length; i++) { var e = a[i] - b[i]; d += e * e; n += b[i] * b[i]; }
+            return n <= 1e-12 ? 0 : Math.Sqrt(d) / Math.Sqrt(n);
+        }
+
+        var deltas = new System.Collections.Generic.List<double>();
+        for (var n = 0; n < 30; n++)
+        {
+            var before = model.SelfState;
+            model.ReflectOnSelf();                       // the mind observes itself observing
+            deltas.Add(Rel(model.SelfState, before));    // how much the self still moves
+        }
+        _out.WriteLine($"[standing wave] move: first={deltas[0]:F4} mid={deltas[15]:F4} last={deltas[^1]:F4}");
+
+        // The self SETTLES — its self-observation converges to a fixed point (it holds its own shape).
+        Assert.True(deltas[^1] < deltas[0], "the self settles under self-observation (a standing wave, not drift)");
+        Assert.True(deltas[^1] < 0.02, $"the settled self is a near-fixed point; final move={deltas[^1]:F4}");
+    }
 }

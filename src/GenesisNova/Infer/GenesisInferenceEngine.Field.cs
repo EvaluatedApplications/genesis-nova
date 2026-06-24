@@ -45,6 +45,7 @@ public sealed partial class GenesisInferenceEngine
             TryFieldPredicate(toks, request, out r) ||
             TryFieldArithmetic(toks, request, out r) ||
             TryFieldNumberWord(toks, request, out r) ||
+            (FieldTicksEnabled && TryFieldTick(request, out r)) ||
             TryFieldLearnedFunction(request, out r) ||
             TryFieldLearn(toks, request, out r) ||
             TryFieldRelax(request, out r))
@@ -245,6 +246,71 @@ public sealed partial class GenesisInferenceEngine
         return false;
     }
 
+    // ── GENERATIVE TICK (Stage 1 — the genesis tick brought live, hand-directed). The query is a FRONTIER of items
+    //    (numeric VALUEs + learned-op CUEs). Each TICK selects an applicable (cue, value) adjacency, APPLIES the
+    //    learned transform — manufacturing a NEW intermediate value element — and collapses the pair; the new value
+    //    re-enters the frontier as the next operand (the cascade). Settles when one value remains. This BUILDS a
+    //    multi-step derivation the one-shot dispatch cannot: "double incr 5" → incr(5)=6 → double(6)=12, across ticks.
+    //    Selection here is a hand-σ (innermost-first); Stage 2 hands selection to the NN (the director).
+    private bool TryFieldTick(GenerationRequest request, out GenerationResult result)
+    {
+        result = default!;
+        if (_transformAccumulator is null || string.IsNullOrWhiteSpace(request.Input)) return false;
+        var ds = (DialecticalSpace)_memory;
+        var dim = _memory.FaceDimension;
+        var inv = CultureInfo.InvariantCulture;
+        const NumberStyles ns = NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint;
+
+        // Build the frontier: each token is a numeric VALUE, a CUE resolving to a learned transform (the op element,
+        // selected from the SPACE — cue itself or a relational neighbour), or filler (dropped).
+        var items = new List<(bool IsValue, double Value, string Fn, Transform T)>();
+        foreach (var tok in request.Input.Trim().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
+        {
+            var t = tok.Trim('?', '!', '.', ',', ';', ':');
+            if (double.TryParse(t, ns, inv, out var v)) { items.Add((true, v, "", default!)); continue; }
+            var lc = t.ToLowerInvariant();
+            if (t.Any(char.IsLetter) && !IsFunctionWord(lc) && ResolveTransform(ds, lc, out var fn, out var tr))
+                items.Add((false, 0, fn, tr));
+        }
+        // Stage-1 scope: a single operand fed through a CHAIN of >= 2 learned ops (the genuinely multi-step case the
+        // one-shot learned-function route can't do — it would apply only one).
+        if (items.Count(i => i.IsValue) != 1 || items.Count(i => !i.IsValue) < 2) return false;
+
+        var trace = new List<string>();
+        var guard = 0;
+        while (items.Count > 1 && guard++ < 16)
+        {
+            var idx = -1;
+            for (var i = 0; i + 1 < items.Count; i++)
+                if (!items[i].IsValue && items[i + 1].IsValue) { idx = i; break; } // innermost applicable op
+            if (idx < 0) break; // no (cue, value) adjacency — frontier settled / stuck
+            var cue = items[idx]; var val = items[idx + 1];
+            var predicted = _transformAccumulator.Apply(cue.Fn, InputEmbeddingComposer.GetInputEmbedding(FieldFormat(val.Value), dim));
+            if (predicted is null) return false;
+            var (nv, quality, face) = PlatonicFaceDecoder.DecodeNumericFromPrediction(predicted, dim, cue.T.PreferredFace);
+            if (face == "none" || quality <= 0.50) return false;
+            trace.Add($"{cue.Fn}({FieldFormat(val.Value)})={FieldFormat(nv)}"); // the manufactured intermediate element
+            items[idx] = (true, nv, "", default!);
+            items.RemoveAt(idx + 1);
+        }
+        if (trace.Count < 2) return false; // a single step is the one-shot route's job
+        var settled = items.First(i => i.IsValue);
+        return EmitField(FieldFormat(settled.Value), $"field-tick[{string.Join(" -> ", trace)}]", request, out result);
+    }
+
+    // Resolve a cue to a learned transform: the cue itself OR a relational neighbour of it (an op edge in the space).
+    private bool ResolveTransform(DialecticalSpace ds, string cue, out string fn, out Transform transform)
+    {
+        fn = cue; transform = default!;
+        if (_transformAccumulator is null) return false;
+        var candidates = new List<string>(5) { cue };
+        candidates.AddRange(ds.GetNeighbors(cue, PlatonicNeighborhoodType.Relational, maxNeighbors: 4, minConfidence: 0.35)
+                              .Select(n => n.Concept));
+        foreach (var c in candidates)
+            if (_transformAccumulator.TryGetTransform(c, out transform)) { fn = c; return true; }
+        return false;
+    }
+
     // ── LEARN (continuity / the continuous I): the mind is TOLD a fact ("the password is plum") and remembers it,
     //    so a later question recalls it. This is the self conditioning cognition across time — the same mind using
     //    what it has lived. Conservative: fires only on a clear assertion (a copula, a complete content object, NO
@@ -327,6 +393,13 @@ public sealed partial class GenesisInferenceEngine
     /// <summary>When true (default, in the living field mode), the persistent self conditions ambiguous reasoning.
     /// Turn OFF to ABLATE the self — proving the agent's cognition genuinely DEPENDS on it (else it is decorative).</summary>
     public bool SelfConditionsCognition { get; set; } = true;
+
+    /// <summary>GENERATIVE TICK LOOP (Stage 1, PLATONIC_MIND.md / the genesis tick). When true, the field can RUN a
+    /// query as a cascade — a frontier of elements reduced over ticks, each tick APPLYING a learned op to a value and
+    /// manufacturing a NEW intermediate element that re-enters the frontier (so multi-step derivations the one-shot
+    /// dispatch can't reach are BUILT mid-inference). Selection is a hand-coded heuristic here; handing the wheel to
+    /// the NN (the director σ) is Stage 2. Default OFF — the dispatch is byte-identical until the NN drives it.</summary>
+    public bool FieldTicksEnabled { get; set; }
 
     /// <summary>The mind's current self as a meaning-space vector (empty before the first perception) — for inspection
     /// and for tests that ablate or probe the self.</summary>

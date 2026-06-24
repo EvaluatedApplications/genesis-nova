@@ -169,10 +169,6 @@ public sealed partial class GenesisEvalAppRuntime : ILearningRuntime
     public int VocabularySize => WithModelGate(() => _state.Tokenizer.VocabularySize);
     public int HiddenSize => WithModelGate(() => _state.Model.HiddenSize);
 
-    /// <summary>The GRU's persistent SELF-state (PLATONIC_CONSCIOUSNESS.md) — empty until a self has formed; its
-    /// norm is the "amplitude" of the living self. Read-only diagnostic for inspecting a living run.</summary>
-    public float[] SelfState => WithModelGate(() => _state.Model.SelfState);
-
     /// <summary>The SGD step size, exposed so a caller can implement a training SCHEDULE (e.g. anneal the LR as
     /// a lesson approaches mastery, the way the autonomous orchestrator does). Reads/writes the live model.</summary>
     public double LearningRate

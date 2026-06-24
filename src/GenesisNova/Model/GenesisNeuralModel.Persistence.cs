@@ -50,9 +50,7 @@ public partial class GenesisNeuralModel
             _planWT is not null ? TensorToMatrix(_planWT) : null,
             _planB is not null ? TensorToVector(_planB) : null,
             _trunkW is not null ? TensorToMatrix(_trunkW) : null,
-            _trunkB is not null ? TensorToVector(_trunkB) : null,
-            // THE PERSISTENT SELF — the creature's continuous identity, saved so it survives a restart.
-            _selfStateT is not null ? System.Array.ConvertAll(SelfState, x => (double)x) : null);
+            _trunkB is not null ? TensorToVector(_trunkB) : null);
     }
 
     public void Import(ModelSnapshot snapshot)
@@ -104,12 +102,6 @@ public partial class GenesisNeuralModel
             _trunkW = MatrixToParameter(snapshot.TrunkWeights!);
             _trunkB = VectorToParameter(snapshot.TrunkBias!);
         }
-        // THE PERSISTENT SELF — restore the creature's identity so it wakes as the same self it slept as. Only when
-        // the saved vector matches this model's hidden width; otherwise it is born anew on first perception.
-        _selfStateT?.Dispose();
-        _selfStateT = (snapshot.SelfState is { Length: > 0 } ss && ss.Length == _hiddenSize)
-            ? torch.tensor(System.Array.ConvertAll(ss, x => (float)x), device: _inferenceDevice)
-            : null;
         RecreateOptimizer();
     }
 

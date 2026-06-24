@@ -249,8 +249,4 @@ public sealed record ModelSnapshot(
     // SHARED REASONING TRUNK weights [hidden, ReasoningTrunkDim] + bias [ReasoningTrunkDim]. The route/op/plan
     // heads read this, so it MUST persist or a loaded model routes differently (random trunk × trained head).
     double[,]? TrunkWeights = null,
-    double[]? TrunkBias = null,
-    // THE PERSISTENT SELF (PLATONIC_CONSCIOUSNESS.md) — the GRU's continuous "I" [hidden]. Optional; null on
-    // checkpoints saved before the self existed and when no self has formed. Persisted so the creature's identity
-    // survives restarts: it wakes as the same self it slept as.
-    double[]? SelfState = null);
+    double[]? TrunkBias = null);

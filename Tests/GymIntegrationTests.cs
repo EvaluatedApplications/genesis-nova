@@ -69,7 +69,7 @@ public sealed class GymIntegrationTests
             {
                 cycles++; bestAcc = Math.Max(bestAcc, m.Accuracy);
                 if (m.Cycle <= 3 || m.Cycle % 5 == 0)
-                    _out.WriteLine($"  cycle {m.Cycle,3}  diff {m.Difficulty}  acc {m.Accuracy,5:P0}  purity {m.RoutePurity,5:P0}  trained {m.TrainedCount,3}  ‖self‖ {Norm(runtime.SelfState):F2}  {sw.Elapsed.TotalSeconds:F0}s");
+                    _out.WriteLine($"  cycle {m.Cycle,3}  diff {m.Difficulty}  acc {m.Accuracy,5:P0}  purity {m.RoutePurity,5:P0}  trained {m.TrainedCount,3}  {sw.Elapsed.TotalSeconds:F0}s");
             }, cts.Token);
         }
         catch (OperationCanceledException) { /* time budget reached — expected */ }
@@ -83,7 +83,6 @@ public sealed class GymIntegrationTests
         _out.WriteLine("\n── SPACE ──────────────────────────────────────────────");
         _out.WriteLine($"concepts={diag.NodeCount}  relations={diag.RelationCount}  functions={diag.FunctionElementCount}  transforms={diag.LearnedTransformCount}  foldPaths={diag.FoldPathCount}  chunks={diag.ChunkCount}");
         _out.WriteLine($"geometry: related {geo.RelatedMean:F3}  unrelated {geo.UnrelatedMean:F3}  SEPARATION {geo.Separation:F3}  (mutable {geo.MutableConcepts})");
-        _out.WriteLine($"living self: ‖self‖={Norm(runtime.SelfState):F3}");
         if (diag.TopRelations.Length > 0)
             _out.WriteLine("top relations: " + string.Join(", ", diag.TopRelations.Take(6).Select(r => $"{r.Left}~{r.Right}({r.ObservationCount})")));
 
@@ -97,12 +96,9 @@ public sealed class GymIntegrationTests
 
         _out.WriteLine($"\n>>> CHECKPOINT KEPT FOR INSPECTION: {tempDir}");
 
-        // Sanity gates: it actually ran, built a space, a living self formed, and the numbers are finite.
+        // Sanity gates: it actually ran, built a space, and the numbers are finite.
         Assert.True(cycles > 0, "the gym ran at least one cycle");
         Assert.True(diag.NodeCount > 0, "the space grew during training");
-        Assert.True(runtime.SelfState.Length > 0 && Norm(runtime.SelfState) > 0.0, "a living self formed during the gym run");
         Assert.False(double.IsNaN(geo.Separation), "geometry is finite");
     }
-
-    private static double Norm(float[] v) { var s = 0.0; foreach (var x in v) s += (double)x * x; return Math.Sqrt(s); }
 }

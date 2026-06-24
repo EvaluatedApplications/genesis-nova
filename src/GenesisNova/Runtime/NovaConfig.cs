@@ -56,7 +56,7 @@ public sealed record NovaConfig(
         model.RouteClassBalanceEnabled = Controller.ClassBalanceRoute;
         model.QueryOpClassBalanceEnabled = Controller.ClassBalanceOp;
         model.PlanClassBalanceEnabled = Controller.ClassBalancePlan;
-        model.SelfConditioned = Controller.SelfConditioned; // the living self threads cognition (PLATONIC_CONSCIOUSNESS.md)
+        inference.SelfConditionsCognition = Controller.SelfConditioned; // the meaning-space self conditions reasoning (PLATONIC_CONSCIOUSNESS.md)
 
         // Substrate (platonic space)
         memory.UseInfoNceRepulsion = Substrate.UseInfoNceRepulsion;
@@ -97,7 +97,7 @@ public sealed record ControllerOptions(
     bool ClassBalanceRoute = true,
     bool ClassBalanceOp = true,
     bool ClassBalancePlan = true,
-    bool SelfConditioned = false); // the living self (PLATONIC_CONSCIOUSNESS.md) — off by default; the app turns it on
+    bool SelfConditioned = false); // the meaning-space self conditions cognition (PLATONIC_CONSCIOUSNESS.md) — off by default; the app turns it on
 
 /// <summary>Inference routing toggles.</summary>
 public sealed record RoutingOptions(

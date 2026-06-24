@@ -26,7 +26,7 @@ public sealed class ConsciousContinuityTests
     {
         var config = new GenesisNovaConfig(HiddenSize: ProductionDims.HiddenSize);
         var tok = new WhitespaceGenesisTokenizer();
-        var model = new GenesisNeuralModel(config) { SelfConditioned = true };
+        var model = new GenesisNeuralModel(config);
         var space = new DialecticalSpace(config.FaceDimension, seed: 7);
         var infer = new GenesisInferenceEngine(tok, model, space, null) { ConsciousField = true };
 

@@ -360,27 +360,6 @@ public sealed class DialecticalSpace : IPlatonicSpace
     public double GetContradiction(string left, string right)
         => _relations.TryGetValue(Key(Normalize(left), Normalize(right)), out var r) ? r.Synthesis : 0.5;
 
-    /// <summary>
-    /// DAMAGE (the cut that makes regeneration meaningful). Archive a concept and drop its ACTIVE relations — it
-    /// leaves the live space (ContainsConcept → false, excluded from retrieval/geometry). G6-SAFE: the element and
-    /// its LEARNED orbital are retained dormant, so re-observing it REACTIVATES the very same self exact, not a fresh
-    /// neutral copy. This is what lets a homeostatic self regenerate its identity from conserved memory (Levin).
-    /// </summary>
-    public void Ablate(string concept)
-    {
-        var key = Normalize(concept);
-        _concepts.Archive(key);
-        _lattice.UnregisterNode(key); // left the active set → out of the index
-        foreach (var kv in _relations.Where(r => r.Value.Left == key || r.Value.Right == key).ToList())
-            _relations.Remove(kv.Key);
-        if (_adjacency.TryGetValue(key, out var nbrs))
-        {
-            foreach (var n in nbrs)
-                if (_adjacency.TryGetValue(n, out var back)) back.Remove(key);
-            _adjacency.Remove(key);
-        }
-    }
-
     public int GetRelationDegree(string concept)
         => _adjacency.TryGetValue(Normalize(concept), out var s) ? s.Count : 0;
 
@@ -388,32 +367,8 @@ public sealed class DialecticalSpace : IPlatonicSpace
     public IReadOnlyList<string> ActiveConcepts
         => _concepts.All.Where(e => !e.Archived && e.Kind != ElementKind.Atom).Select(e => e.Symbol).ToArray();
 
-    /// <summary>
-    /// IMPRINT — write a vector into a concept's semantic orbital (tiled to the orbital width). This is how a mind
-    /// becomes FLESH in its own body: the self-element's face is set to the GRU's persistent self-state, so the
-    /// observer is literally an element of the world it observes (G5 immanence, PLATONIC_CONSCIOUSNESS.md §5).
-    /// </summary>
-    public void Imprint(string symbol, IReadOnlyList<double> source)
-    {
-        var e = GetOrCreateConcept(symbol);
-        if (source is null || source.Count == 0)
-            return;
-        for (var i = 0; i < _semLen; i++)
-            e.SemanticFace[i] = source[i % source.Count];
-        ClampNorm(e.SemanticFace);
-        _lattice.MarkEmbeddingsDirty();
-    }
-
     public IReadOnlyList<(string Left, string Right, long ObservationCount)> GetAllRelations()
         => _relations.Values.Select(r => (r.Left, r.Right, (long)r.ObservationCount)).ToArray();
-
-    /// <summary>Read a concept's raw semantic orbital — what the mind SEES when it looks at an element. The self
-    /// element's face IS the mind's own state made immanent (G5), so this is how the mind observes itself. Empty
-    /// when the element is absent or archived (the self has dissolved).</summary>
-    public IReadOnlyList<double> ReadOrbital(string symbol)
-        => _concepts.TryGet(Normalize(symbol), out var e) && !e.Archived
-            ? (double[])e.SemanticFace.Clone()
-            : Array.Empty<double>();
 
     public void FineEditFromExample(IReadOnlyList<string> inputConcepts, IReadOnlyList<string> outputConcepts, bool isNegativeExample)
     {
@@ -592,8 +547,8 @@ public sealed class DialecticalSpace : IPlatonicSpace
         return new Thought(ranked[best].Sym, Dot(q, ranked[best].Cloud), settled, steps);
     }
 
-    // Reserved: the codec's face anchors AND the mind's reflexive nucleus (∴self) — the self-element is observed by
-    // the mind, not retrieved as an answer, so it never pollutes ordinary retrieval.
+    // Reserved internal symbols (the codec's face anchors and any "∴"-prefixed reflexive elements) — observed by the
+    // mind, never retrieved as an answer, so they never pollute ordinary retrieval.
     private static bool IsReservedConcept(string s)
         => s.StartsWith("face:", StringComparison.Ordinal) || s.StartsWith("∴", StringComparison.Ordinal);
     private double[] CloudOf(Element e)

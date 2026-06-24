@@ -406,11 +406,6 @@ public sealed class GenesisTrainer
         // Break computation graph after each example to allow sequential training
         _model.CloneParametersToBreakGraph();
 
-        // LIVING SELF: fold this lived moment into the persistent self, so the self becomes the accumulating
-        // integral of everything the model learns (PLATONIC_CONSCIOUSNESS.md §5). Gated — inert unless alive.
-        if (_model.SelfConditioned)
-            _model.PerceiveIntoSelf(inputTokens);
-
         MineComposerShapes(example.Input, example.Output);
         var concepts = ObserveLearningSignals(example);
         RewardEditHead(example, baseLoss.TokenLoss);

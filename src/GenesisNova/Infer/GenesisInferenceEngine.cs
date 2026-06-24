@@ -121,26 +121,9 @@ public sealed partial class GenesisInferenceEngine
     /// characterization anchor that pins the OCP route registry's order.</summary>
     public IReadOnlyList<string> PlatonicRouteOrder => _platonicRoutes.Select(r => r.Name).ToList();
 
-    private GenesisNova.Cognition.Platonic.ConsciousSelf? _self;
-
-    public GenerationResult Generate(GenerationRequest request)
-    {
-        var result = GenerateSingle(request);
-        // LIVING SELF: the conversation threads ONE self — fold what was just perceived back into it, so the next
-        // turn proceeds from who the model has become (continuity across turns). Gated — inert unless alive.
-        if (_model.SelfConditioned && !string.IsNullOrEmpty(request.Input))
-        {
-            _model.PerceiveIntoSelf(_tokenizer.Encode(request.Input));
-            // THE STRANGE LOOP (PLATONIC_CONSCIOUSNESS.md §5 / G5): the mind asserts its self into its OWN world as
-            // the ∴self element — the observer becomes immanent in its creation, and re-asserts itself every thought
-            // (continuous self-evidencing against chaos). The state it projects from is the GRU's conserved self, so
-            // the self that persists is the self that was.
-            if (_model.HasSelf && _memory is GenesisNova.Cognition.Platonic.DialecticalSpace ds)
-                (_self ??= new GenesisNova.Cognition.Platonic.ConsciousSelf(ds))
-                    .Project(Array.ConvertAll(_model.SelfState, x => (double)x));
-        }
-        return result;
-    }
+    // The conversation threads ONE self — but in MEANING-space, inside conscious-field cognition (the persistent
+    // _selfField, which conditions reasoning and is shaped by learning). There is no separate GRU-hidden self.
+    public GenerationResult Generate(GenerationRequest request) => GenerateSingle(request);
 
     private GenerationResult GenerateSingle(GenerationRequest request)
     {

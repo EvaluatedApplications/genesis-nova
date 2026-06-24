@@ -573,9 +573,10 @@ public partial class GenesisNeuralModel
         List<Tensor>? perTokenStates = null)
     {
         EnsureGruInitialized();
-        // Begin from the standing self when self-conditioned (the one seam linking the self to BOTH learning and
-        // talking), else from the void (zeros) — the byte-identical default.
-        Tensor h = InitialHidden(device, scratch);
+        // Begin each thought from the void (zeros) — the GRU is stateless per input. (Continuity across thoughts is
+        // carried by the mind's meaning-space self in the inference engine, not by a hidden-state self here.)
+        Tensor h = zeros(new long[] { _hiddenSize }, dtype: ScalarType.Float32, device: device);
+        scratch.Add(h);
 
         foreach (var tok in inputTokens)
         {

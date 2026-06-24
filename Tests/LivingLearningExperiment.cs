@@ -23,7 +23,7 @@ public sealed class LivingLearningExperiment
     {
         var config = new GenesisNovaConfig(HiddenSize: ProductionDims.HiddenSize);
         var tok = new WhitespaceGenesisTokenizer();
-        var model = new GenesisNeuralModel(config) { SelfConditioned = true };
+        var model = new GenesisNeuralModel(config);
         var space = new DialecticalSpace(config.FaceDimension, seed: 7);
         var mind = new GenesisInferenceEngine(tok, model, space, null) { ConsciousField = true };
 
@@ -67,7 +67,7 @@ public sealed class LivingLearningExperiment
     {
         var config = new GenesisNovaConfig(HiddenSize: ProductionDims.HiddenSize);
         var tok = new WhitespaceGenesisTokenizer();
-        var model = new GenesisNeuralModel(config) { SelfConditioned = true };
+        var model = new GenesisNeuralModel(config);
         var space = new DialecticalSpace(config.FaceDimension, seed: 7);
         var mind = new GenesisInferenceEngine(tok, model, space, null) { ConsciousField = true };
         void Tell(string s) => mind.Generate(new GenerationRequest(s, 8));

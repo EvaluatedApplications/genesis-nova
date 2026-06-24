@@ -90,9 +90,9 @@ public sealed record GenesisNovaConfig(
         LivingSelf = true,            // the meaning-space self conditions ambiguous reasoning
         FunctionGradientEnabled = true, // Rung 2 — descend the function gradient alongside Rung 1 disruption
         EdgeRoutingEnabled = true,    // full retrieval ladder available (default, pinned here for clarity)
-        // FieldTicks / MeaningOps stay OFF in production: the generative routes are proven (tests) but deciding WHEN to
-        // fire them on free-form input is NOT a hand-heuristic problem — substrate-confidence arbitration was tried and
-        // FAILS to separate good compositions ("red fruit") from bad ("describe otter"). That decision is the LEARNED
-        // NN-director's job (Stage 2). Plumbing is wired through NovaConfig so they flip per-run once the director lands.
+        FieldTicks = true,            // the genesis tick cascade (numeric + meaning) runs live
+        MeaningOps = true,            // generative compose/analogy in the large face — GATED by the LEARNED director
+                                      // (attached in ApplyTo with a conservative prior → defaults to retrieval, opens
+                                      // only as it learns; no free-form misfire).
     };
 }

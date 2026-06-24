@@ -353,6 +353,7 @@ public sealed partial class GenesisInferenceEngine
         var t2 = ds.Reason(content);
         if (!t2.Settled || t2.Confidence < ReasonMinConfidence
             || PlatonicSpaceMemory.IsReservedConcept(t2.Symbol) || ds.IsOperationToken(t2.Symbol)) return false;
+        if (!DirectorApprovesCompose(ds, content, t2.Confidence)) return false; // the learned director's call
         return EmitField(t2.Symbol, "field-compose", request, out result);
     }
 
@@ -369,6 +370,8 @@ public sealed partial class GenesisInferenceEngine
         var frontier = toks.Where(t => IsContentWord(t) && !IsFunctionWord(t) && !IsNumericLike(t) && ds.ContainsConcept(t))
                           .Distinct(StringComparer.Ordinal).ToList();
         if (frontier.Count < 3) return false;
+        // The learned director gates the meaning cascade too (it is a compose, multi-step).
+        if (!DirectorApprovesCompose(ds, frontier, ds.Reason(new[] { frontier[0], frontier[1] }).Confidence)) return false;
 
         var trace = new List<string>();
         var guard = 0;
@@ -484,6 +487,26 @@ public sealed partial class GenesisInferenceEngine
     /// <summary>The mind's current self as a meaning-space vector (empty before the first perception) — for inspection
     /// and for tests that ablate or probe the self.</summary>
     public IReadOnlyList<double> SelfField => _selfField ?? Array.Empty<double>();
+
+    /// <summary>THE LEARNED DIRECTOR (Stage 2) — gates the generative MEANING routes (compose / meaning-tick): it
+    /// decides, from substrate features, whether a query genuinely WANTS to compose vs plain retrieval. Null = the raw
+    /// routes fire un-gated (the experiment/test path). In production a conservative director is attached so the routes
+    /// default to retrieval (safe) and open only as the director learns. See <see cref="FieldDirector"/>.</summary>
+    public FieldDirector? Director { get; set; }
+
+    // Substrate features for the director's compose-vs-retrieve decision on the query's content concepts.
+    private bool DirectorApprovesCompose(DialecticalSpace ds, IReadOnlyList<string> content, double composeConf)
+    {
+        if (Director is null) return true; // no director attached → raw route (un-gated)
+        var degs = content.Select(ds.GetRelationDegree).ToList();
+        var minDeg = degs.Count > 0 ? degs.Min() : 0;
+        var subject = content[Math.Max(0, degs.IndexOf(minDeg))];
+        var retrieveConf = ds.Reason(new[] { subject }).Confidence; // what plain retrieval of the most-specific concept gives
+        return Director.ShouldCompose(new[]
+        {
+            minDeg / (minDeg + 4.0), content.Count / 4.0, composeConf, retrieveConf, composeConf - retrieveConf
+        });
+    }
 
     // PERCEIVE — fold one attended concept's MEANING into the persistent self (decay the standing self, admit the new
     // meaning, renormalize). This is how living accumulates into a self: every thought leaves a trace, recent ones

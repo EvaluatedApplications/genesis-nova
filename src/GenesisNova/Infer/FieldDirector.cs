@@ -21,11 +21,13 @@ public sealed class FieldDirector
     private double _b;
     private readonly double _lr;
 
-    public FieldDirector(int featureCount, double learningRate = 0.3)
+    public FieldDirector(int featureCount, double learningRate = 0.3, double initialBias = 0.0)
     {
         if (featureCount <= 0) throw new ArgumentOutOfRangeException(nameof(featureCount));
         _w = new double[featureCount];
         _lr = learningRate;
+        _b = initialBias; // a CONSERVATIVE negative prior makes the untrained director default to retrieval (safe) and
+                          // LEARN its way to compose — so wiring it in never opens the gate before it has earned it.
     }
 
     public int FeatureCount => _w.Length;

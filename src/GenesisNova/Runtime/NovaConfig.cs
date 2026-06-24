@@ -80,6 +80,9 @@ public sealed record NovaConfig(
         // REASONS over the substrate (manufactures intermediate elements, operates in meaning-space), not just retrieves.
         inference.FieldTicksEnabled = FieldTicks;
         inference.MeaningOpsEnabled = MeaningOps;
+        // The LEARNED DIRECTOR gates the risky meaning routes (compose / meaning-tick). Attached with a conservative
+        // prior so it DEFAULTS to retrieval (safe — no free-form misfire) and opens the gate only as it learns.
+        inference.Director = MeaningOps ? new FieldDirector(featureCount: 5, initialBias: -3.0) : null;
 
         // Learning (task→space mechanisms + edit head)
         inference.FunctionDisruptionEnabled = Learning.FunctionDisruptionEnabled; // Rung 1

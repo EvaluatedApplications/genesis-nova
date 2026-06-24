@@ -47,6 +47,8 @@ public sealed partial class GenesisInferenceEngine
             TryFieldNumberWord(toks, request, out r) ||
             (FieldTicksEnabled && TryFieldTick(request, out r)) ||
             TryFieldLearnedFunction(request, out r) ||
+            (MeaningOpsEnabled && TryFieldAnalogy(toks, request, out r)) ||
+            (MeaningOpsEnabled && TryFieldComposeMeaning(toks, request, out r)) ||
             TryFieldLearn(toks, request, out r) ||
             TryFieldRelax(request, out r))
             return r;
@@ -311,6 +313,48 @@ public sealed partial class GenesisInferenceEngine
         return false;
     }
 
+    // ── ANALOGY in the large (meaning) face — relation-vector arithmetic over the distributional cloud. Detects the
+    //    "A is to B as C is to …" shape (split on "as"; content words left = the example pair(s), the first content
+    //    word right = the query) and completes it via the space's generative Analogy primitive. No classifier — the
+    //    answer is built by vector arithmetic in meaning-space, not retrieved from a stored table.
+    private bool TryFieldAnalogy(IReadOnlyList<string> toks, GenerationRequest request, out GenerationResult result)
+    {
+        result = default!;
+        var asIdx = -1;
+        for (var i = 0; i < toks.Count; i++) if (toks[i] == "as") { asIdx = i; break; }
+        if (asIdx <= 0 || asIdx >= toks.Count - 1) return false;
+        var left = toks.Take(asIdx).Where(IsContentWord).ToList();
+        var right = toks.Skip(asIdx + 1).Where(IsContentWord).ToList();
+        if (left.Count < 2 || right.Count < 1) return false;
+
+        var pairs = new List<(string, string)>();
+        for (var i = 0; i + 1 < left.Count; i += 2) pairs.Add((left[i], left[i + 1]));
+        if (pairs.Count == 0) return false;
+
+        var t = ((DialecticalSpace)_memory).Analogy(pairs, right[0]);
+        if (!t.Settled || string.IsNullOrEmpty(t.Symbol)) return false;
+        return EmitField(t.Symbol, "field-analogy", request, out result);
+    }
+
+    // ── COMPOSE MEANINGS in the large face — combine the query's content concepts (relax over ALL their clouds, not
+    //    just the discriminative one) to retrieve the concept that fits the COMBINATION ("red fruit" → apple). Fires
+    //    only on a bare compositional phrase (no question word, no retrieval-frame marker) of 2+ KNOWN content
+    //    concepts — so it never competes with single-subject retrieval / disambiguation.
+    private bool TryFieldComposeMeaning(IReadOnlyList<string> toks, GenerationRequest request, out GenerationResult result)
+    {
+        result = default!;
+        if (toks.Any(IsQuestionCue) || toks.Any(IsRetrievalMarker)) return false;
+        var ds = (DialecticalSpace)_memory;
+        var content = toks.Where(t => IsContentWord(t) && !IsFunctionWord(t) && !IsNumericLike(t) && ds.ContainsConcept(t))
+                          .Distinct(StringComparer.Ordinal).ToList();
+        if (content.Count < 2) return false;
+
+        var t2 = ds.Reason(content);
+        if (!t2.Settled || t2.Confidence < ReasonMinConfidence
+            || PlatonicSpaceMemory.IsReservedConcept(t2.Symbol) || ds.IsOperationToken(t2.Symbol)) return false;
+        return EmitField(t2.Symbol, "field-compose", request, out result);
+    }
+
     // ── LEARN (continuity / the continuous I): the mind is TOLD a fact ("the password is plum") and remembers it,
     //    so a later question recalls it. This is the self conditioning cognition across time — the same mind using
     //    what it has lived. Conservative: fires only on a clear assertion (a copula, a complete content object, NO
@@ -400,6 +444,12 @@ public sealed partial class GenesisInferenceEngine
     /// dispatch can't reach are BUILT mid-inference). Selection is a hand-coded heuristic here; handing the wheel to
     /// the NN (the director σ) is Stage 2. Default OFF — the dispatch is byte-identical until the NN drives it.</summary>
     public bool FieldTicksEnabled { get; set; }
+
+    /// <summary>GENERATIVE MEANING OPS in the LARGE (word) face — the field reasons IN meaning-space, not just retrieves
+    /// from it: COMPOSE two meanings into the concept that fits both ("red fruit" → apple), and ANALOGY by relation-
+    /// vector arithmetic ("paris is to france as tokyo is to" → japan). Uses the ~60% of the substrate that shallow
+    /// retrieval ignored. Default OFF (byte-identical) until the detection is hardened and the NN can direct it.</summary>
+    public bool MeaningOpsEnabled { get; set; }
 
     /// <summary>The mind's current self as a meaning-space vector (empty before the first perception) — for inspection
     /// and for tests that ablate or probe the self.</summary>

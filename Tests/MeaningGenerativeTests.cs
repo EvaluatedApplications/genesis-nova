@@ -2,6 +2,9 @@ using System;
 using System.Linq;
 using GenesisNova.Cognition.Platonic;
 using GenesisNova.Core;
+using GenesisNova.Infer;
+using GenesisNova.Model;
+using GenesisNova.Tokenization;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -59,5 +62,32 @@ public sealed class MeaningGenerativeTests
         // relation part of the lift is the query's own neighbour; a directed-relation test is the sharper follow-up.)
         Assert.Equal("japan", a1.Symbol);
         Assert.Equal("tokyo", a2.Symbol);
+    }
+
+    // The field now REASONS in the large face — inference answers a compositional phrase and an analogy by operating
+    // in meaning-space (field-compose / field-analogy), not by looking past it.
+    [Fact]
+    public void Field_UsesTheLargeFace_Generatively()
+    {
+        var config = new GenesisNovaConfig(HiddenSize: ProductionDims.HiddenSize);
+        var tok = new WhitespaceGenesisTokenizer();
+        var model = new GenesisNeuralModel(config);
+        var space = new DialecticalSpace(config.FaceDimension, seed: 7);
+        void Rel(string a, string b) { for (var i = 0; i < 3; i++) space.FineEditFromExample(new[] { a }, new[] { b }, false); }
+        Rel("apple", "red"); Rel("apple", "fruit"); Rel("cherry", "red"); Rel("cherry", "fruit");
+        Rel("lemon", "yellow"); Rel("lemon", "fruit"); Rel("brick", "red"); Rel("brick", "stone");
+        Rel("paris", "france"); Rel("rome", "italy"); Rel("tokyo", "japan");
+
+        var mind = new GenesisInferenceEngine(tok, model, space, null) { ConsciousField = true, MeaningOpsEnabled = true };
+
+        var compose = mind.Generate(new GenerationRequest("red fruit", 6));
+        _out.WriteLine($"'red fruit' -> '{compose.Output?.Trim()}' [{compose.DecisionPath}]");
+        Assert.Contains(compose.Output?.Trim(), new[] { "apple", "cherry" });
+        Assert.Equal("field-compose", compose.DecisionPath);
+
+        var analogy = mind.Generate(new GenerationRequest("paris is to france as tokyo is to", 6));
+        _out.WriteLine($"'paris is to france as tokyo is to' -> '{analogy.Output?.Trim()}' [{analogy.DecisionPath}]");
+        Assert.Equal("japan", analogy.Output?.Trim());
+        Assert.Equal("field-analogy", analogy.DecisionPath);
     }
 }

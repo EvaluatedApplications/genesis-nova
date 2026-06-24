@@ -27,6 +27,10 @@ public sealed partial class GenesisEvalAppRuntime : ILearningRuntime
     private readonly SemaphoreSlim _modelOpsGate = new(1, 1);
     private string? _loadedCheckpointPath;
     private DateTime _loadedCheckpointWriteUtc = DateTime.MinValue;
+    // SESSION conversational mode (the talk route). Held on the runtime — NOT in the checkpoint — because a reload
+    // rebuilds the inference engine (TalkEnabled defaults off), so it must be RE-APPLIED after every Replace, else an
+    // autosave mid-gym silently switches the persona off on the next predict. See SetConversationalMode / Replace.
+    private bool _conversationalMode;
 
     public GenesisEvalAppRuntime(GenesisNovaConfig? config = null)
     {
@@ -150,7 +154,25 @@ public sealed partial class GenesisEvalAppRuntime : ILearningRuntime
     /// FocusedCurriculum sees real progress and reinforces the talk edges rather than thrashing. Scoped to
     /// chat-training sessions; off otherwise so non-chat deployments are byte-identical. Model-ops gated.</summary>
     public void SetConversationalMode(bool on)
-        => WithModelGate(() => { _state.Inference.TalkEnabled = on; return 0; });
+        => WithModelGate(() => { _conversationalMode = on; _state.Inference.TalkEnabled = on; return 0; });
+
+    /// <summary>SEED a conversational persona's reply CHUNKS: relate each cue to its WHOLE reply (one composite
+    /// concept), so <c>TryFieldRespond</c> retrieves a reply as a CHUNK. The gym does NOT decode-train a persona —
+    /// decoding a reply token-by-token only builds stray cue→WORD edges that crowd the chunk out of the top-N
+    /// neighbours (measured), and in the conscious field the GRU decoder is bypassed anyway. Seeding once is enough:
+    /// the chunk relations are stable space edges (persona cues aren't skill cues, so skill training doesn't touch
+    /// them). <paramref name="reps"/> repeats strengthen the edge. Model-ops gated.</summary>
+    public void SeedConversationalChunks(IReadOnlyList<(string Cue, string Reply)> pairs, int reps = 8)
+        => WithModelGate(() =>
+        {
+            foreach (var (cue, reply) in pairs)
+            {
+                if (string.IsNullOrWhiteSpace(cue) || string.IsNullOrWhiteSpace(reply)) continue;
+                for (var i = 0; i < Math.Max(1, reps); i++)
+                    _state.Memory.FineEditFromExample(new[] { cue }, new[] { reply }, isNegativeExample: false);
+            }
+            return 0;
+        });
 
     /// <summary>CREDIT ASSIGNMENT on edges: reward the relation edges an answer USED when it was graded CORRECT,
     /// penalise them when WRONG (strengthen / weaken / — via the utility-based pruner — detach). Lets the gym's

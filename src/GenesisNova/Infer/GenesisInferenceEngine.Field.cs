@@ -44,8 +44,9 @@ public sealed partial class GenesisInferenceEngine
             (MeaningOpsEnabled && TryFieldAnalogy(toks, request, out r)) ||
             (MeaningOpsEnabled && TryFieldComposeMeaning(toks, request, out r)) ||
             TryFieldLearn(toks, request, out r) ||
-            (TalkEnabled && TryFieldRespond(request, out r)) ||
-            TryFieldRelax(request, out r))
+            (TalkEnabled && TryFieldRespondDirect(request, out r)) ||
+            TryFieldRelax(request, out r) ||
+            (TalkEnabled && TryFieldRespondGeneralize(request, out r)))
             return r;
 
         return FieldAbstain(); // high free-energy, no basin — speak nothing
@@ -455,7 +456,11 @@ public sealed partial class GenesisInferenceEngine
     //    cue→reply RELATION to a reply chunk (not cloud-retrieval, which drifts to clustered cue words), with the SELF
     //    picking which reply — the persona's voice + variety as the self evolves. The repertoire is the chunks the
     //    word face holds; "talking" is the NN-conditioned selection among them.
-    private bool TryFieldRespond(GenerationRequest request, out GenerationResult result)
+    // DIRECT talk: a conversational cue with a learned cue→reply CHUNK relation. Runs BEFORE relaxation. Requires a
+    // multi-word reply CHUNK (the persona speaks in whole phrases) — so a framed RETRIEVAL query ("a synonym for big",
+    // "what kind of thing is apple"), whose only relations are to single words, finds NO chunk here and falls through
+    // to relaxation (which answers it correctly). Only a genuine persona cue, related to a reply phrase, talks.
+    private bool TryFieldRespondDirect(GenerationRequest request, out GenerationResult result)
     {
         result = default!;
         var ds = (DialecticalSpace)_memory;
@@ -468,16 +473,19 @@ public sealed partial class GenesisInferenceEngine
 
         foreach (var key in keys.Distinct(StringComparer.OrdinalIgnoreCase))
         {
-            var replies = ds.GetNeighbors(key, PlatonicNeighborhoodType.Relational, maxNeighbors: 16, minConfidence: 0.0)
-                .Where(n => !n.Concept.Equals(key, StringComparison.OrdinalIgnoreCase) && !IsNumericLike(n.Concept)
+            // ONLY multi-word CHUNK replies (the persona's stored reply PHRASES). No single-token fallback: a stray
+            // cue→word edge (gym decode noise) or a skill query's single-word answer must NOT be spoken as a reply.
+            var candidates = ds.GetNeighbors(key, PlatonicNeighborhoodType.Relational, maxNeighbors: 16, minConfidence: 0.0)
+                .Where(n => n.Concept.IndexOf(' ') >= 0
+                         && !n.Concept.Equals(key, StringComparison.OrdinalIgnoreCase) && !IsNumericLike(n.Concept)
                          && !PlatonicSpaceMemory.IsReservedConcept(n.Concept) && !ds.IsOperationToken(n.Concept))
                 .OrderByDescending(n => n.Confidence).ToList();
-            if (replies.Count == 0) continue;
+            if (candidates.Count == 0) continue;
 
             // The SELF picks the voice: among the cue's replies NOT just said (anti-repetition — an asshole doesn't
             // loop one line), the one whose meaning best fits who the mind has become.
-            var pool = replies.Where(c => !RecentlySaid(c.Concept)).ToList();
-            if (pool.Count == 0) pool = replies;
+            var pool = candidates.Where(c => !RecentlySaid(c.Concept)).ToList();
+            if (pool.Count == 0) pool = candidates;
             var pick = pool[0].Concept;
             if (_selfField is not null && pool.Count > 1)
             {
@@ -493,10 +501,17 @@ public sealed partial class GenesisInferenceEngine
             Spoke(pick); PerceiveIntoSelfField(ds, pick); // the mind becomes what it SAYS — the persona builds in the self
             return EmitField(pick, "field-respond", request, out result);
         }
+        return false;
+    }
 
-        // PERSONALITY GENERALISATION: no learned cue→reply edge (an UNSEEN cue) — but a personality isn't a lookup. If
-        // the self has a character (it has been saying rude things), say the reply CHUNK nearest that self, NOT one it
-        // just said: the asshole insults whatever you said, because its SELF is the asshole, not your memorised line.
+    // PERSONALITY GENERALISATION: an UNSEEN cue with no learned reply relation — runs AFTER relaxation, so a query
+    // relaxation CAN answer (a synonym/category lookup) is never hijacked; only an input nothing else settled reaches
+    // here. A personality isn't a lookup: if the self has a character (it has been saying rude things), say the reply
+    // CHUNK nearest that self — the asshole insults whatever you said because its SELF is the asshole.
+    private bool TryFieldRespondGeneralize(GenerationRequest request, out GenerationResult result)
+    {
+        result = default!;
+        var ds = (DialecticalSpace)_memory;
         var voice = NearestChunkToSelf(ds);
         if (voice is null) return false;
         Spoke(voice); PerceiveIntoSelfField(ds, voice);

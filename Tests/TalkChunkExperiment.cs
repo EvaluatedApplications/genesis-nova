@@ -84,6 +84,39 @@ public sealed class TalkChunkExperiment
     }
 
     [Fact]
+    public void Persona_SeededChunks_TalkInCharacter_AtProductionDims()
+    {
+        // THE GYM DESIGN, isolated: in the conscious field the GRU DECODER is bypassed — a persona is retrieved as a
+        // CHUNK by TryFieldRespond, never decoded token-by-token. So the gym does NOT decode-train the persona (that
+        // builds stray cue→WORD edges that crowd the chunk out of the top-N neighbours — measured); it SEEDS the
+        // reply chunks (whole-reply relations) once. This proves seeded chunks alone talk in-character, and that the
+        // chunk-PREFERENCE in TryFieldRespond holds at production dims.
+        var config = new GenesisNovaConfig(HiddenSize: ProductionDims.HiddenSize);
+        var tok = new WhitespaceGenesisTokenizer();
+        var space = new DialecticalSpace(config.FaceDimension, seed: 7);
+        var persona = new PersonalityCurriculum(trainPerCycle: 600);
+
+        // SEED the persona's chunk repertoire (cue → WHOLE reply), exactly as the gym does at start.
+        foreach (var (cue, reply) in persona.Repertoire)
+            space.FineEditFromExample(new[] { cue }, new[] { reply }, isNegativeExample: false);
+
+        var mind = new GenesisInferenceEngine(tok, new GenesisNeuralModel(config), space, null) { ConsciousField = true, TalkEnabled = true };
+        var probes = persona.NextProbes();
+        var hits = 0; var shown = 0;
+        foreach (var p in probes)
+        {
+            var res = mind.Generate(new GenerationRequest(p.Query, 12));
+            var q = GenesisGrader.Quality(res.Output ?? string.Empty, p.Allowed, p.RequiredDepth,
+                res.UsedNeuralFallback, requirePlatonic: false, p.AnswerVocabulary, p.SurfaceStrict);
+            if (q >= 0.5) hits++;
+            if (shown++ < 8) _out.WriteLine($"  '{p.Query}' -> '{res.Output?.Trim()}' [{res.DecisionPath}] q={q:F2}");
+        }
+        var rate = hits / (double)probes.Count;
+        _out.WriteLine($"seeded-chunk persona in-character: {rate:P0} ({hits}/{probes.Count})");
+        Assert.True(rate >= 0.7, $"seeded chunks talk in-character; {rate:P0}");
+    }
+
+    [Fact]
     public void Persona_GeneralizesRudeness_ToUnseenCues()
     {
         var config = new GenesisNovaConfig(HiddenSize: ProductionDims.HiddenSize);

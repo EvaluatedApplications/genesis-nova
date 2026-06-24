@@ -300,6 +300,7 @@ public sealed partial class GenesisEvalAppRuntime
     {
         var loaded = GenesisCheckpointStore.LoadForRuntime(path, _runtimeConfig);
         _state.Replace(loaded.Config, loaded.Tokenizer, loaded.Model, loaded.PlatonicSpace, loaded.Conversation, loaded.TrainerLearningStateJson);
+        _state.Inference.TalkEnabled = _conversationalMode; // Replace built a fresh engine — re-apply the session talk route
         _historyStore.Restore(loaded.AutonomousTraining);
         TrackLoadedCheckpoint(path);
     }

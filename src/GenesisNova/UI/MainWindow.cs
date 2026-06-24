@@ -1427,13 +1427,23 @@ public class MainWindow : Form
         var personalityOn = GetControl<CheckBox>("CurPersonality")?.Checked ?? false;
         if (personalityOn)
         {
-            children.Add(new PersonalityCurriculum(trainPerCycle: _gymTrainPerCycle));
-            AppendOutput("[train] personality (rude chatbot) conversation trainer");
+            // The persona is SEEDED as reply CHUNKS, not decode-trained: in the conscious field the GRU decoder is
+            // bypassed (TryFieldRespond retrieves a reply as a whole chunk), and decoding a reply token-by-token only
+            // builds stray cue→WORD edges that crowd the chunk out of retrieval. Seed once (stable space edges; persona
+            // cues aren't skill cues, so the skill gym below doesn't erode them) and turn the talk route on so you can
+            // chat with it live while the skills train. See [[nova-talk-by-chunk]].
+            try
+            {
+                _runtime.SeedConversationalChunks(new PersonalityCurriculum().Repertoire);
+                _runtime.SetConversationalMode(true);
+                AppendOutput("[train] personality (rude chatbot): reply chunks SEEDED + talk route ON (retrieval, not decode-trained)");
+            }
+            catch (Exception ex) { AppendOutput($"[train] personality seed failed: {ex.Message}"); }
         }
-        // The talk route is GRADED only when active: enable conversational mode iff the persona is being trained, so
-        // it's scored in-character (cue→reply chunk) and the focus loop reinforces talk edges instead of thrashing on
-        // the ~8% relaxation drift. Off when the persona isn't in the mix (non-chat training stays byte-identical).
-        try { _runtime.SetConversationalMode(personalityOn); } catch { }
+        else
+        {
+            try { _runtime.SetConversationalMode(false); } catch { } // non-chat training stays byte-identical
+        }
         if (children.Count == 0)
         {
             AppendOutput("[train] no curriculum enabled — tick Gym and/or Memory+Code.");

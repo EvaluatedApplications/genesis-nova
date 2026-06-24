@@ -75,6 +75,13 @@ public sealed class PersonalityCurriculum : ITrainingCurriculum
     public int Difficulty => 1;
     public int MasteryDepth => 1;
 
+    /// <summary>The FULL deterministic repertoire (every cue → every one of its intent's reply CHUNKS). The gym SEEDS
+    /// these as whole-reply chunk associations so <c>TryFieldRespond</c> retrieves a reply as a CHUNK — the gym's
+    /// token-decode training never builds the multi-word reply as one concept, so without seeding the talk path finds
+    /// no chunk and drifts. See [[nova-talk-by-chunk]].</summary>
+    public IReadOnlyList<(string Cue, string Reply)> Repertoire =>
+        Intents.SelectMany(it => it.Cues.SelectMany(c => it.Replies.Select(r => (Cue: c, Reply: r)))).ToList();
+
     public IReadOnlyList<(string Input, string Output)> NextTrainBatch()
     {
         var batch = new List<(string Input, string Output)>(_trainPerCycle);

@@ -200,6 +200,7 @@ public sealed partial class GenesisInferenceEngine
             if (!n.Concept.Equals(obj, StringComparison.OrdinalIgnoreCase) && !IsNumericLike(n.Concept))
                 ds.DisruptAssociation(subject, n.Concept);
         ds.FineEditFromExample(new[] { subject }, new[] { obj }, isNegativeExample: false);
+        PerceiveIntoSelfField(ds, subject); PerceiveIntoSelfField(ds, obj); // the mind becomes what it learns
         return EmitField(obj, "field-learn", request, out result); // acknowledge what it now holds
     }
 
@@ -229,6 +230,39 @@ public sealed partial class GenesisInferenceEngine
     private readonly List<string> _focus = new();
     private const int FocusSize = 4;
 
+    // THE PERSISTENT SELF, in the mind's own meaning-space (PLATONIC_CONSCIOUSNESS.md / "a self that LEARNS, not a
+    // learning thing with a self tacked on"). Where _focus is the discrete last-N attention (working memory, evicted
+    // by distraction), this is the CONTINUOUS standing wave of what the mind has been living — a decaying accumulation
+    // of the MEANING of every concept it attends to. It survives intervening unrelated thoughts (decay, not eviction),
+    // so the mind reasons from WHO IT HAS BECOME even after distraction. It is built from concept clouds, which the
+    // long training run sharpens — so the self the mind reasons from is itself shaped by learning. Null before the
+    // first perception (no self before life). It conditions ONLY genuinely ambiguous reasoning — a dominant known fact
+    // is answered directly, never overridden by mood.
+    private double[]? _selfField;
+    private const double SelfDecay = 0.82;          // how much of the standing self survives each new perception
+    private const double SelfReasonWeight = 0.6;    // the self's pull on an ambiguous query (anchor stays weight 1)
+
+    /// <summary>When true (default, in the living field mode), the persistent self conditions ambiguous reasoning.
+    /// Turn OFF to ABLATE the self — proving the agent's cognition genuinely DEPENDS on it (else it is decorative).</summary>
+    public bool SelfConditionsCognition { get; set; } = true;
+
+    /// <summary>The mind's current self as a meaning-space vector (empty before the first perception) — for inspection
+    /// and for tests that ablate or probe the self.</summary>
+    public IReadOnlyList<double> SelfField => _selfField ?? Array.Empty<double>();
+
+    // PERCEIVE — fold one attended concept's MEANING into the persistent self (decay the standing self, admit the new
+    // meaning, renormalize). This is how living accumulates into a self: every thought leaves a trace, recent ones
+    // weigh more, but nothing is sharply evicted. Unknown/numeric tokens carry no held meaning and are skipped.
+    private void PerceiveIntoSelfField(DialecticalSpace ds, string concept)
+    {
+        var v = ds.SemanticVectorOf(concept);
+        if (v is null) return;
+        if (_selfField is null || _selfField.Length != v.Length) { _selfField = (double[])v.Clone(); }
+        else for (var i = 0; i < v.Length; i++) _selfField[i] = SelfDecay * _selfField[i] + (1.0 - SelfDecay) * v[i];
+        var n = 0.0; for (var i = 0; i < _selfField.Length; i++) n += _selfField[i] * _selfField[i];
+        n = Math.Sqrt(n); if (n > 1e-9) for (var i = 0; i < _selfField.Length; i++) _selfField[i] /= n;
+    }
+
     // ── RELAX: recall what the mind HOLDS about the subject. RELATION-FIRST (follow the explicit association — robust
     //    to hub dilution at scale, where a populous category's distributional cloud washes out a member's signal),
     //    context-disambiguated, falling back to semantic relaxation over the clouds when there is no held association. ─
@@ -242,7 +276,9 @@ public sealed partial class GenesisInferenceEngine
 
         bool Bad(string s) => string.IsNullOrEmpty(s) || PlatonicSpaceMemory.IsReservedConcept(s)
             || ds.IsOperationToken(s) || s.Equals(subject, StringComparison.Ordinal);
-        void Attend() { _focus.Remove(subject); _focus.Add(subject); while (_focus.Count > FocusSize) _focus.RemoveAt(0); }
+        // Attending to a subject both threads the discrete focus AND folds its meaning into the persistent self —
+        // the mind becomes, a little, what it has just thought about.
+        void Attend() { _focus.Remove(subject); _focus.Add(subject); while (_focus.Count > FocusSize) _focus.RemoveAt(0); PerceiveIntoSelfField(ds, subject); }
         bool Valid(DialecticalSpace.Thought t) => t.Settled && t.Confidence >= ReasonMinConfidence && !Bad(t.Symbol);
 
         // RELATION-FIRST when the mind holds a DOMINANT explicit association — a single strong relation IS the answer,
@@ -259,12 +295,20 @@ public sealed partial class GenesisInferenceEngine
                 hops: 1, request, evidence: null, out result);
         }
 
-        // AMBIGUOUS (several comparable associations) or none — relax over the clouds, the SELF's recent focus tipping
-        // the basin (disambiguation handles INDIRECT context: "cash" pulls toward the money sense of "bank").
+        // AMBIGUOUS (several comparable associations) or none — relax over the clouds, the SELF tipping the basin
+        // toward who the mind has become. The PERSISTENT self leads (it survives distraction); the sharp recent _focus
+        // is the fallback for immediate context the standing self hasn't yet absorbed. Disambiguation is INDIRECT:
+        // "cash" pulls toward the money sense of "bank", and it still does after several unrelated thoughts.
         var bare = ds.Reason(new[] { subject });
         var chosen = bare;
         var viaSelf = false;
-        if (_focus.Count > 0)
+        if (SelfConditionsCognition && _selfField is not null)
+        {
+            var withSelf = ds.Reason(new[] { subject }, selfContext: _selfField, selfWeight: SelfReasonWeight);
+            if (Valid(withSelf) && withSelf.Symbol != bare.Symbol && withSelf.Confidence > bare.Confidence + 0.05)
+            { chosen = withSelf; viaSelf = true; }
+        }
+        if (!viaSelf && _focus.Count > 0)
         {
             var ctx = new List<string> { subject };
             foreach (var f in _focus) if (f != subject && !ds.IsOperationToken(f)) ctx.Add(f);

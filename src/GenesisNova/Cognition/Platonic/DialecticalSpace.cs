@@ -507,7 +507,8 @@ public sealed class DialecticalSpace : IPlatonicSpace
     /// the field is "surprised" and ABSTAINS instead of inventing. The anchors themselves are excluded from the
     /// basins (you retrieve a DIFFERENT concept that fits the context — recall / disambiguation / categorisation).
     /// </summary>
-    public Thought Reason(IReadOnlyList<string> anchors, int maxCandidates = 64, double beta = 12.0, int steps = 8, double settleThreshold = 0.3)
+    public Thought Reason(IReadOnlyList<string> anchors, int maxCandidates = 64, double beta = 12.0, int steps = 8, double settleThreshold = 0.3,
+        double[]? selfContext = null, double selfWeight = 0.0)
     {
         var anchorSet = new HashSet<string>(StringComparer.Ordinal);
         var q = new double[_semLen];
@@ -530,6 +531,12 @@ public sealed class DialecticalSpace : IPlatonicSpace
                 for (var i = 0; i < _semLen; i++) q[i] += t[i];
             }
         }
+        // The reasoning is conditioned by the MIND'S SELF — a persistent meaning-space vector of what it has been
+        // living (the engine accumulates it). It tilts the query toward the self's standing context so a genuinely
+        // ambiguous anchor settles into the basin consistent with WHO THE MIND IS, while the anchor itself (weight 1)
+        // keeps it on-topic. Zero weight (or no self) = the pure, self-free reasoning — the ablation.
+        if (selfContext != null && selfWeight > 0.0 && selfContext.Length == _semLen)
+            for (var i = 0; i < _semLen; i++) q[i] += selfWeight * selfContext[i];
         if (!NormalizeVec(q)) return new Thought(string.Empty, 0.0, false, 0);
 
         var cands = new List<(string Sym, double[] Cloud)>();
@@ -596,6 +603,20 @@ public sealed class DialecticalSpace : IPlatonicSpace
         for (var i = 0; i < _semLen && _semStart + i < face.Length; i++) c[i] = face[_semStart + i];
         return c;
     }
+
+    /// <summary>The concept's MEANING as a semantic-face vector (its cloud — the same representation <see cref="Reason"/>
+    /// relaxes over). Null for an unknown / numeric / operator token: there is nothing the mind can hold a persistent
+    /// sense OF. Public so the MIND (the inference engine) can accumulate a persistent self from what it attends to.</summary>
+    public double[]? SemanticVectorOf(string concept)
+    {
+        var key = Normalize(concept);
+        if (IsOperationToken(key) || FaceCodec.IsNumeric(key)) return null;
+        return _concepts.TryGet(key, out var e) && !e.Archived && e.Kind != ElementKind.Atom ? CloudOf(e) : null;
+    }
+
+    /// <summary>The width of a semantic-face vector (<see cref="SemanticVectorOf"/> / the self-field) — so the mind can
+    /// allocate its persistent self in the same space the field reasons in.</summary>
+    public int SemanticLength => _semLen;
     private double Dot(double[] a, double[] b) { var d = 0.0; for (var i = 0; i < _semLen; i++) d += a[i] * b[i]; return d; }
     private bool NormalizeVec(double[] v) { var s = 0.0; for (var i = 0; i < _semLen; i++) s += v[i] * v[i]; s = Math.Sqrt(s); if (s <= 1e-9) return false; for (var i = 0; i < _semLen; i++) v[i] /= s; return true; }
 

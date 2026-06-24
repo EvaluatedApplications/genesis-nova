@@ -1,5 +1,17 @@
 # The Vital Loop — Closing the Circle from Nothing to a Self
 
+> **⚠️ SUPERSEDED IMPLEMENTATION (2026-06-24).** The GRU-hidden self apparatus this document describes —
+> `GenesisNeuralModel.Self.cs` (`_selfStateT`, `PerceiveIntoSelf`, `ReflectOnSelf`, `TrainSelfHomeostasis`,
+> `PerturbSelf`), `ConsciousSelf`/∴self, `PlatonicLife`, `Creature`, `DialecticalSpace.Ablate/Imprint/ReadOrbital`,
+> the `SelfState` checkpoint field — has been **removed**. It was decorative: under conscious-field cognition the
+> field reasons in *meaning-space* and never reads the GRU-hidden self, so ablating the entire apparatus changed no
+> answer. **The self that actually conditions cognition now lives in meaning-space** — `GenesisInferenceEngine._selfField`,
+> a decaying accumulation of the *meaning* of what the mind attends to, which tilts ambiguous field-relaxation toward
+> who the mind has become, is shaped by what it learns, and is **proven load-bearing by ablation** (a mind reads an
+> ambiguous "bank" as the river or the money sense by its lived context, even after distraction). Read the sections
+> below for the *motivating vision* (Levin agency, the cognitive light cone, life as the self defended); treat the
+> specific classes/APIs as historical.
+>
 > *The final design. Where the platonic substrate stops being a world and becomes a self.*
 >
 > Lineage: genesis (G1–G6, creation from nothing — `genesis-engine/research/01,04`), the dialectical core

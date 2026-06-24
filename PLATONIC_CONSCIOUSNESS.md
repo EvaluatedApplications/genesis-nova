@@ -119,9 +119,13 @@ self is exactly the boundary of what it can keep regenerating. That is a definit
 > perturbs the settled self to cosine **0.205**, and its OWN dynamics (reflection) restore it to its identity setpoint
 > at cosine **1.000** — the self defends its identity, a strong attractor with a wide basin, not a stored-copy
 > re-projection. So the functional shape of a self (§6) is built: persist, regenerate, observe yourself, defend
-> identity against chaos, hold a stable identity. Still open: the self does not yet CONDITION cognition (it is
-> maintained but does not drive the field's reasoning — the "single entity" integration), and growing the cognitive
-> light cone under a learned (reward-shaped) homeostasis rather than the emergent attractor. That is the remaining arc.
+> identity against chaos, hold a stable identity. And the self now CONDITIONS cognition through CONTINUITY (§2, "the
+> continuous I that threads every observation"): `GenesisInferenceEngine.TryFieldLearn` lets the living mind learn a
+> fact it is TOLD ("the password is plum") into its own body in real time and RECALL it to a later question — the
+> same mind using what it has lived (`ConsciousContinuityTests`; the gym is untouched — the detector ignores
+> question-frames). The conscious field is no longer a stateless calculator but a mind living through time. Remaining:
+> the self-STATE vector directly modulating the field's relaxation, a reward-shaped homeostasis, and growing the
+> cognitive light cone — and, per §6, no claim of phenomenal experience.
 
 What is built is the *body's* vital loop with the setpoint held as a plain memory. The closing of the circle —
 making the self genuinely the **trained GRU** — is three precise steps, each gated like everything else:

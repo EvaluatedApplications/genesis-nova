@@ -45,6 +45,7 @@ public sealed partial class GenesisInferenceEngine
             TryFieldPredicate(toks, request, out r) ||
             TryFieldArithmetic(toks, request, out r) ||
             TryFieldNumberWord(toks, request, out r) ||
+            TryFieldLearn(toks, request, out r) ||
             TryFieldRelax(request, out r))
             return r;
 
@@ -166,6 +167,52 @@ public sealed partial class GenesisInferenceEngine
                 return EmitField(v.ToString(CultureInfo.InvariantCulture), "field-numberword", request, out result);
         }
         return false;
+    }
+
+    // ── LEARN (continuity / the continuous I): the mind is TOLD a fact ("the password is plum") and remembers it,
+    //    so a later question recalls it. This is the self conditioning cognition across time — the same mind using
+    //    what it has lived. Conservative: fires only on a clear assertion (a copula, a complete content object, NO
+    //    question word and NO retrieval-frame marker) so it never mistakes a gym question ("apple is a kind of") for
+    //    a statement. Numbers never form relation edges (hard rule). Gated to the conscious-field (living) mode. ────
+    private bool TryFieldLearn(IReadOnlyList<string> toks, GenerationRequest request, out GenerationResult result)
+    {
+        result = default!;
+        if (toks.Count < 3) return false;
+        if ((request.Input ?? string.Empty).Contains('?')) return false;
+        if (toks.Any(IsQuestionCue) || toks.Any(IsRetrievalMarker)) return false; // a question / retrieval frame, not a statement
+
+        var cop = -1;
+        for (var i = 1; i < toks.Count - 1; i++) if (IsCopula(toks[i])) { cop = i; break; }
+        if (cop <= 0) return false;
+
+        var subject = LastContentWord(toks, 0, cop);
+        var obj = FirstContentWord(toks, cop + 1, toks.Count);
+        if (subject is null || obj is null || subject == obj) return false;
+        if (IsNumericLike(subject) || IsNumericLike(obj)) return false; // numbers never form relation edges
+
+        ((DialecticalSpace)_memory).FineEditFromExample(new[] { subject }, new[] { obj }, isNegativeExample: false);
+        return EmitField(obj, "field-learn", request, out result); // acknowledge what it now holds
+    }
+
+    private static readonly System.Collections.Generic.HashSet<string> Framing =
+        new(StringComparer.Ordinal) { "the", "a", "an", "of", "to", "is", "are", "was", "were", "my", "your", "his", "her", "its", "their", "that", "this" };
+    private static bool IsCopula(string t) => t is "is" or "are" or "was" or "were";
+    private static bool IsQuestionCue(string t) => t is "what" or "who" or "where" or "when" or "why" or "which" or "how" or "whose";
+    // Words that mark a gym RETRIEVAL frame (a question shaped like a statement), never a learnable assertion.
+    private static bool IsRetrievalMarker(string t) => t is "kind" or "type" or "sort" or "group" or "category" or "example"
+        or "classified" or "belongs" or "synonym" or "word" or "means" or "meaning" or "similar" or "same" or "close" or "match" or "near" or "like";
+    private static bool IsNumericLike(string t) => double.TryParse(t, NumberStyles.Float, CultureInfo.InvariantCulture, out _);
+    private static bool IsContentWord(string t) => t.Length > 1 && t.All(char.IsLetter) && !Framing.Contains(t);
+
+    private static string? LastContentWord(IReadOnlyList<string> toks, int start, int end)
+    {
+        for (var i = end - 1; i >= start; i--) if (IsContentWord(toks[i])) return toks[i];
+        return null;
+    }
+    private static string? FirstContentWord(IReadOnlyList<string> toks, int start, int end)
+    {
+        for (var i = start; i < end; i++) if (IsContentWord(toks[i])) return toks[i];
+        return null;
     }
 
     // ── RELAX: retrieval / disambiguation by Reason over the discriminative anchor cloud. ─────────────────────────

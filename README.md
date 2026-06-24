@@ -3,6 +3,12 @@
 > Status: working research prototype. This document describes the system **as built**, states the results
 > that are **actually measured**, and is explicit about what has **not** been demonstrated. Nothing below is
 > projected unless labelled "Hypothesis" or "Roadmap".
+>
+> **Read with `PLATONIC_RECKONING.md` (2026-06).** §3.3–3.4 below describe the route/plan-head classifier ladder
+> and a neural-decoder fallback. The reckoning reframes those as *overfit orchestration to subtract*: the current
+> direction (behind `KeepCoreControl`) makes relaxation the retrieval route (`platonic-reason`), anchors routing on
+> the discriminative cue, **abstains instead of falling back to the neural decoder**, and retrieves in O(log N) via
+> the `DialecticalSpace` lattice. The substrate sections (faces, homomorphism, distributional meaning) stand.
 
 ---
 

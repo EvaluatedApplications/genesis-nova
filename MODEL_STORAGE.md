@@ -48,7 +48,7 @@ models/genesis-nova/
 **Content-addressed (hash-named):** a shard's filename is its SHA-256. So:
 - identical shards across forks/saves are stored **once** (dedup),
 - a "better model" PR is a **manifest diff** (text, reviewable) plus only the shards that actually changed,
-- shards double as the **P2P artifacts** (see `P2P_LEARNING_NETWORK.md`).
+- shards are content-addressed, so they double as portable artifacts for fork/share flows.
 
 **Sectioned**, so an unchanged tensor keeps its hash and isn't rewritten. Each section
 (`embeddings`, `outputWeights`, `gruWih`, … plus JSON sections like `config`, `vocab`, `spacingModel`) records
@@ -100,7 +100,7 @@ So "start from my work, train your own, PR a better one" falls straight out of t
 3. PR-with-tests CI verification gate.
 4. Training-set generator packages (`ITrainingSetGenerator` — the "ability library").
 5. P2P platonic-element coordination (reuses `ExportSnapshot`/`ImportSnapshot` + reliability/UCB +
-   content-addressed shards from `P2P_LEARNING_NETWORK.md`).
+   content-addressed shards).
 
 ---
 

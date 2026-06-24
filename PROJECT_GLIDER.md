@@ -2,6 +2,14 @@
 
 > The platonic space is Conway's Game of Life. Gliders are the reusable structures built on it.
 
+> ⚠️ **Read with `PLATONIC_RECKONING.md` (2026-06).** The reckoning splits this doc in two. The *general
+> substrate primitives* (§0–§1: Compute/Fold/Compare via the homomorphism, Hop as a relation edge, composition
+> by reuse) are KEPT — they generalize. But the **GRU "plan head" that classifies one of 9 pre-built composition
+> SHAPES, its `ResolvePlanLabel` supervision, and the per-shape glider routes (§2, §3–§6) are flagged as
+> OVERFITTING to the gym taxonomy** — a task-classifier over a fixed menu, the thing to SUBTRACT, not grow. Treat
+> §2 onward as a record of the machinery being shed, not the current direction. (`PLATONIC_SHAPES.md`, referenced
+> below, has been removed.)
+
 The principle: **if the GRU can figure something out, it should build it in the platonic space** — from
 faces, relations-as-elements, R2 composition, and learned-function transforms. Capability EMERGES from
 composition; it is never enumerated. Hand-built compositions that lock tokens to fixed meanings, and
@@ -62,7 +70,8 @@ The blocks are the vocabulary, the GRU is the composer, and nothing is hardcoded
 scaffold-words-then-number output is a Seq. The plan head grows by a few logits per shape and abstains when
 untrained, so the other inference routes keep their decision-path contracts.
 
-The shapes and their substrate mechanisms are catalogued in **PLATONIC_SHAPES.md**. In brief: predicate
+The shapes and their substrate mechanisms (the `PLATONIC_SHAPES.md` catalogue has been removed; see the
+reckoning note above on why this shape-set is being subtracted). In brief: predicate
 (Compare→Branch), arithmetic→word (Hop∘Compute), fold-sum/product (N-way compose), Seq (mined scaffold ∘
 Fold), Ref (a `Function` element referencing other shape-elements). Digit-arithmetic and retrieval compute on
 the substrate too but are reached by their dedicated routes (`GruQuery` / relation-first).

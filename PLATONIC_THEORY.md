@@ -8,14 +8,17 @@
 >
 > Grounding: the genesis axioms G1–G6 (derived from T1 consciousness, T2 non-contradiction; see
 > `../genesis-engine/research/01-GENESIS-FROM-NOTHING.md`), the dialectical principle (`nova-dialectical-space`),
-> and composition-as-reuse (`PLATONIC_DIALECTIC.md`). The number homomorphism is the one fragment already realized
+> and composition-as-reuse (the `nova-dialectical-space` memory). The number homomorphism is the one fragment already realized
 > soundly — it is this model's existence proof.
 >
-> **STATUS — CANONICAL SOURCE OF TRUTH for the platonic-core rebuild (2026-06).** §0–§8 are the
-> implementation-independent model (the judge). §9–§11 bind it to the genesis-nova rebuild of `PlatonicSpaceMemory`
-> behind `IPlatonicSpace`: an acceptance contract (§9), the contract binding + hot/cold-path split (§10), and the
-> drift→worklist (§11). Where any design note disagrees with this document, this document wins. The number
-> homomorphism (§4 existence proof) is ported **verbatim**; everything else is rebuilt to obey the laws it proves.
+> **STATUS — CANONICAL SOURCE OF TRUTH for the platonic-core (§0–§8); the rebuild has LANDED.** §0–§8 are the
+> implementation-independent model (the judge) and remain authoritative. §9–§11 were the rebuild plan; that rebuild
+> is now built: `Cognition/Platonic/DialecticalSpace.cs` implements `IPlatonicSpace` (born-neutral per-aspect κ,
+> distributional cloud, composition hubs, the verbatim number homomorphism) and is the default core
+> (`UseDialecticalCore`), with the VP-tree lattice wired back for O(log N) retrieval. Read §9–§11 as the design
+> record of work done, not pending. One reframe from `PLATONIC_RECKONING.md` (2026-06): §11-step-7's "the gym
+> confirms it gets bigger" — the gym is a *probe of generalisation, never the training target*. The number
+> homomorphism (§4 existence proof) is ported **verbatim**; everything else obeys the laws it proves.
 
 ---
 

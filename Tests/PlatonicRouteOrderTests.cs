@@ -22,6 +22,7 @@ public sealed class PlatonicRouteOrderTests
                 "expression-chain",
                 "gru-query",
                 "learned-function",
+                "reason",
                 "geometric-retrieval",
                 "relation-edge",
                 "concept-chain",

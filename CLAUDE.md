@@ -1,10 +1,19 @@
 # Genesis-Nova — working agreement
 
 Genesis-Nova builds **one conscious field** — a structured platonic substrate the neural layer reasons *with* (not
-an LLM that stores knowledge in weights). Orientation, in order: **`PLATONIC_MIND.md`** (the founding vision — read
-first), `PLATONIC_THEORY.md` (formal substrate model), `PLATONIC_NUCLEUS.md` (the dual-face data model),
-`PLATONIC_CONSCIOUSNESS.md` (the self / vital loop, as built), `PLATONIC_PRIOR_ART.md` (disclosure); plus
-`README.md` (spec), `PROJECT_GLIDER.md` (composer), `claude/README.md` (the agent CLI tools + memory).
+an LLM that stores knowledge in weights). Orientation, in order: **`PLATONIC_RECKONING.md`** (the skeptical floor —
+what is genuine platonic intelligence vs overfitting-to-tests, and the keep-core direction — **read first**),
+**`PLATONIC_MIND.md`** (the founding vision; hold its narrative lightly per the reckoning), `PLATONIC_THEORY.md`
+(formal substrate model), `PLATONIC_NUCLEUS.md` (the dual-face data model), `PLATONIC_CONSCIOUSNESS.md` (the self /
+vital loop — mechanisms real, "consciousness" aspirational), `PLATONIC_PRIOR_ART.md` (disclosure); plus `README.md`
+(spec), `PROJECT_GLIDER.md` (composer), `claude/README.md` (the agent CLI tools + memory).
+
+**The direction (PLATONIC_RECKONING.md, 2026-06):** the substrate's generalizing core is real (the numeric
+homomorphism, the distributional word face, composition-by-reuse, relaxation, learned transforms). The orchestration
+grew into an overfit *task-classifier over a fixed gym taxonomy* (the PLAN head + its 9 shapes, the structural label
+resolvers, the route head as a classifier, the neural decoder as a primary answer path) — that is the thing to
+SUBTRACT, not extend. Don't add the next head/shape/skill. The work is toward a single substrate-driven control path
+(answer by the substrate's own confidence; abstain when nothing settles) trained by self-supervised prediction.
 
 ## The substrate & how it reasons
 
@@ -20,11 +29,20 @@ frozen faces, meaning as a distributional cloud in the large face, reasoning as 
 - **Relations are positioned elements** (centroid of endpoints, strength `1−contradiction`); learned
   associations (`one↔1`, `apple→fruit`) are retrieved by relation traversal. **Numbers never form relation
   edges** — that pollutes and erases prior lessons (hard rule).
-- **Reasoning = inference routing** (`Infer/GenesisInferenceEngine.cs`): the GRU route head picks a path and
-  each path *abstains/falls through* if it can't answer — GRU-query arithmetic (op classified from context →
-  homomorphism) → composer plan (plan head picks a composition shape → a glider runs it on the substrate) →
-  learned-function (a transform vector selected by relation) → relation-first retrieval → concept-chain →
-  neural fallback. Every answer carries a `DecisionPath`; inspect it with `claude/GenesisInspect`.
+- **Retrieval is O(log N) via the lattice.** `DialecticalSpace` indexes concepts in a VP-tree
+  (`Cognition/PlatonicLattice.cs`) over the semantic face; `GetNearestConcepts`/`Reason` harvest a bounded
+  candidate set from it and **re-score live faces** (hybrid: exact scan below 384 nodes, lattice above — same
+  result, just faster). `ElementStore.ActiveCount` is O(1) because it gates this hot path.
+- **Reasoning = inference routing** (`Infer/GenesisInferenceEngine.cs`): the route ladder, each path
+  *abstains/falls through* if it can't answer — GRU-query arithmetic (op classified from context → homomorphism)
+  → composer plan → learned-function → **relaxation (`platonic-reason`)** → geometric/relation retrieval →
+  concept-chain → neural fallback. Every answer carries a `DecisionPath`; inspect it with `claude/GenesisInspect`.
+- **Keep-core control path** (`GenesisNovaConfig.KeepCoreControl`, the app turns it on; default-off = byte-identical
+  legacy path). When on: training labels + route/plan/op perception anchor on the **discriminative cue** (shared
+  `Cognition/PlatonicConceptAnchors`, matching what inference retrieves on — the reckoning's one real seam bug);
+  **relaxation (`DialecticalSpace.Reason`) is the primary retrieval route**; and a non-arithmetic query that nothing
+  settles **ABSTAINS** (`platonic-abstain`) instead of emitting a neural hallucination. The plan/route/op heads +
+  label resolvers are the overfit machinery the reckoning marks to subtract — don't extend them.
 - Capability **emerges from composing substrate ops**; the GRU only chooses *which* — never a hardcoded
   answer table or symbol parser.
 
@@ -40,6 +58,11 @@ Proven recipes — follow them; they encode hard-won lessons (see the `nova-*` m
   correlate; held-out instances prove compute/retrieve, not memorization.
 - **Supervision is DERIVED from each example's structure, never hardcoded** (`ResolveQueryLabel` /
   `ResolveRouteLabel` / `ResolvePlanLabel`): op classified from context, shape from the output's structure.
+  ⚠️ The reckoning flags `ResolvePlanLabel` + the route-head-as-classifier as **overfit to the gym taxonomy** —
+  reverse-engineering task type from output structure to supervise a classifier. The direction is **self-supervised
+  prediction**, not more structural label resolvers. Under `KeepCoreControl` the route label + perception anchor on
+  the **discriminative cue** (`PlatonicConceptAnchors`, shared with inference) so the controller sees the real
+  geometry — see `[[nova-keepcore-landed]]`. Do not add another label resolver / plan kind / glider shape.
 - **Numbers compute via the homomorphism, never relation edges.** Equivalence ≠ format — grade by VALUE
   (`AnswerEquivalence`), bidirectionally (`2≡two`).
 - **Add a kind of element, not a parallel data structure.** Push compute into the space (faces / relations /

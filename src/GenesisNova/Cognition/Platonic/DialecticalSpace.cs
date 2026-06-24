@@ -29,6 +29,16 @@ public sealed class DialecticalSpace : IPlatonicSpace
     private readonly Dictionary<string, Dictionary<string, int>> _chunks = new(StringComparer.Ordinal);
     private readonly FunctionElementRegistry _functions;
 
+    // SPATIAL INDEX (ported discipline from PlatonicSpaceMemory). The new core was built on full O(N) linear scans
+    // with a FullFace recompute per concept — fine while tiny, but every retrieval/perception/Reason call is O(N),
+    // so a growing gym drifts toward O(N^2). The VP-tree (semantic face KNN) gives O(log N) candidate gathering.
+    // HYBRID: below LatticeMinNodes the exact scan is cheap AND always fresh, so it stays the path (every existing
+    // test + the keep-core proof are byte-identical); at/above it the lattice harvests a bounded candidate SET and
+    // we ALWAYS re-score those candidates' LIVE faces (never trust the throttled tree's distances). So the lattice
+    // only ever bounds *which* concepts we score, never *how* — correctness is identical to the scan, just faster.
+    private readonly PlatonicLattice _lattice;
+    private const int LatticeMinNodes = 384;
+
     // Distributional meaning needs NO force constants — the old per-aspect dialectic + hinge repulsion are gone. A
     // concept's cloud is simply the superposition of its relational context (AccumulateContext), normalized on read;
     // related cluster and unrelated go orthogonal for free. The one guard below bounds the task-gradient/imprint paths.
@@ -40,6 +50,13 @@ public sealed class DialecticalSpace : IPlatonicSpace
         _semStart = FaceCodec.SemanticStart(_dim);
         _semLen = FaceCodec.SemanticLength(_dim);
         _functions = new FunctionElementRegistry(_dim);
+        // Index the ACTIVE non-atom concepts by their FULL face; the lattice slices the semantic region
+        // [WordFaceStart..dim) internally — the SAME offset FaceCodec.SemanticStart (and CloudOf) use, so the
+        // VP-tree's neighbourhood and the relaxation's ranking live in one subspace.
+        _lattice = new PlatonicLattice(
+            nodeNames: () => _concepts.All.Where(e => !e.Archived && e.Kind != ElementKind.Atom).Select(e => e.Symbol),
+            nodeFaces: () => _concepts.All.Where(e => !e.Archived && e.Kind != ElementKind.Atom)
+                                          .Select(e => (e.Symbol, FullFace(e.Symbol, e))));
     }
 
     private sealed class Relation
@@ -83,7 +100,11 @@ public sealed class DialecticalSpace : IPlatonicSpace
         var key = Normalize(symbol);
         // Idempotent + G6 REACTIVATION: re-observing an archived (ablated) concept brings it back to life — the very
         // same element, learned orbital intact. This is what lets a self regenerate its body from conserved memory.
-        if (_concepts.TryGet(key, out var existing)) { existing.Archived = false; return existing; }
+        if (_concepts.TryGet(key, out var existing))
+        {
+            if (existing.Archived) { existing.Archived = false; _lattice.RegisterNode(key); } // G6 reactivation → back in the index
+            return existing;
+        }
 
         // ▷ COMPOSITION (Laws C/S): a concept is a HUB over REUSED components. Numbers ride the homomorphism (digit
         // places implicit). Multi-word text composes WORD elements; a single word composes CHAR atoms — the same φ
@@ -109,7 +130,9 @@ public sealed class DialecticalSpace : IPlatonicSpace
         }
         // Born as its OWN token: a concept with no relations means just itself; meaning EMERGES as it accumulates
         // context (so even a single direct relation big↔large makes them cluster — they share each other's token).
-        return _concepts.GetOrCreate(key, kind, () => FaceCodec.Token(key, _dim), components);
+        var created = _concepts.GetOrCreate(key, kind, () => FaceCodec.Token(key, _dim), components);
+        _lattice.RegisterNode(key); // a new non-atom concept entered the active set
+        return created;
     }
 
     /// <summary>A reusable CHAR ATOM (Law S): one element per character, referenced (▷) by every word that uses it,
@@ -202,9 +225,16 @@ public sealed class DialecticalSpace : IPlatonicSpace
             return Array.Empty<(string, double)>();
         var self = Normalize(concept);
 
-        IEnumerable<string> pool = candidates is { Count: > 0 }
-            ? candidates.Select(Normalize).Where(c => _concepts.Contains(c)).Take(Math.Clamp(maxCandidates, 8, 512))
-            : _concepts.All.Where(e => !e.Archived && e.Kind != ElementKind.Atom).Select(e => e.Symbol);
+        // Candidate POOL: explicit candidates → those; else at scale the VP-tree harvests a bounded near set in
+        // O(log N); else (small space) the exact scan. Every branch then LIVE-rescores below, so the lattice only
+        // bounds which concepts we measure — distances are always exact (never the tree's stale ones).
+        IEnumerable<string> pool;
+        if (candidates is { Count: > 0 })
+            pool = candidates.Select(Normalize).Where(c => _concepts.Contains(c)).Take(Math.Clamp(maxCandidates, 8, 512));
+        else if (_concepts.ActiveCount >= LatticeMinNodes)
+            pool = _lattice.GetSemanticNeighbors(q, Math.Clamp(limit * 4, 16, 256), self).Select(n => n.Name);
+        else
+            pool = _concepts.All.Where(e => !e.Archived && e.Kind != ElementKind.Atom).Select(e => e.Symbol);
 
         var scored = new List<(string, double)>();
         foreach (var cand in pool)
@@ -218,7 +248,26 @@ public sealed class DialecticalSpace : IPlatonicSpace
 
     public IReadOnlyList<(string Symbol, double Distance)> GetNearestConceptsFresh(
         string concept, IReadOnlyCollection<string>? seeds = null, int maxNeighbors = 8)
-        => GetNearestConcepts(concept, seeds, maxNeighbors);
+    {
+        // Small space → the exact scan is already fresh. At scale → the FRESH discipline (ported from the legacy
+        // store): harvest candidate NAMES from always-current sources (caller seeds + this concept's live adjacency +
+        // an inflated VP-tree pool, distances discarded), then re-score them against LIVE faces. So a concept that
+        // moved THIS step is measured at its current position even before the throttled tree rebuilds.
+        if (_concepts.ActiveCount < LatticeMinNodes)
+            return GetNearestConcepts(concept, seeds, maxNeighbors);
+        if (!TryGetConceptFace(concept, out var q) || q.Length == 0)
+            return Array.Empty<(string, double)>();
+        var self = Normalize(concept);
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        if (seeds is not null)
+            foreach (var s in seeds) { var n = Normalize(s); if (!n.Equals(self, StringComparison.Ordinal)) names.Add(n); }
+        if (_adjacency.TryGetValue(self, out var adj))
+            foreach (var n in adj) names.Add(n);
+        foreach (var (n, _) in _lattice.GetSemanticNeighbors(q, Math.Clamp(maxNeighbors * 3, 8, 64), self))
+            names.Add(n);
+        names.Remove(self);
+        return names.Count == 0 ? Array.Empty<(string, double)>() : GetNearestConcepts(concept, names, maxNeighbors);
+    }
 
     public double[] ComputeRoutePerception(string anchor, double transformReliability = 0.0)
     {
@@ -288,6 +337,7 @@ public sealed class DialecticalSpace : IPlatonicSpace
         }
         var dst = e.SemanticFace;
         for (var i = 0; i < _semLen && i < cloud.Length && i < dst.Length; i++) dst[i] = cloud[i];
+        _lattice.MarkEmbeddingsDirty(); // the semantic face moved → drift toward a VP-tree rebuild
     }
 
     private static void ClampNorm(double[] v)
@@ -320,6 +370,7 @@ public sealed class DialecticalSpace : IPlatonicSpace
     {
         var key = Normalize(concept);
         _concepts.Archive(key);
+        _lattice.UnregisterNode(key); // left the active set → out of the index
         foreach (var kv in _relations.Where(r => r.Value.Left == key || r.Value.Right == key).ToList())
             _relations.Remove(kv.Key);
         if (_adjacency.TryGetValue(key, out var nbrs))
@@ -350,6 +401,7 @@ public sealed class DialecticalSpace : IPlatonicSpace
         for (var i = 0; i < _semLen; i++)
             e.SemanticFace[i] = source[i % source.Count];
         ClampNorm(e.SemanticFace);
+        _lattice.MarkEmbeddingsDirty();
     }
 
     public IReadOnlyList<(string Left, string Right, long ObservationCount)> GetAllRelations()
@@ -416,6 +468,7 @@ public sealed class DialecticalSpace : IPlatonicSpace
                 orbital[j] -= coeff * q[_semStart + j];
             ClampNorm(orbital);
         }
+        _lattice.MarkEmbeddingsDirty();
     }
 
     public void ReinforceEvidence(IReadOnlyList<PlatonicEvidence> evidence, bool success)
@@ -455,17 +508,43 @@ public sealed class DialecticalSpace : IPlatonicSpace
             var key = Normalize(a);
             anchorSet.Add(key);
             if (IsOperationToken(key) || FaceCodec.IsNumeric(key)) continue;
-            var t = FaceCodec.Token(key, _dim);
-            for (var i = 0; i < _semLen; i++) q[i] += t[i];
+            // Relax from the anchor's learned MEANING (its cloud — token(self) + its relational context), not its
+            // bare symbol: a member's cloud already points at its hub, so a large category hub no longer dilutes the
+            // content signal below the settle threshold. Unknown anchors (no element) fall back to the raw token.
+            if (_concepts.TryGet(key, out var ae) && !ae.Archived && ae.Kind != ElementKind.Atom)
+            {
+                var cloud = CloudOf(ae);
+                for (var i = 0; i < _semLen; i++) q[i] += cloud[i];
+            }
+            else
+            {
+                var t = FaceCodec.Token(key, _dim);
+                for (var i = 0; i < _semLen; i++) q[i] += t[i];
+            }
         }
         if (!NormalizeVec(q)) return new Thought(string.Empty, 0.0, false, 0);
 
         var cands = new List<(string Sym, double[] Cloud)>();
-        foreach (var e in _concepts.All)
+        void Consider(Element e)
         {
-            if (e.Archived || e.Kind == ElementKind.Atom || FaceCodec.IsNumeric(e.Symbol)) continue;
-            if (IsReservedConcept(e.Symbol) || IsOperationToken(e.Symbol) || anchorSet.Contains(e.Symbol)) continue;
+            if (e.Archived || e.Kind == ElementKind.Atom || FaceCodec.IsNumeric(e.Symbol)) return;
+            if (IsReservedConcept(e.Symbol) || IsOperationToken(e.Symbol) || anchorSet.Contains(e.Symbol)) return;
             cands.Add((e.Symbol, CloudOf(e)));
+        }
+        if (_concepts.ActiveCount >= LatticeMinNodes)
+        {
+            // At scale: harvest the query cloud's neighbourhood from the VP-tree (O(log N)), then build LIVE clouds
+            // for those and relax. q is the normalized semantic query; embed it into a full face so the lattice
+            // compares it on [WordFaceStart..dim) — exactly the region CloudOf/Dot rank on (so the harvested set is
+            // the same one the full scan's top-Dot would pick). Distances from the tree are discarded; we re-rank below.
+            var qFull = new double[_dim];
+            for (var i = 0; i < _semLen && _semStart + i < _dim; i++) qFull[_semStart + i] = q[i];
+            foreach (var (sym, _) in _lattice.GetSemanticNeighbors(qFull, Math.Clamp(maxCandidates, 16, 256), null))
+                if (_concepts.TryGet(sym, out var e)) Consider(e);
+        }
+        else
+        {
+            foreach (var e in _concepts.All) Consider(e);
         }
         if (cands.Count == 0) return new Thought(string.Empty, 0.0, false, 0);
 
@@ -486,9 +565,16 @@ public sealed class DialecticalSpace : IPlatonicSpace
             if (!NormalizeVec(nx)) break;
             x = nx;
         }
+        // Select the basin nearest the SETTLED query — blend the relaxed state with the original query so the answer
+        // stays anchored to what was asked (pure relaxation can drift into a denser, unrelated basin; pure query
+        // ignores the disambiguating context). The query keeps it on-topic; the relaxation lets context tip a tie.
         var best = 0; var bestSim = double.NegativeInfinity;
-        for (var i = 0; i < ranked.Count; i++) { var s = Dot(x, ranked[i].Cloud); if (s > bestSim) { bestSim = s; best = i; } }
-        return new Thought(ranked[best].Sym, bestSim, settled, steps);
+        for (var i = 0; i < ranked.Count; i++)
+        {
+            var s = 0.7 * Dot(q, ranked[i].Cloud) + 0.3 * Dot(x, ranked[i].Cloud);
+            if (s > bestSim) { bestSim = s; best = i; }
+        }
+        return new Thought(ranked[best].Sym, Dot(q, ranked[best].Cloud), settled, steps);
     }
 
     private static bool IsReservedConcept(string s) => s.StartsWith("face:", StringComparison.Ordinal);
@@ -733,5 +819,6 @@ public sealed class DialecticalSpace : IPlatonicSpace
             for (var i = 0; i < c.Count; i++) MineChunk(c.Tag, c.Chunk);
         foreach (var t in snapshot.OperationTokens ?? Array.Empty<string>())
             RegisterOperationToken(t);
+        _lattice.MarkEmbeddingsDirty(); // imported orbitals were written directly → force a rebuild from live faces
     }
 }

@@ -356,26 +356,22 @@ public sealed partial class GenesisInferenceEngine
         }
     }
 
+    // Forwards to the SHARED discriminative-anchor rule (PlatonicConceptAnchors) so inference retrieval and trainer
+    // supervision query the SAME cue — the reckoning's seam fix (PLATONIC_RECKONING.md §8). Byte-identical to the
+    // prior inline body.
     private IReadOnlyList<string> ExtractConceptAnchors(string input)
-    {
-        if (string.IsNullOrWhiteSpace(input))
-            return Array.Empty<string>();
+        => KeepCoreControl
+            ? PlatonicConceptAnchors.ExtractSpecific(_memory, input) // abstain on hub-only (no content cue) queries
+            : PlatonicConceptAnchors.Extract(_memory, input);
 
-        var candidates = input
-            .Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Select(t => t.Trim('?', '!', '.', ',', ';', ':', '(', ')', '[', ']', '"', '\''))
-            .Select(t => t.ToLowerInvariant())
-            // Keep single-char DIGIT tokens as concept anchors: a bare number ("3") is a legitimate
-            // concept with a learned relation to its word, and excluding it sent digit→word to the
-            // neural path. Stray single letters still dropped; ContainsConcept gates.
-            .Where(t => t.Length > 1 || (t.Length == 1 && char.IsDigit(t[0])))
-            // An op-token (a declared ROUTE-TRIGGER verb) is never a retrieval anchor. The gym declares none — the
-            // degree filter below is what keeps framing words out, data-drivenly.
-            .Where(t => !_memory.IsOperationToken(t))
-            .Where(t => _memory.ContainsConcept(t))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
-        return SelectDiscriminativeConcepts(candidates);
+    // KEEP-CORE perception anchor: the single most-discriminative input concept (the cue inference retrieval
+    // already uses), so the route/plan/op heads perceive at decode time the SAME region the trainer reinforced
+    // them on — closing the train/infer perception mismatch. Null when no known concept is present.
+    private string? DiscriminativeAnchorToken(IReadOnlyList<int> tokenIds)
+    {
+        if (tokenIds.Count == 0) return null;
+        var anchors = ExtractConceptAnchors(_tokenizer.Decode(tokenIds));
+        return anchors.Count > 0 ? anchors[0] : null;
     }
 
     /// <summary>
@@ -387,20 +383,7 @@ public sealed partial class GenesisInferenceEngine
     /// low-degree content cue(s) survive; ties/near-ties are kept so genuine multi-concept queries still work.
     /// </summary>
     private IReadOnlyList<string> SelectDiscriminativeConcepts(IReadOnlyList<string> candidates)
-    {
-        if (candidates.Count <= 1)
-            return candidates;
-        var byDegree = candidates
-            .Select(t => (Token: t, Degree: _memory.GetRelationDegree(t)))
-            .OrderBy(x => x.Degree)
-            .ToList();
-        var minDegree = byDegree[0].Degree;
-        return byDegree
-            .Where(x => x.Degree <= (minDegree * 2) + 2) // keep the cue + any comparably-specific tokens; drop hubs
-            .Select(x => x.Token)
-            .Take(4)
-            .ToArray();
-    }
+        => PlatonicConceptAnchors.SelectDiscriminative(_memory, candidates);
 
     private double GetAdaptiveBiasScale()
     {

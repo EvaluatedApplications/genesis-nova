@@ -47,6 +47,18 @@ public sealed partial class GenesisInferenceEngine
     // Rung 2 (PLATONIC_BACKPROP.md): descend the softmax-CE function gradient so the anchor's nearest neighbour
     // becomes the TASK target (pull positive, push confusers, self-scaled). Default OFF — enable to A/B vs Rung 1.
     public bool FunctionGradientEnabled { get; set; }
+    // KEEP-CORE control path (PLATONIC_RECKONING.md). When true the substrate's OWN confidence drives retrieval:
+    // the RELAXATION route (`reason`) becomes the primary retrieval path, the route/plan/op heads perceive the
+    // DISCRIMINATIVE anchor (matching how the trainer now reinforces them), and a non-arithmetic query that no
+    // platonic route can settle ABSTAINS instead of emitting a neural-decoder hallucination ("speak only from a
+    // settled state"). Default OFF → byte-identical to the classifier-gated path; the desktop app turns it on.
+    public bool KeepCoreControl { get; set; }
+    // CONSCIOUS FIELD (PLATONIC_MIND.md / PLATONIC_CONSCIOUSNESS.md). When true the model thinks by the field
+    // RELAXING to a settled state (compute → relax → abstain), with NO route/plan/op classifier — the GRU stops
+    // being the boss of "neural vs platonic". This is the real architecture the docs describe; the route-ladder
+    // classifier path is bypassed entirely (GenerateSingle delegates to GenerateFromField). Default off so existing
+    // tests keep the classifier path; the desktop app turns it on. See GenesisInferenceEngine.Field.cs.
+    public bool ConsciousField { get; set; }
     private double _telemetrySuccessEma = 0.5;
     private double _checkpointConceptEfficacyEma = 0.5;
     private InferenceTelemetryHint _trainerHint = InferenceTelemetryHint.Default;
@@ -80,6 +92,7 @@ public sealed partial class GenesisInferenceEngine
             new DelegateRoute("expression-chain",    TryGenerateFromExpressionChain),    // multi-operator expression
             new DelegateRoute("gru-query",           TryGenerateFromGruQuery),           // single-op arithmetic homomorphism
             new DelegateRoute("learned-function",    TryGenerateFromLearnedFunction),    // transform-element by composition
+            new DelegateRoute("reason",              TryGenerateFromReason),             // relaxation retrieval (keep-core; inert unless KeepCoreControl)
             new DelegateRoute("geometric-retrieval", TryGenerateFromGeometricRetrieval), // nearest concept (position = identity)
             new DelegateRoute("relation-edge",       TryGenerateFromRelationEdge, edgeFollowing: true), // strongest relation edge
             new DelegateRoute("concept-chain",       TryGenerateFromConceptChain, edgeFollowing: true), // multi-hop beam walk
@@ -120,8 +133,15 @@ public sealed partial class GenesisInferenceEngine
 
     private GenerationResult GenerateSingle(GenerationRequest request)
     {
-        ResetRouteTelemetry();
         _model.EnsureVocabularySize(_tokenizer.VocabularySize);
+
+        // CONSCIOUS-FIELD COGNITION: bypass the entire route/plan/op classifier — the field relaxes to its answer or
+        // abstains (PLATONIC_MIND.md). This IS the model's thinking when alive; the classifier ladder below is the
+        // legacy path kept only for the default-off / A-B case.
+        if (ConsciousField)
+            return GenerateFromField(request);
+
+        ResetRouteTelemetry();
         var chunkBudget = Math.Max(1, request.ChunkTokenBudget);
 
         if (request.MaxNewTokens <= chunkBudget)
@@ -234,7 +254,11 @@ public sealed partial class GenesisInferenceEngine
                 var transformReliability = _model.TransformReliabilityRouting && _transformAccumulator is not null
                     ? _transformAccumulator.BestReliabilityUcb()
                     : 0.0;
-                routePerception = _memory.ComputeRoutePerception(toks[^1], transformReliability); // operand = last token
+                // KEEP-CORE: perceive the DISCRIMINATIVE anchor (the content cue, not the last surface token) so the
+                // route head reads at decode time the same region the trainer reinforced it on. Falls back to the
+                // last token when no known concept is present (early training / numeric inputs).
+                var anchorTok = KeepCoreControl ? (DiscriminativeAnchorToken(inputTokens) ?? toks[^1]) : toks[^1];
+                routePerception = _memory.ComputeRoutePerception(anchorTok, transformReliability);
             }
         }
         var (routeId, routeConfidence) = _model.PredictRoute(inputTokens, routePerception);
@@ -273,6 +297,16 @@ public sealed partial class GenesisInferenceEngine
             {
                 RecordRouteDecision(routeId, 1, true, true, true, 1, platonic.DecisionPath, routeConfidence);
                 return platonic;
+            }
+            // KEEP-CORE: every platonic route abstained and this is the non-arithmetic branch (arithmetic is
+            // routeId 2) — the field has nothing settled to say. ABSTAIN rather than invent via the neural decoder
+            // (PLATONIC_RECKONING.md: the neural decoder as a primary answer path is a throw; speak only from a
+            // settled state). The substrate still LEARNS this example through training's observation writes.
+            if (KeepCoreControl)
+            {
+                var abstain = EmptyAbstention();
+                RecordRouteDecision(routeId, 0, true, false, false, 0, abstain.DecisionPath, routeConfidence);
+                return abstain;
             }
             // Platonic route attempted but no tool fired — fall through to neural.
             var fallback = GenerateNeuralTokens(request, inputTokens, neuralFallback: true);
@@ -363,6 +397,25 @@ public sealed partial class GenesisInferenceEngine
     // GEOMETRIC retrieval gate: confidence = 1/(1+faceDistance) in the semantic face. Above this, position
     // alone is a trustworthy answer (content addressing); below, defer to the relation edge.
     private const double GeometricMinConfidence = 0.55;
+
+    // REASON (relaxation) retrieval gate (keep-core): confidence is the cosine overlap of the relaxed query
+    // field with the winning concept cloud. Lower scale than the geometric 1/(1+dist), so a distinct threshold;
+    // the route ALSO requires Thought.Settled (the raw query had a near basin) before this even applies.
+    private const double ReasonMinConfidence = 0.42;
+
+    // KEEP-CORE abstention: an honest "nothing settled" result — no neural hallucination. Mirrors the empty
+    // generation result; the DecisionPath names it so telemetry/tests can see the substrate declined to answer.
+    private static GenerationResult EmptyAbstention() => new(
+        Output: string.Empty,
+        GeneratedTokens: Array.Empty<int>(),
+        UsedPlatonicQuery: false,
+        UsedNeuralFallback: false,
+        DecisionPath: "platonic-abstain",
+        PlatonicConfidence: 0.0,
+        AppliedBiasCount: 0,
+        AverageBiasMagnitude: 0.0,
+        ChunksGenerated: 0,
+        PlatonicHopCount: 0);
 
     // Per-generation IMMUTABLE bias context. The query bias derives ONLY from the input tokens
     // (BuildContextConcepts excludes generated tokens) and the vocabulary's concept-bearing tokens —

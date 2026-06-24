@@ -7,7 +7,7 @@
 >
 > This is the genesis dual-face (`research/03-SYMMETRY-BRIDGE` Corr. 7): the **arithmetic face = the proton/nucleus**
 > (crisp, conserved, exact), the **semantic face = the electron orbital** (distributed, probabilistic, mobile).
-> Companions: `PLATONIC_SPACE.md`, `PLATONIC_THEORY.md`, `PLATONIC_CONSCIOUSNESS.md`.
+> Companions: `PLATONIC_THEORY.md` (the formal model), `PLATONIC_CONSCIOUSNESS.md`, `PLATONIC_RECKONING.md`.
 
 ---
 

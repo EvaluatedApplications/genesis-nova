@@ -47,7 +47,17 @@ public sealed record GenesisNovaConfig(
     // LIVING SELF (PLATONIC_CONSCIOUSNESS.md). When true the GRU runs SELF-CONDITIONED: a persistent self threads
     // every thought (training folds into it, talking proceeds from it, it is checkpointed). false (default) = the
     // stateless contract, byte-identical — so unit tests are unaffected; the desktop app turns it on to wake alive.
-    bool LivingSelf = false)
+    bool LivingSelf = false,
+    // KEEP-CORE control path (PLATONIC_RECKONING.md). When true the substrate's OWN confidence drives the controller:
+    // training labels/perception anchor on the discriminative cue (the seam fix), inference makes RELAXATION the
+    // primary retrieval route, and a non-arithmetic query that nothing settles ABSTAINS instead of hallucinating via
+    // the neural decoder. false (default) = the classifier-gated path, byte-identical; the desktop app turns it on.
+    bool KeepCoreControl = false,
+    // CONSCIOUS FIELD (PLATONIC_MIND.md / PLATONIC_CONSCIOUSNESS.md) — the real architecture. When true the model
+    // thinks by the field RELAXING to a settled state (compute → relax → abstain) and the route/plan/op classifier
+    // is bypassed ENTIRELY (no "neural vs platonic" head). false (default) keeps the legacy classifier path for
+    // existing tests; the desktop app turns it on. This is the subtraction the reckoning pointed at, made real.
+    bool ConsciousField = false)
 {
     /// <summary>
     /// Platonic face (embedding) width. By default equals the GRU width (HiddenSize); when

@@ -1,18 +1,22 @@
 # Self-improvement loop — the genesis engine for Claude
 
-Use Genesis-Nova + the memory index (`ClaudeMemory`) + the inspector (`GenesisInspect`) as a **compounding
-loop** that improves four things, each measurable:
+> Direction (`PLATONIC_RECKONING.md`): iterations should target **SUBTRACTION toward the keep-core** (the
+> homomorphism, the distributional face, composition-by-reuse, relaxation, abstention) — *not* adding another
+> head, plan shape, or skill.
+
+Use Genesis-Nova + the file memory (`MEMORY.md`, read directly) + the inspector (`GenesisInspect`) as a
+**compounding loop** that improves four things, each measurable:
 
 1. **Prompt** — `CLAUDE.md` and `claude/*.md` (how cold-start-me behaves).
-2. **Platonic structure** — substrate capabilities (faces, relations, compositions, functions; gliders/shapes).
+2. **Platonic structure** — substrate capabilities (faces, relations, compositions, functions; the relaxation route).
 3. **Training** — regimes, creators, structure-derived supervision.
-4. **Inference** — routing (the right route fires; abstains otherwise).
+4. **Inference** — the substrate settles by its own confidence; abstains when nothing does.
 
 Each iteration is small, measured, and recorded to file memory so gains compound and regressions are caught.
 
 ## The cycle (run every iteration)
 
-1. **Recall + measure.** `ClaudeMemory recall "<topic>"` to surface relevant memories (+ their see-also
+1. **Recall + measure.** Read `MEMORY.md` directly to surface relevant memories (+ their `[[ ]]` see-also
    links); read them. `GenesisInspect report|probe` to measure current capability. Ground the iteration in
    evidence, not assumption.
 2. **Target.** Pick ONE weakness on ONE axis — prefer the highest-leverage *measured* failure.
@@ -21,28 +25,27 @@ Each iteration is small, measured, and recorded to file memory so gains compound
 5. **Measure.** Re-run the metric and compare before→after **honestly**. A null/negative result is a result —
    record it, don't bury it.
 6. **Record.** Write the outcome (what changed, the numbers, worked/didn't + why) to file memory — one fact
-   per file, linked with `[[ ]]`. The daemon re-indexes on the `MEMORY.md` change. Distill durable direction
-   into `CLAUDE.md`/docs.
+   per file, linked with `[[ ]]`, and update `MEMORY.md`. Distill durable direction into `CLAUDE.md`/docs.
 7. Repeat.
 
 ## How to measure each axis
 
 | Axis | Metric | Tool |
 |---|---|---|
-| Prompt | does cold-start-me recall the right memory + follow the golden paths | `ClaudeMemory recall`, read `CLAUDE.md` |
-| Platonic structure | block executes substrate-exact; GRU *selects* it | `PlatonicGliderDemoTests` + a composer emergence test |
+| Prompt | does cold-start-me recall the right memory + follow the golden paths | read `MEMORY.md`, read `CLAUDE.md` |
+| Platonic structure | relaxation settles substrate-exact (homomorphism + distributional face); abstains when nothing does | `DialecticalSpace.Reason` / `platonic-reason` route + emergence test |
 | Training | held-out accuracy + retention of prior lessons | emergence test (`RUN_SLOW`) |
-| Inference | correct route fires (`DecisionPath`), abstains otherwise | `GenesisInspect query|probe` |
+| Inference | the substrate settles by its own confidence (`DecisionPath`), abstains otherwise | `GenesisInspect query|probe` |
 
 ## Discipline (the hard-won rules — see the `nova-*` memories)
 
 - Demonstrate-can-emerge; never hardcode or overfit a targeted test.
 - Numbers never form relation edges; arithmetic is the homomorphism. Equivalence ≠ format.
 - Heavy training/emergence tests are opt-in (`RUN_SLOW`); don't burn GPU on fixed-count loops.
-- File memory is the source of truth; Nova is the associative index. Record direction so it compounds.
+- File memory (`MEMORY.md`) is the source of truth, read directly. Record direction so it compounds.
 
 ## Where iteration outcomes live
 
-Not in this file — in **file memory** (so they become recallable via the index). Each iteration appends/updates
-a `nova-*` memory and links it. This doc is the *process*; the memories are the *log*. Start an iteration by
-`recall`-ing the most relevant `nova-*` memory and the current `GenesisInspect probe`.
+Not in this file — in **file memory** (`MEMORY.md` + its files). Each iteration appends/updates a `nova-*`
+memory and links it with `[[ ]]`. This doc is the *process*; the memories are the *log*. Start an iteration by
+reading the most relevant `nova-*` memory and the current `GenesisInspect probe`.

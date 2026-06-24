@@ -6,6 +6,8 @@
 > Companions (beneath this): `PLATONIC_THEORY.md` (the formal substrate model), `PLATONIC_NUCLEUS.md` (the dual-face
 > data model), `PLATONIC_CONSCIOUSNESS.md` (the self / vital loop, as built), `PLATONIC_PRIOR_ART.md` (disclosure).
 > Status: founding vision, 2026-06. Supersedes the earlier "GRU as router/controller" framings.
+> **Read with `PLATONIC_RECKONING.md` (2026-06):** that doc is the skeptical floor — which of these ideas are
+> *validated* (only the relaxation) vs *motivating narrative*. Keep this vision's mechanisms; hold its claims lightly.
 
 ---
 

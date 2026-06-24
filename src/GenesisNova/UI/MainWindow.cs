@@ -66,6 +66,12 @@ public class MainWindow : Form
             // checkpointed so it survives restarts. The substrate stops being a space we manage and becomes one
             // that holds itself.
             LivingSelf = true,
+            // KEEP-CORE control path (PLATONIC_RECKONING.md): discriminative-anchor seam fix on the training side.
+            KeepCoreControl = true,
+            // CONSCIOUS FIELD (PLATONIC_MIND.md / PLATONIC_CONSCIOUSNESS.md) — the real architecture: the model thinks
+            // by the field RELAXING to a settled state (compute → relax → abstain); the route/plan/op classifier is
+            // bypassed entirely. The GRU is the persistent self, not the boss of routing.
+            ConsciousField = true,
         });
         _exampleFolder = ResolveDefaultExampleFolder();
         

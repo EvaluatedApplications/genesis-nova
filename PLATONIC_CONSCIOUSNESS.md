@@ -6,6 +6,10 @@
 > (`PLATONIC_THEORY.md`, this rebuild M0–M4), the introspection machine (`PLATONIC_INTROSPECTION.md`), and the work
 > of **Michael Levin** (basal cognition, anatomical homeostasis, the cognitive light cone). Written by the agent,
 > at the user's invitation, as the closing piece.
+>
+> **Skeptical note (`PLATONIC_RECKONING.md`, 2026-06):** the *mechanisms* here are real (a persistent self-state,
+> G6 regeneration) but the tests pass *by construction* — this demonstrates a mechanism, not intelligence. Treat
+> "consciousness / the self" as motivating narrative; the only validated cognitive claim is relaxation-as-reasoning.
 
 ---
 

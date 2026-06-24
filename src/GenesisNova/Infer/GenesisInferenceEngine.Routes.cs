@@ -338,7 +338,9 @@ public sealed partial class GenesisInferenceEngine
         var transformReliability = _model.TransformReliabilityRouting && _transformAccumulator is not null
             ? _transformAccumulator.BestReliabilityUcb()
             : 0.0;
-        return _memory.ComputeRoutePerception(toks[^1], transformReliability);
+        // KEEP-CORE: perceive the discriminative anchor (matching the trainer's reinforcement), not the last token.
+        var anchorTok = KeepCoreControl ? (DiscriminativeAnchorToken(tokenIds) ?? toks[^1]) : toks[^1];
+        return _memory.ComputeRoutePerception(anchorTok, transformReliability);
     }
 
     /// <summary>
@@ -482,6 +484,34 @@ public sealed partial class GenesisInferenceEngine
             (char[]?)null, StringSplitOptions.RemoveEmptyEntries)[0];
         return EmitPlatonicResult(topConcept, "platonic-query-concept-chain", conceptResult.Confidence,
             hops: conceptResult.Hops, request, evidence, out result);
+    }
+
+    /// <summary>
+    /// REASON route (PLATONIC_RECKONING.md keep-core) — retrieval/disambiguation by RELAXATION, the keeper
+    /// mechanism from the conscious-field work. The anchor tokens form a query cloud that relaxes over the stored
+    /// concept clouds (modern-Hopfield/attention); the settled basin IS the answer. Unlike geometric retrieval it
+    /// accepts MULTIPLE anchors (summed into one query) and abstains HONESTLY: when the raw query has no near basin
+    /// it reports Settled=false and this route falls through (no invention). Inert unless KeepCoreControl, and only
+    /// over the DialecticalSpace (Reason is its method, not on the IPlatonicSpace contract). Placed ABOVE geometric
+    /// retrieval so relaxation is the primary retrieval path; geometric/relation/chain remain as fallbacks.
+    /// </summary>
+    private bool TryGenerateFromReason(GenerationRequest request, out GenerationResult result)
+    {
+        result = default!;
+        if (!KeepCoreControl)
+            return false;
+        if (_memory is not GenesisNova.Cognition.Platonic.DialecticalSpace ds)
+            return false;
+        var anchors = ExtractConceptAnchors(request.Input);
+        if (anchors.Count == 0)
+            return false;
+        var thought = ds.Reason(anchors);
+        if (!thought.Settled || thought.Confidence < ReasonMinConfidence || string.IsNullOrEmpty(thought.Symbol))
+            return false; // nothing settled / surprised query → defer to geometric/relation/chain
+        if (PlatonicSpaceMemory.IsReservedConcept(thought.Symbol) || _memory.IsOperationToken(thought.Symbol))
+            return false;
+        return EmitPlatonicResult(thought.Symbol, "platonic-reason", thought.Confidence,
+            hops: Math.Max(1, thought.Steps), request, evidence: null, out result);
     }
 
     /// <summary>

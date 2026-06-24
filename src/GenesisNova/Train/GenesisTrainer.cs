@@ -169,6 +169,15 @@ public sealed class GenesisTrainer
     public bool RequirePlatonicForCorrect { get; set; } = true;
 
     /// <summary>
+    /// KEEP-CORE control path (PLATONIC_RECKONING.md). When true, the route-LABEL resolver and the route/plan/op
+    /// PERCEPTION reinforcement anchor on the DISCRIMINATIVE input concept (the content cue) instead of the first
+    /// surface token — the same anchor inference retrieves on — so a healthy retrieval geometry becomes visible to
+    /// the controller it is teaching (the reckoning's one real seam bug). Default OFF (byte-identical supervision);
+    /// the desktop app turns it on, paired with the engine's KeepCoreControl so train and infer perceive alike.
+    /// </summary>
+    public bool KeepCoreControl { get; set; }
+
+    /// <summary>
     /// SPACE-AWARE EDITING (SPACE_AWARE_GRU.md §B/§F): before writing the cue→answer edge, READ the anchor's
     /// current nearest neighbour; if a NON-target concept is winning (a distractor / a prior bad write), REPEL
     /// it so the answer can become nearest. This is the read-before-write policy — it lets the controller UNDO a
@@ -1079,7 +1088,12 @@ public sealed class GenesisTrainer
         // (b) Nearest-concept retrieval: is the target's concept the nearest neighbour of the
         // primary input concept (graded by rank)? Nearest-as-single-hop is DIRECT (route 1); present
         // in the top-K but not the single nearest is ASSISTED (route 2).
-        var primaryInput = inputConcepts[0];
+        // KEEP-CORE: anchor on the DISCRIMINATIVE concept (the content cue inference retrieves on), not the first
+        // surface token — otherwise a framing word ("a"/"synonym") becomes the retrieval probe and the label
+        // resolver never sees the healthy geometry, so retrieval is never labelled platonic (PLATONIC_RECKONING.md §8).
+        var primaryInput = KeepCoreControl
+            ? (PlatonicConceptAnchors.SelectDiscriminative(_platonicSpace, inputConcepts).FirstOrDefault() ?? inputConcepts[0])
+            : inputConcepts[0];
         var nearest = _platonicSpace.GetNearestConcepts(
             primaryInput,
             candidates: null,
@@ -1748,7 +1762,12 @@ public sealed class GenesisTrainer
         var inputConcepts = ExtractMirrorConcepts(example.Input, string.Empty);
         if (inputConcepts.Count == 0)
             return;
-        var anchor = inputConcepts.FirstOrDefault(c => !IsNumericConcept(c)) ?? inputConcepts[0];
+        var nonNumeric = inputConcepts.Where(c => !IsNumericConcept(c)).ToList();
+        // KEEP-CORE: reinforce on the DISCRIMINATIVE anchor so the heads perceive the same region inference reads at
+        // decode time (the engine's KeepCoreControl perceives the same cue) — closing the train/infer mismatch.
+        var anchor = KeepCoreControl
+            ? (PlatonicConceptAnchors.SelectDiscriminative(_platonicSpace, nonNumeric).FirstOrDefault() ?? nonNumeric.FirstOrDefault() ?? inputConcepts[0])
+            : (nonNumeric.FirstOrDefault() ?? inputConcepts[0]);
         // Bubble the EARNED transform reliability into the route perception so the route head is reinforced to
         // trust the function/platonic route in proportion to how proven the model's transforms are.
         var transformReliability = _model.TransformReliabilityRouting ? _transformAccumulator.BestReliabilityUcb() : 0.0;

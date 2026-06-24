@@ -21,7 +21,9 @@ public sealed record NovaConfig(
     SubstrateOptions Substrate,
     ControllerOptions Controller,
     RoutingOptions Routing,
-    LearningOptions Learning)
+    LearningOptions Learning,
+    bool KeepCoreControl = false, // PLATONIC_RECKONING.md keep-core: substrate-confidence routing + seam fix + abstention
+    bool ConsciousField = false)  // PLATONIC_MIND.md: think by field-relaxation, bypass the route/plan/op classifier
 {
     /// <summary>The default-on/off profile — every field is set to today's live value, so applying it is a no-op
     /// against the historical scattered defaults. Change a default HERE, not in seven places.</summary>
@@ -38,6 +40,8 @@ public sealed record NovaConfig(
         Routing = StableDefault.Routing with { EdgeRoutingEnabled = c.EdgeRoutingEnabled },
         Learning = StableDefault.Learning with { FunctionGradientEnabled = c.FunctionGradientEnabled },
         Controller = StableDefault.Controller with { SelfConditioned = c.LivingSelf },
+        KeepCoreControl = c.KeepCoreControl,
+        ConsciousField = c.ConsciousField,
     };
 
     /// <summary>Push every mechanism toggle onto the live subsystems in ONE place (replaces the old scattered
@@ -60,6 +64,13 @@ public sealed record NovaConfig(
 
         // Reasoning (routing)
         inference.EdgeRoutingEnabled = Routing.EdgeRoutingEnabled;
+
+        // Keep-core control path (PLATONIC_RECKONING.md) — pushed onto BOTH sides so train and infer perceive alike.
+        inference.KeepCoreControl = KeepCoreControl;
+        trainer.KeepCoreControl = KeepCoreControl;
+
+        // Conscious field (PLATONIC_MIND.md) — inference thinks by relaxation; the classifier path is bypassed.
+        inference.ConsciousField = ConsciousField;
 
         // Learning (task→space mechanisms + edit head)
         inference.FunctionDisruptionEnabled = Learning.FunctionDisruptionEnabled; // Rung 1

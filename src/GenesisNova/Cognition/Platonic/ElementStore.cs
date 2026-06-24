@@ -17,18 +17,10 @@ public sealed class ElementStore
     private readonly Dictionary<string, Element> _bySymbol = new(System.StringComparer.Ordinal);
     private readonly List<Element> _byId = new();
     private int _nextId;
+    private int _activeCount; // tracked incrementally so ActiveCount is O(1) — it gates per-query hot paths
 
-    /// <summary>Live (non-archived) element count.</summary>
-    public int ActiveCount
-    {
-        get
-        {
-            var n = 0;
-            foreach (var e in _byId)
-                if (!e.Archived) n++;
-            return n;
-        }
-    }
+    /// <summary>Live (non-archived) element count. O(1) (maintained on create/reactivate/archive).</summary>
+    public int ActiveCount => _activeCount;
 
     /// <summary>Total elements ever created, including archived (G6 — the space only grows).</summary>
     public int TotalCount => _byId.Count;
@@ -51,20 +43,24 @@ public sealed class ElementStore
     {
         if (_bySymbol.TryGetValue(symbol, out var existing))
         {
-            existing.Archived = false; // reactivate (G6)
+            if (existing.Archived) { existing.Archived = false; _activeCount++; } // reactivate (G6)
             return existing;
         }
 
         var element = new Element(_nextId++, kind, symbol, freshSemanticFace(), components);
         _bySymbol[symbol] = element;
         _byId.Add(element);
+        _activeCount++;
         return element;
     }
 
     /// <summary>G6: dim an element to dormant. It is retained (reactivatable via <see cref="GetOrCreate"/>), never deleted.</summary>
     public void Archive(string symbol)
     {
-        if (_bySymbol.TryGetValue(symbol, out var e))
+        if (_bySymbol.TryGetValue(symbol, out var e) && !e.Archived)
+        {
             e.Archived = true;
+            _activeCount--;
+        }
     }
 }

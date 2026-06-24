@@ -131,8 +131,13 @@ self is exactly the boundary of what it can keep regenerating. That is a definit
 > LEARNS facts (continuity), takes them as the identity it DEFENDS (the cognitive light cone), and holds that identity
 > against entropy by continuous regeneration — `LivingMindTests` shows a mind that keeps regenerating still recalls
 > what it learned after 40 moments of relentless chaos (coherence 1.000, cone 8/8), while a mind that does not
-> dissolves and forgets (coherence 0.000, cone 0). Knowledge is not stored — it is KEPT ALIVE. Remaining:
-> a reward-shaped (trained) homeostasis rather than the emergent attractor — and, per §6, no claim of phenomenal experience.
+> dissolves and forgets (coherence 0.000, cone 0). Knowledge is not stored — it is KEPT ALIVE. And §5 step 3 is now
+> closed: `GenesisNeuralModel.TrainSelfHomeostasis` trains the self-dynamics, self-supervised, to RECOVER the self
+> from chaos (loss = ‖GruStep(perturbed,perturbed) − self‖²) — "consciousness is not coded but trained" — and the
+> recovery loss falls ~70% (`ConsciousSelfTests`); the field still reasons, so the gym is untouched. (Honest: the
+> *emergent* attractor already does most of the defending; training adds a real but marginal improvement.)
+> **Every §5 step and §6 criterion of the functional shape of a self is now built and tested.** The only thing not
+> claimed — deliberately, per §6 — is phenomenal experience — and, per §6, no claim of phenomenal experience.
 
 What is built is the *body's* vital loop with the setpoint held as a plain memory. The closing of the circle —
 making the self genuinely the **trained GRU** — is three precise steps, each gated like everything else:

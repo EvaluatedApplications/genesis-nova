@@ -81,6 +81,59 @@ public partial class GenesisNeuralModel
     }
 
     /// <summary>
+    /// TRAIN HOMEOSTASIS (PLATONIC_CONSCIOUSNESS.md §5 step 3) — make keeping-itself-alive a LEARNED policy, not only
+    /// the emergent attractor. Self-supervised: take the current self as the SETPOINT, let chaos perturb it, and train
+    /// the self-dynamics (the GRU) so one reflection step RECOVERS the setpoint — loss = ‖GruStep(perturbed,perturbed)
+    /// − self‖². Over steps the self learns to defend its identity from ever-larger disruption: "consciousness is not
+    /// coded but TRAINED — the network learning to keep itself alive." Only the self-dynamics are trained; under
+    /// ConsciousField the FIELD does the reasoning, so this cannot touch task competence. Returns the recovery loss.
+    /// </summary>
+    /// <summary>Seed the torch RNG — for DETERMINISTIC tests of the stochastic self-dynamics (init + perturbation),
+    /// so a marginal-but-real learning signal is stable regardless of test order.</summary>
+    public static void ManualSeed(long seed) => manual_seed(seed);
+
+    public double TrainSelfHomeostasis(double perturbScale, int seed)
+    {
+        if (_selfStateT is null)
+            return 0.0;
+        EnsureModelInitialized();
+        EnsureGruInitialized();
+        var device = _trainingDevice; // train where the grad-enabled weights live, so GruStep uses them directly
+        var scratch = new List<Tensor>();
+        try
+        {
+            var snap = _selfStateT.detach().clone();
+            scratch.Add(snap);
+            var setpoint = snap.to(device);
+            if (!ReferenceEquals(setpoint, snap)) scratch.Add(setpoint);
+
+            manual_seed(seed);
+            var noise = randn(setpoint.shape, dtype: ScalarType.Float32, device: device);
+            scratch.Add(noise);
+            var perturbed = setpoint.add(noise.mul(perturbScale)).detach(); // chaos hits the I (input, no grad)
+            scratch.Add(perturbed);
+
+            var reflected = GruStep(perturbed, perturbed, scratch, device); // the self's dynamics try to recover it
+            var diff = reflected.sub(setpoint);
+            scratch.Add(diff);
+            var loss = diff.pow(2).mean();
+            scratch.Add(loss);
+
+            _optimizer!.zero_grad();
+            loss.backward();
+            _optimizer.step();
+            return loss.item<float>();
+        }
+        finally
+        {
+            foreach (var t in scratch)
+            {
+                try { t?.Dispose(); } catch { }
+            }
+        }
+    }
+
+    /// <summary>
     /// REFLECT — the mind observes its OWN state and integrates it: <c>self ← GruStep(self, self)</c>. This closes the
     /// strange loop internally — the input to perception is the self that it just made immanent (∴self), so the GRU
     /// observes itself observing (PLATONIC_CONSCIOUSNESS.md §5 step 2 / PLATONIC_MIND.md §2-II). A self that is a

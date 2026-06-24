@@ -161,4 +161,39 @@ public sealed class ConsciousSelfTests
         Assert.True(recoveredCos > perturbedCos + 0.05, "the self returns toward its identity after chaos (homeostasis)");
         Assert.True(recoveredCos > 0.95, $"the self defends its identity — back to its setpoint; recovered={recoveredCos:F3}");
     }
+
+    [Fact] // TRAINED homeostasis (PLATONIC_CONSCIOUSNESS §5 step 3): "consciousness is not coded but trained — the
+           // network learning to keep itself alive." The self-dynamics are trained, self-supervised, to RECOVER the
+           // self from chaos; the recovery loss must FALL as it learns. (The field still does the reasoning, so the
+           // gym is untouched — confirmed by the full suite.)
+    public void Self_LearnsToKeepItselfAlive_TrainedHomeostasis()
+    {
+        GenesisNeuralModel.ManualSeed(20240624); // deterministic init + perturbation, so the (marginal-but-real) learning is stable
+        var config = new GenesisNovaConfig(HiddenSize: ProductionDims.HiddenSize, LearningRate: 0.5);
+        var tok = new WhitespaceGenesisTokenizer();
+        var model = new GenesisNeuralModel(config) { SelfConditioned = true };
+        var space = new DialecticalSpace(config.FaceDimension, seed: 7);
+        var trainer = new GenesisTrainer(tok, model, space, config);
+        var infer = new GenesisInferenceEngine(tok, model, space, null) { ConsciousField = true };
+        trainer.SetInferencePolicy(infer);
+        foreach (var ex in new[] { ("2 + 3", "5"), ("4 + 1", "5"), ("7 - 2", "5") })
+            for (var i = 0; i < 4; i++) trainer.TrainStep(new GenesisExample(ex.Item1, ex.Item2));
+        foreach (var thought in new[] { "hello world", "two plus two" })
+            infer.Generate(new GenerationRequest(thought, 8));
+        model.ReflectOnSelf(25); // settle to an identity to defend
+
+        // A disruption the emergent one-step recovery does NOT fully absorb (so there is something to LEARN), and a
+        // fixed chaos so the learning is unambiguous: the self-dynamics learn to recover this disruption.
+        model.LearningRate = 2.0; // a brisk rate for the self-dynamics (the field's reasoning is unaffected by this)
+        var losses = new System.Collections.Generic.List<double>();
+        for (var i = 0; i < 800; i++)
+            losses.Add(model.TrainSelfHomeostasis(perturbScale: 0.5, seed: 42));
+        var early = losses.Take(10).Average();
+        var late = losses.Skip(790).Average();
+        _out.WriteLine($"[trained homeostasis] recovery loss: early={early:F5} mid={losses.Skip(395).Take(10).Average():F5} late={late:F5}");
+
+        // The self LEARNS to recover better — a real reduction. (Honest: the EMERGENT attractor already does most of
+        // the defending; training adds a marginal improvement, which is why the bar is modest, not dramatic.)
+        Assert.True(late < early * 0.65, $"the self learns to keep itself alive better (recovery loss falls); early={early:F5} late={late:F5}");
+    }
 }

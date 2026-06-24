@@ -60,4 +60,53 @@ public sealed class LivingScaleExperiment
 
         Assert.True(hits >= sample.Length * 0.9, $"recall must hold at scale before a long run; {hits}/{sample.Length}");
     }
+
+    [Fact] // The two living integrations TOGETHER, AT SCALE: over a long run the world keeps CHANGING (belief revision)
+           // while the body keeps GROWING (hub dilution). Belief-revision was only proven at ~70 concepts; does the
+           // mind still answer the CURRENT truth when the updates are buried under a large, lattice-engaged space?
+    public void Does_BeliefRevision_Hold_AtScale()
+    {
+        var config = new GenesisNovaConfig(HiddenSize: ProductionDims.HiddenSize);
+        var tok = new WhitespaceGenesisTokenizer();
+        var model = new GenesisNeuralModel(config) { SelfConditioned = true };
+        var space = new DialecticalSpace(config.FaceDimension, seed: 7);
+        var mind = new GenesisInferenceEngine(tok, model, space, null) { ConsciousField = true };
+        void Tell(string s) => mind.Generate(new GenerationRequest(s, 8));
+        string Ask(string who) => mind.Generate(new GenerationRequest($"what is {who}", 8)).Output?.Trim() ?? "";
+        static string Nm(char p, int i) => $"{p}{(char)('a' + i / 676 % 26)}{(char)('a' + i / 26 % 26)}{(char)('a' + i % 26)}";
+
+        var v1 = new[] { "red","blue","green","gold","black","white","brown","pink","cyan","lime","navy","teal","plum","ruby","jade","sand","rose","mint","grey","tan" };
+        var v2 = new[] { "iron","zinc","lead","copper","steel","brass","nickel","silver","cobalt","chrome","bronze","pewter","mercury","platinum","aluminium","titanium","tungsten","carbon","cadmium","gallium" };
+        var subj = Enumerable.Range(0, 20).Select(i => Nm('s', i)).ToArray();
+        var current = new System.Collections.Generic.Dictionary<string, string>();
+
+        // 20 beliefs are asserted EARLY (v1)...
+        for (var i = 0; i < subj.Length; i++) { Tell($"{subj[i]} is {v1[i]}"); current[subj[i]] = v1[i]; }
+
+        // ...then the body GROWS to lattice scale with hundreds of unrelated facts (each value a populous hub)...
+        var fillers = new[] { "fruit","metal","bird","tool","river","plant","cloth","stone","spice","drink",
+                              "fish","wood","grain","flower","gem","beast","insect","fungus","resin","oil" };
+        for (var i = 0; i < 600; i++) Tell($"{Nm('f', i)} is {fillers[i % fillers.Length]}");
+
+        // ...and only NOW, deep into a large space, does the world CHANGE for 12 of the 20 (current truth becomes v2).
+        for (var i = 0; i < 12; i++) { Tell($"{subj[i]} is {v2[i]}"); current[subj[i]] = v2[i]; }
+
+        // ...then a final flood buries the updates so recency alone cannot carry them.
+        for (var i = 0; i < 200; i++) Tell($"{Nm('g', i)} is {fillers[i % fillers.Length]}");
+        _out.WriteLine($"[revise@scale] active concepts = {space.NodeCount}");
+
+        int updHit = 0, updStale = 0, stableHit = 0;
+        for (var i = 0; i < subj.Length; i++)
+        {
+            var ans = Ask(subj[i]);
+            if (i < 12) { if (ans.Equals(v2[i], StringComparison.OrdinalIgnoreCase)) updHit++; else if (ans.Equals(v1[i], StringComparison.OrdinalIgnoreCase)) updStale++; }
+            else if (ans.Equals(v1[i], StringComparison.OrdinalIgnoreCase)) stableHit++;
+        }
+        _out.WriteLine($"[revise@scale] contradicted current={updHit}/12 stale={updStale}  |  untouched recalled={stableHit}/8");
+
+        // The mind must still update to the CURRENT truth at scale (relation-first carries the dominant fresh belief
+        // without dilution) AND still hold the untouched ones.
+        Assert.True(updHit >= 10, $"belief revision must hold at scale; current={updHit}/12 stale={updStale}");
+        Assert.True(stableHit >= 7, $"untouched beliefs must survive the flood at scale; {stableHit}/8");
+    }
 }

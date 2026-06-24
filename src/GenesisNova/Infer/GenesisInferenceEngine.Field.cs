@@ -110,9 +110,32 @@ public sealed partial class GenesisInferenceEngine
     private bool TryFieldArithmetic(IReadOnlyList<string> toks, GenerationRequest request, out GenerationResult result)
     {
         result = default!;
+        // UNARY SIGN: a +/- in OPERAND position (the start, or right after another operator / cue / separator — any
+        // place the parser is NOT immediately after a number) is the SIGN of the following number, not a binary op.
+        // The shared tokenizer split every '-' into its own token, which made "-7 plus -1", "6 - -5" and "product of
+        // -3 and -4" look like a malformed operand/operator shape and fall through to relaxation. Walking with an
+        // expect-operand flag re-merges the negative literals so the homomorphism can compute them.
+        var merged = new List<string>(toks.Count);
+        var expectOperand = true;
+        for (var i = 0; i < toks.Count; i++)
+        {
+            var t = toks[i];
+            if ((t == "-" || t == "+") && expectOperand && i + 1 < toks.Count
+                && double.TryParse(toks[i + 1], NumberStyles.Float, CultureInfo.InvariantCulture, out var signed))
+            {
+                merged.Add((t == "-" ? -signed : signed).ToString(CultureInfo.InvariantCulture));
+                i++;                            // consumed the number this sign belongs to
+                expectOperand = false;          // ...now a binary operator is expected
+                continue;
+            }
+            merged.Add(t);
+            // after a NUMBER expect an operator; after anything else (op token, cue, separator, filler) expect an operand
+            expectOperand = !double.TryParse(t, NumberStyles.Float, CultureInfo.InvariantCulture, out _);
+        }
+
         var operands = new List<double>();
         var infixOps = new List<GliderOp>();
-        foreach (var t in toks)
+        foreach (var t in merged)
         {
             if (double.TryParse(t, NumberStyles.Float, CultureInfo.InvariantCulture, out var v)) operands.Add(v);
             else if (TryOpToken(t, out var op)) infixOps.Add(op);
@@ -126,7 +149,7 @@ public sealed partial class GenesisInferenceEngine
         }
         else if (infixOps.Count == 0)
         {
-            var cueOps = toks.Select(t => TryOpCue(t, out var o) ? (GliderOp?)o : null)
+            var cueOps = merged.Select(t => TryOpCue(t, out var o) ? (GliderOp?)o : null)
                              .Where(o => o.HasValue).Select(o => o!.Value).Distinct().ToList();
             if (cueOps.Count != 1) return false;                    // "the total of 3 and 4", "add 3 and 4"
             value = EvalFold(operands, cueOps[0]);
@@ -137,7 +160,7 @@ public sealed partial class GenesisInferenceEngine
 
         // Output FORM emerges from the prompt: a "in words" cue asks for the word, otherwise the number (the
         // value-grader accepts either for non-surface-strict skills; ArithToWord is surface-strict → must be the word).
-        if (toks.Any(IsToWordCue))
+        if (merged.Any(IsToWordCue))
         {
             var word = NumberWordVocabulary.ToWords((long)Math.Round(value)); // generative linguistic codec
             return EmitField(word, "field-compute-word", request, out result);
@@ -213,6 +236,12 @@ public sealed partial class GenesisInferenceEngine
         or "classified" or "belongs" or "synonym" or "word" or "means" or "meaning" or "similar" or "same" or "close" or "match" or "near" or "like";
     private static bool IsNumericLike(string t) => double.TryParse(t, NumberStyles.Float, CultureInfo.InvariantCulture, out _);
     private static bool IsContentWord(string t) => t.Length > 1 && t.All(char.IsLetter) && !Framing.Contains(t);
+    // Function words beyond the copula/article Framing set — prepositions/conjunctions that show up as filler in a
+    // prompt and must never leak out as a relaxed "answer".
+    private static readonly System.Collections.Generic.HashSet<string> FunctionWords =
+        new(StringComparer.Ordinal) { "by", "for", "with", "from", "in", "on", "at", "and", "or", "as", "into", "onto", "than" };
+    // A grammatical FUNCTION word (article/preposition/conjunction/copula or a question cue) — never a subject or answer.
+    private static bool IsFunctionWord(string t) => Framing.Contains(t) || FunctionWords.Contains(t) || IsQuestionCue(t);
 
     private static string? LastContentWord(IReadOnlyList<string> toks, int start, int end)
     {
@@ -270,12 +299,16 @@ public sealed partial class GenesisInferenceEngine
     {
         result = default!;
         var ds = (DialecticalSpace)_memory;
-        var anchors = PlatonicConceptAnchors.ExtractSpecific(ds, request.Input ?? string.Empty);
+        // Drop FUNCTION WORDS (the/of/to/is..., what/who/where...) from the candidate subjects: when an arithmetic or
+        // other prompt falls through to here, its framing words must not become the query's subject — nor the answer.
+        // Without this the relaxation seeded on "what" / "to" / "of" emitted those very words instead of abstaining.
+        var anchors = PlatonicConceptAnchors.ExtractSpecific(ds, request.Input ?? string.Empty)
+            .Where(a => !IsFunctionWord(a)).ToList();
         if (anchors.Count == 0) return false;
         var subject = anchors[0]; // the most-discriminative cue = the query's likely subject
 
         bool Bad(string s) => string.IsNullOrEmpty(s) || PlatonicSpaceMemory.IsReservedConcept(s)
-            || ds.IsOperationToken(s) || s.Equals(subject, StringComparison.Ordinal);
+            || ds.IsOperationToken(s) || IsFunctionWord(s) || s.Equals(subject, StringComparison.Ordinal);
         // Attending to a subject both threads the discrete focus AND folds its meaning into the persistent self —
         // the mind becomes, a little, what it has just thought about.
         void Attend() { _focus.Remove(subject); _focus.Add(subject); while (_focus.Count > FocusSize) _focus.RemoveAt(0); PerceiveIntoSelfField(ds, subject); }
@@ -420,9 +453,9 @@ public sealed partial class GenesisInferenceEngine
         op = t switch
         {
             "add" or "added" or "adding" or "total" or "sum" or "plus" => GliderOp.Add,
-            "subtract" or "minus" or "difference" => GliderOp.Subtract,
+            "subtract" or "minus" or "difference" or "delta" => GliderOp.Subtract,
             "multiply" or "multiplied" or "product" or "times" => GliderOp.Multiply,
-            "divide" or "divided" => GliderOp.Divide,
+            "divide" or "divided" or "quotient" => GliderOp.Divide,
             _ => (GliderOp)(-1),
         };
         return (int)op >= 0;

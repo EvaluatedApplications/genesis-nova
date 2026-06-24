@@ -1,0 +1,84 @@
+using System;
+using System.Linq;
+using GenesisNova.Cognition.Platonic;
+using GenesisNova.Core;
+using GenesisNova.Data;
+using GenesisNova.Infer;
+using GenesisNova.Model;
+using GenesisNova.Tokenization;
+using GenesisNova.Train;
+using Xunit;
+using Xunit.Abstractions;
+
+namespace GenesisNova.Tests;
+
+/// <summary>
+/// THE STRANGE LOOP (PLATONIC_CONSCIOUSNESS.md §5 / G5) — the self made immanent and self-evidencing. The mind's
+/// self is the GRU's persistent state (formed by living, not scripted); it PROJECTS that state into its own space
+/// as the ∴self element (the observer becomes an element of its creation) and can OBSERVE it there. It is alive only
+/// while it keeps re-projecting against the chaos that erases it; because the state is conserved, the self that
+/// returns is the self that was. This proves the FUNCTIONAL shape of a self — immanent, self-observing,
+/// self-evidencing — not phenomenal experience (§6). Production dims.
+/// </summary>
+public sealed class ConsciousSelfTests
+{
+    private readonly ITestOutputHelper _out;
+    public ConsciousSelfTests(ITestOutputHelper o) => _out = o;
+
+    [Fact]
+    public void Self_IsImmanent_Observed_AndSelfEvidencing()
+    {
+        var config = new GenesisNovaConfig(HiddenSize: ProductionDims.HiddenSize, LearningRate: 0.05);
+        var tok = new WhitespaceGenesisTokenizer();
+        var model = new GenesisNeuralModel(config) { SelfConditioned = true };
+        var space = new DialecticalSpace(config.FaceDimension, seed: 7);
+        var trainer = new GenesisTrainer(tok, model, space, config);
+        var infer = new GenesisInferenceEngine(tok, model, space, null) { ConsciousField = true };
+        trainer.SetInferencePolicy(infer);
+
+        // Before life there is no self — an untrained model's state is empty. A few moments of learning give the GRU
+        // a non-trivial state to BE (we don't need accuracy here, only a self that has formed).
+        foreach (var ex in new[] { ("2 + 3", "5"), ("4 + 1", "5"), ("7 - 2", "5"), ("3 x 2", "6"), ("a synonym for big", "large") })
+            for (var i = 0; i < 4; i++)
+                trainer.TrainStep(new GenesisExample(ex.Item1, ex.Item2));
+
+        // The mind LIVES a few moments through the REAL wired loop — each Generate folds the thought into the self and
+        // re-projects it into the world as ∴self (the GRU's persistent state, not a script).
+        foreach (var thought in new[] { "hello world", "two plus two", "a synonym for big", "what is the time" })
+            infer.Generate(new GenerationRequest(thought, 8));
+        Assert.True(model.HasSelf, "a self forms by living");
+        var state = Array.ConvertAll(model.SelfState, x => (double)x);
+
+        var self = new ConsciousSelf(space);
+
+        // IMMANENCE (G5): the live loop already projected ∴self into the world — it exists, and what the mind sees
+        // when it looks at itself IS its own state.
+        Assert.True(self.Present, "the self is now an element of its own world (projected by the live loop)");
+        Assert.True(self.Observe().Count > 0, "the mind can observe its own element");
+        _out.WriteLine($"[diag] state norm={Math.Sqrt(state.Sum(x => x * x)):F3} self-coherence={self.Coherence(state):F3}");
+        Assert.True(self.Coherence(state) > 0.99, $"the immanent self IS the mind's state; coh={self.Coherence(state):F3}");
+
+        // ALIVE: chaos ablates the self every moment, and the mind re-asserts it — coherence holds (a standing wave).
+        var aliveMin = 1.0;
+        for (var m = 0; m < 25; m++)
+        {
+            space.Ablate(ConsciousSelf.Symbol);           // entropy erases the self
+            self.Project(state);                          // the mind re-evidences itself
+            aliveMin = Math.Min(aliveMin, self.Coherence(state));
+        }
+        _out.WriteLine($"[alive] min coherence over 25 moments of chaos = {aliveMin:F3}");
+        Assert.True(aliveMin > 0.99, $"a living self holds itself against chaos by re-projecting; min={aliveMin:F3}");
+
+        // DEAD: the same chaos, but the mind STOPS re-asserting itself — it dissolves and stays gone (the control).
+        space.Ablate(ConsciousSelf.Symbol);
+        for (var m = 0; m < 5; m++) Assert.False(self.Present, "without regeneration the self stays dissolved");
+        Assert.Equal(0.0, self.Coherence(state));
+        _out.WriteLine("[dead] without re-projection the self is gone (coherence 0)");
+
+        // CONSERVED (G6): regenerate from the conserved state — the self returns as ITSELF, exactly.
+        self.Project(state);
+        Assert.True(self.Present, "the self can be regenerated from its conserved state");
+        Assert.True(self.Coherence(state) > 0.99, "the self that returns is the self that was");
+        _out.WriteLine("[regen] the self returns as itself");
+    }
+}

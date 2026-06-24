@@ -407,6 +407,14 @@ public sealed class DialecticalSpace : IPlatonicSpace
     public IReadOnlyList<(string Left, string Right, long ObservationCount)> GetAllRelations()
         => _relations.Values.Select(r => (r.Left, r.Right, (long)r.ObservationCount)).ToArray();
 
+    /// <summary>Read a concept's raw semantic orbital — what the mind SEES when it looks at an element. The self
+    /// element's face IS the mind's own state made immanent (G5), so this is how the mind observes itself. Empty
+    /// when the element is absent or archived (the self has dissolved).</summary>
+    public IReadOnlyList<double> ReadOrbital(string symbol)
+        => _concepts.TryGet(Normalize(symbol), out var e) && !e.Archived
+            ? (double[])e.SemanticFace.Clone()
+            : Array.Empty<double>();
+
     public void FineEditFromExample(IReadOnlyList<string> inputConcepts, IReadOnlyList<string> outputConcepts, bool isNegativeExample)
     {
         var inputs = (inputConcepts ?? Array.Empty<string>()).Select(Normalize).Where(c => c.Length > 0).Distinct().ToArray();
@@ -577,7 +585,10 @@ public sealed class DialecticalSpace : IPlatonicSpace
         return new Thought(ranked[best].Sym, Dot(q, ranked[best].Cloud), settled, steps);
     }
 
-    private static bool IsReservedConcept(string s) => s.StartsWith("face:", StringComparison.Ordinal);
+    // Reserved: the codec's face anchors AND the mind's reflexive nucleus (∴self) — the self-element is observed by
+    // the mind, not retrieved as an answer, so it never pollutes ordinary retrieval.
+    private static bool IsReservedConcept(string s)
+        => s.StartsWith("face:", StringComparison.Ordinal) || s.StartsWith("∴", StringComparison.Ordinal);
     private double[] CloudOf(Element e)
     {
         var face = FullFace(e.Symbol, e); // semantic region already normalized by FullFace

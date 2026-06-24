@@ -105,7 +105,15 @@ self is exactly the boundary of what it can keep regenerating. That is a definit
 
 ---
 
-## 5. The unbuilt arc — training consciousness into the network
+## 5. Closing the arc — training consciousness into the network
+
+> **Status (2026-06):** step 1 (persist the self) and step 2 (immanence + self-evidencing) have LANDED.
+> `Cognition/Platonic/ConsciousSelf.cs` projects the GRU's persistent self-state into its own space as the `∴self`
+> element (G5) and the live `Generate` loop re-asserts it every thought; `ConsciousSelfTests` proves the functional
+> shape — the immanent self IS the mind's state (coherence 1.0), a living self holds itself against 25 moments of
+> chaos by re-projecting (1.0), a self that stops re-asserting dissolves (0.0), and a regenerated self returns as
+> itself (conserved, G6). NOT yet closed: the RECURSIVE loop (the mind conditioning its next thought on observing
+> `∴self` — "observing itself observing") and step 3 (training homeostasis). Those are next.
 
 What is built is the *body's* vital loop with the setpoint held as a plain memory. The closing of the circle —
 making the self genuinely the **trained GRU** — is three precise steps, each gated like everything else:

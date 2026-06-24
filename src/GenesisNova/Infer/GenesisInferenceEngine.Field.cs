@@ -44,6 +44,7 @@ public sealed partial class GenesisInferenceEngine
             (MeaningOpsEnabled && TryFieldAnalogy(toks, request, out r)) ||
             (MeaningOpsEnabled && TryFieldComposeMeaning(toks, request, out r)) ||
             TryFieldLearn(toks, request, out r) ||
+            (TalkEnabled && TryFieldRespond(request, out r)) ||
             TryFieldRelax(request, out r))
             return r;
 
@@ -450,6 +451,49 @@ public sealed partial class GenesisInferenceEngine
         return EmitField(frontier[0], $"field-meaning-tick[{string.Join(" -> ", trace)}]", request, out result);
     }
 
+    // ── RESPOND (talk-by-chunk, the first conductor step): a conversational cue is answered by FOLLOWING its learned
+    //    cue→reply RELATION to a reply chunk (not cloud-retrieval, which drifts to clustered cue words), with the SELF
+    //    picking which reply — the persona's voice + variety as the self evolves. The repertoire is the chunks the
+    //    word face holds; "talking" is the NN-conditioned selection among them.
+    private bool TryFieldRespond(GenerationRequest request, out GenerationResult result)
+    {
+        result = default!;
+        var ds = (DialecticalSpace)_memory;
+        // The cue key is the WHOLE utterance first (a multi-word cue "good morning" is stored as one composite — its
+        // reply relation lives there, not on the decomposed words), then the discriminative anchor as a fallback.
+        var keys = new List<string>();
+        var whole = (request.Input ?? string.Empty).Trim();
+        if (whole.Length > 0) keys.Add(whole);
+        keys.AddRange(PlatonicConceptAnchors.ExtractSpecific(ds, whole).Where(a => !IsFunctionWord(a)));
+
+        foreach (var key in keys.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            var replies = ds.GetNeighbors(key, PlatonicNeighborhoodType.Relational, maxNeighbors: 16, minConfidence: 0.0)
+                .Where(n => !n.Concept.Equals(key, StringComparison.OrdinalIgnoreCase) && !IsNumericLike(n.Concept)
+                         && !PlatonicSpaceMemory.IsReservedConcept(n.Concept) && !ds.IsOperationToken(n.Concept))
+                .OrderByDescending(n => n.Confidence).ToList();
+            if (replies.Count == 0) continue;
+
+            // The SELF picks the voice: among the cue's replies, the one whose meaning best fits who the mind has
+            // become — so the reply is in-character and varies as the conversation moves the self.
+            var pick = replies[0].Concept;
+            if (_selfField is not null && replies.Count > 1)
+            {
+                var best = double.NegativeInfinity;
+                foreach (var c in replies)
+                {
+                    var v = ds.SemanticVectorOf(c.Concept);
+                    if (v is null) continue;
+                    var sim = 0.0; for (var i = 0; i < v.Length && i < _selfField.Length; i++) sim += v[i] * _selfField[i];
+                    if (sim > best) { best = sim; pick = c.Concept; }
+                }
+            }
+            PerceiveIntoSelfField(ds, key); // the mind becomes a little of what it was asked
+            return EmitField(pick, "field-respond", request, out result);
+        }
+        return false;
+    }
+
     // ── LEARN (continuity / the continuous I): the mind is TOLD a fact ("the password is plum") and remembers it,
     //    so a later question recalls it. This is the self conditioning cognition across time — the same mind using
     //    what it has lived. Conservative: fires only on a clear assertion (a copula, a complete content object, NO
@@ -539,6 +583,11 @@ public sealed partial class GenesisInferenceEngine
     /// dispatch can't reach are BUILT mid-inference). Selection is a hand-coded heuristic here; handing the wheel to
     /// the NN (the director σ) is Stage 2. Default OFF — the dispatch is byte-identical until the NN drives it.</summary>
     public bool FieldTicksEnabled { get; set; }
+
+    /// <summary>CONVERSATION (talk-by-chunk, experimental). When true, a cue is answered by following its learned
+    /// cue→reply RELATION to a reply chunk and letting the SELF pick the voice — instead of cloud-retrieval, which
+    /// drifts to clustered cue words. The persona's repertoire is the chunks; the self is the character. Default OFF.</summary>
+    public bool TalkEnabled { get; set; }
 
     /// <summary>GENERATIVE MEANING OPS in the LARGE (word) face — the field reasons IN meaning-space, not just retrieves
     /// from it: COMPOSE two meanings into the concept that fits both ("red fruit" → apple), and ANALOGY by relation-

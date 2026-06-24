@@ -474,13 +474,15 @@ public sealed partial class GenesisInferenceEngine
                 .OrderByDescending(n => n.Confidence).ToList();
             if (replies.Count == 0) continue;
 
-            // The SELF picks the voice: among the cue's replies, the one whose meaning best fits who the mind has
-            // become — so the reply is in-character and varies as the conversation moves the self.
-            var pick = replies[0].Concept;
-            if (_selfField is not null && replies.Count > 1)
+            // The SELF picks the voice: among the cue's replies NOT just said (anti-repetition — an asshole doesn't
+            // loop one line), the one whose meaning best fits who the mind has become.
+            var pool = replies.Where(c => !RecentlySaid(c.Concept)).ToList();
+            if (pool.Count == 0) pool = replies;
+            var pick = pool[0].Concept;
+            if (_selfField is not null && pool.Count > 1)
             {
                 var best = double.NegativeInfinity;
-                foreach (var c in replies)
+                foreach (var c in pool)
                 {
                     var v = ds.SemanticVectorOf(c.Concept);
                     if (v is null) continue;
@@ -488,10 +490,39 @@ public sealed partial class GenesisInferenceEngine
                     if (sim > best) { best = sim; pick = c.Concept; }
                 }
             }
-            PerceiveIntoSelfField(ds, key); // the mind becomes a little of what it was asked
+            Spoke(pick); PerceiveIntoSelfField(ds, pick); // the mind becomes what it SAYS — the persona builds in the self
             return EmitField(pick, "field-respond", request, out result);
         }
-        return false;
+
+        // PERSONALITY GENERALISATION: no learned cue→reply edge (an UNSEEN cue) — but a personality isn't a lookup. If
+        // the self has a character (it has been saying rude things), say the reply CHUNK nearest that self, NOT one it
+        // just said: the asshole insults whatever you said, because its SELF is the asshole, not your memorised line.
+        var voice = NearestChunkToSelf(ds);
+        if (voice is null) return false;
+        Spoke(voice); PerceiveIntoSelfField(ds, voice);
+        return EmitField(voice, "field-respond-self", request, out result);
+    }
+
+    // The persona's working memory of what it just said — so it ROTATES through its repertoire instead of looping.
+    private readonly List<string> _recentReplies = new();
+    private bool RecentlySaid(string s) => _recentReplies.Contains(s, StringComparer.OrdinalIgnoreCase);
+    private void Spoke(string s) { _recentReplies.Add(s); while (_recentReplies.Count > 4) _recentReplies.RemoveAt(0); }
+
+    // The reply CHUNK (multi-word concept) nearest the current self, EXCLUDING what was just said — "what the persona
+    // would say next".
+    private string? NearestChunkToSelf(DialecticalSpace ds)
+    {
+        if (_selfField is null) return null;
+        string? best = null; var bestSim = double.NegativeInfinity;
+        foreach (var sym in ds.ActiveConcepts)
+        {
+            if (sym.IndexOf(' ') < 0 || RecentlySaid(sym) || PlatonicSpaceMemory.IsReservedConcept(sym)) continue;
+            var v = ds.SemanticVectorOf(sym);
+            if (v is null) continue;
+            var sim = 0.0; for (var i = 0; i < v.Length && i < _selfField.Length; i++) sim += v[i] * _selfField[i];
+            if (sim > bestSim) { bestSim = sim; best = sym; }
+        }
+        return best;
     }
 
     // ── LEARN (continuity / the continuous I): the mind is TOLD a fact ("the password is plum") and remembers it,

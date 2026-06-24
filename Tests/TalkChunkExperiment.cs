@@ -82,4 +82,45 @@ public sealed class TalkChunkExperiment
         _out.WriteLine($"in-character rate: {rate:P0} ({hits}/{probes.Count})");
         Assert.True(rate >= 0.7, $"the field must answer in the persona's voice; {rate:P0}");
     }
+
+    [Fact]
+    public void Persona_GeneralizesRudeness_ToUnseenCues()
+    {
+        var config = new GenesisNovaConfig(HiddenSize: ProductionDims.HiddenSize);
+        var tok = new WhitespaceGenesisTokenizer();
+        var space = new DialecticalSpace(config.FaceDimension, seed: 7);
+        var persona = new PersonalityCurriculum(trainPerCycle: 400);
+        var personaReplies = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (cue, reply) in persona.NextTrainBatch())
+        {
+            space.FineEditFromExample(new[] { cue }, new[] { reply }, isNegativeExample: false);
+            personaReplies.Add(reply);
+        }
+
+        var mind = new GenesisInferenceEngine(tok, new GenesisNeuralModel(config), space, null) { ConsciousField = true, TalkEnabled = true };
+
+        // WARM UP the self — the mind says rude things to seen cues, so its SELF becomes the asshole (it folds its own
+        // replies in). A personality is who you've BEEN, not a table.
+        for (var round = 0; round < 4; round++)
+            foreach (var cue in new[] { "hello", "thanks", "help", "bye", "sorry", "hi", "you good" })
+                mind.Generate(new GenerationRequest(cue, 12));
+
+        // UNSEEN inputs — NEVER in the persona's cue list (and not copula assertions). A lookup abstains; a personality
+        // stays in character. In-character = it said something the persona would say (a known rude line or a rude marker).
+        bool InCharacter(string s) => personaReplies.Contains(s) || PersonalityCurriculum.RudeMarkers.Any(m => s.Contains(m, StringComparison.OrdinalIgnoreCase));
+        var unseen = new[] { "can you do my taxes", "do you know python", "lets be friends", "tell me a joke", "make me a sandwich", "give me directions" };
+        var rude = 0; var distinct = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var u in unseen)
+        {
+            var r = mind.Generate(new GenerationRequest(u, 12));
+            var got = r.Output?.Trim() ?? "";
+            var inChar = InCharacter(got);
+            if (inChar) rude++;
+            distinct.Add(got);
+            _out.WriteLine($"  '{u}' -> '{got}' [{r.DecisionPath}] {(inChar ? "in-character" : "")}");
+        }
+        _out.WriteLine($"in-character on {rude}/{unseen.Length} UNSEEN inputs, {distinct.Count} distinct replies");
+        Assert.True(rude >= unseen.Length - 1, $"the asshole stays an asshole to unseen input; {rude}/{unseen.Length}");
+        Assert.True(distinct.Count >= 3, $"it varies its insults, not one looped line; {distinct.Count} distinct");
+    }
 }

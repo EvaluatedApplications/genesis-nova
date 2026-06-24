@@ -1,10 +1,12 @@
 <Solution>
+  <Folder Name="/NewFolder1/" />
   <Folder Name="/Solution Items/">
     <File Path="P2P_LEARNING_NETWORK.md" />
     <File Path="PLATONIC_SPACE.md" />
     <File Path="PROJECT_GLIDER.md" />
     <File Path="README.md" />
     <File Path="SPACE_AWARE_GRU.md" />
+    <Project Path="bench/RaceBench/RaceBench.csproj" />
   </Folder>
   <Folder Name="/src/">
     <Project Path="src/GenesisNova.csproj" />

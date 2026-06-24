@@ -4,6 +4,7 @@ using GenesisNova.Core;
 using GenesisNova.Data;
 using GenesisNova.Infer;
 using GenesisNova.Model;
+using GenesisNova.Runtime;
 using GenesisNova.Tokenization;
 using GenesisNova.Train;
 using RaceBench;
@@ -54,15 +55,18 @@ var tok = new WhitespaceGenesisTokenizer();
 foreach (var (i, o) in train.Concat(heldAll)) { tok.Encode(i); tok.Encode(o); }
 var vocab = tok.VocabularySize;
 
-// ── Build nova ────────────────────────────────────────────────────────────────────────────────────────
-var cfg = new GenesisNovaConfig(HiddenSize: HIDDEN, LearningRate: 0.05);
-var model = new GenesisNeuralModel(cfg);
-var memory = new PlatonicSpaceMemory(faceDimension: cfg.FaceDimension, seed: SEED);
-var novaTrainer = new GenesisTrainer(tok, model, memory, cfg);
-var inference = new GenesisInferenceEngine(tok, model, memory, null,
-    transformAccumulator: novaTrainer.TransformAccumulator, foldPathDiscovery: novaTrainer.FoldPathDiscovery);
-novaTrainer.SetInferencePolicy(inference);
-novaTrainer.TrainStep(new GenesisExample("0 + 0", "0"));
+// ── Build nova — the SAME brain the desktop app ships ───────────────────────────────────────────────────
+// GenesisRuntimeState is the canonical wiring (substrate selection + NovaConfig.ApplyTo + SetInferencePolicy);
+// .WithProductionMechanisms() turns on exactly what the app turns on (dialectical core + conscious field +
+// keep-core + the meaning-space self + function gradient). So the race tracks the app automatically — change a
+// mechanism in GenesisNovaConfig.WithProductionMechanisms() and the race follows. We choose only the small race
+// dims / seed / LR here (the equal-small-params contest).
+var cfg = new GenesisNovaConfig(HiddenSize: HIDDEN, LearningRate: 0.05, Seed: SEED).WithProductionMechanisms();
+var nova = new GenesisRuntimeState(cfg);
+var model = nova.Model;
+var novaTrainer = nova.Trainer;
+var inference = nova.Inference;
+novaTrainer.TrainStep(new GenesisExample("0 + 0", "0")); // force lazy params to initialise before counting
 var novaParams = model.ParameterCount();
 
 // ── Transformer sized to ≈ nova's (small) parameter count — EQUAL PARAMS, both small. The bet: nova's
@@ -88,7 +92,7 @@ Rule();
 P($"  device      : {dev.type}");
 P($"  curriculum  : {string.Join(", ", creators.Select(c => c.Name))}");
 P($"  data        : train {train.Count}   held-out {heldAll.Count}   tokenizer shared   (runs until a key is pressed)");
-P($"  nova        : {novaParams,10:N0} params   ~{NovaMB,5:F1} MB   (GRU controller + platonic substrate, SGD)");
+P($"  nova        : {novaParams,10:N0} params   ~{NovaMB,5:F1} MB   (conscious-field cognition over the dialectical substrate, SGD)");
 P($"  transformer : {xf.ParameterCount,10:N0} params   ~{XfMB,5:F1} MB   (d={best.d} L={best.L} h={best.h}, Adam)");
 P($"  budget      : EQUAL PARAMETERS, both SMALL — nova's structure needs little capacity; can a transformer this size find it?");
 Rule();

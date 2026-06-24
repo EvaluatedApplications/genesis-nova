@@ -67,4 +67,22 @@ public sealed record GenesisNovaConfig(
     /// vector alignment — so the substrate width can be chosen separately from the controller capacity.
     /// </summary>
     public int FaceDimension => Math.Max(4, FaceDimensionOverride > 0 ? FaceDimensionOverride : HiddenSize);
+
+    /// <summary>
+    /// THE PRODUCTION ARCHITECTURE — the single definition of "the mechanisms we actually ship", applied on top of
+    /// whatever infrastructure (dims, dirs, backend, seed) the caller has set. Turn the conscious-field cognition on
+    /// (DialecticalSpace substrate + field-relaxation, KeepCore seam, the meaning-space self) and the function
+    /// gradient. The desktop app (MainWindow) AND the benchmark (RaceBench) both build from this, so the race always
+    /// runs the same brain the app does — change a mechanism HERE, in one place, and both follow. (Mechanism toggles
+    /// only; deployment infra stays on the caller's config.)
+    /// </summary>
+    public GenesisNovaConfig WithProductionMechanisms() => this with
+    {
+        UseDialecticalCore = true,    // the ground-up dialectical substrate (required by the conscious field)
+        ConsciousField = true,        // think by field-relaxation; bypass the route/plan/op classifier
+        KeepCoreControl = true,       // substrate-confidence control + discriminative-anchor seam + abstain
+        LivingSelf = true,            // the meaning-space self conditions ambiguous reasoning
+        FunctionGradientEnabled = true, // Rung 2 — descend the function gradient alongside Rung 1 disruption
+        EdgeRoutingEnabled = true,    // full retrieval ladder available (default, pinned here for clarity)
+    };
 }

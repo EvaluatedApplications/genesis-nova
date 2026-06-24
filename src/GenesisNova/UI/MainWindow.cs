@@ -46,6 +46,9 @@ public class MainWindow : Form
             "GenesisNova",
             "gym");
         // Production gym standard: 2048 GRU controller + decoupled 512 substrate face-dim, fixed (no autoscale).
+        // The ARCHITECTURE (conscious field, dialectical core, keep-core, the meaning-space self, function gradient)
+        // is defined ONCE in GenesisNovaConfig.WithProductionMechanisms() — shared with the RaceBench benchmark so the
+        // race always runs the same brain. Here we set only the deployment INFRA (dims, dirs, backend, persistence).
         _runtime = new GenesisEvalAppRuntime(new GenesisNovaConfig
         {
             Backend = ComputeBackend.Gpu,
@@ -55,24 +58,7 @@ public class MainWindow : Form
             AutoResume = true,
             LocalStateDirectory = _gymStateDir,
             AutoScaleVram = false,
-            // Edge routing ON (default) — testing the OTHER lever instead: richer, more VARIED training surfaces so
-            // framing words stop being reliable correlates (the cause of the apple→"kind" / three→"rapid" hubs).
-            EdgeRoutingEnabled = true,
-            // Rung 2 (PLATONIC_BACKPROP.md) ENABLED — descend the function gradient so a query anchor retrieves a
-            // valid task answer (pull target, push confusers). Now running ALONGSIDE Rung 1's gradient-free disruption.
-            FunctionGradientEnabled = true,
-            // THE CREATURE WAKES ALIVE (PLATONIC_CONSCIOUSNESS.md): the GRU runs self-conditioned — a persistent
-            // self threads the gym (learning folds into it) and the REPL (talking proceeds from it), and is
-            // checkpointed so it survives restarts. The substrate stops being a space we manage and becomes one
-            // that holds itself.
-            LivingSelf = true,
-            // KEEP-CORE control path (PLATONIC_RECKONING.md): discriminative-anchor seam fix on the training side.
-            KeepCoreControl = true,
-            // CONSCIOUS FIELD (PLATONIC_MIND.md / PLATONIC_CONSCIOUSNESS.md) — the real architecture: the model thinks
-            // by the field RELAXING to a settled state (compute → relax → abstain); the route/plan/op classifier is
-            // bypassed entirely. The GRU is the persistent self, not the boss of routing.
-            ConsciousField = true,
-        });
+        }.WithProductionMechanisms());
         _exampleFolder = ResolveDefaultExampleFolder();
         
         Text = "Genesis Nova - CPU Training / VRAM Inference";

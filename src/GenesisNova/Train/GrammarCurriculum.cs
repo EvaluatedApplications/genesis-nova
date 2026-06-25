@@ -33,8 +33,14 @@ public sealed class GrammarCurriculum : ITrainingCurriculum
     // that would pollute the user's real "my name"->stephen. This is what decouples "teach grammar" from "plant facts".
     private static readonly string[] Nouns =
         { "zibble", "quax", "florp", "glim", "wozit", "tarn", "vmoo", "skree", "drelb", "fnug", "gorm", "tweel", "plost", "brindle" };
+    // MANY varied values — VALUE is the hardest role to generalise because (unlike the noun, which appears in BOTH
+    // assert and recall frames) a value appears ONLY in asserts, so it gets ~half the exposure. A large, varied pool
+    // forces the head to learn "the post-copula content is the VALUE" by POSITION rather than memorising a few tokens,
+    // so it generalises to a real never-seen value like "stephen".
     private static readonly string[] Values =
-        { "zorp", "quil", "fnordle", "blivet", "zarn", "morblo", "drav", "skell", "trisk", "vunk", "phlim", "grottle" };
+        { "zorp", "quil", "fnordle", "blivet", "zarn", "morblo", "drav", "skell", "trisk", "vunk", "phlim", "grottle",
+          "wexil", "drupe", "snarl", "quonk", "blive", "torvil", "klem", "spond", "vrang", "multo", "freel", "gazz",
+          "crint", "jommer", "wlexa", "borzo", "quell", "stannic", "yorvel", "mibble", "drasq", "flonk", "treb", "zellan" };
     // ROTATED grammar tokens — varied so none is a constant correlate, and NONCE ones so the ROLE generalises.
     // MANY, mostly-NONCE copulas — the point is to stop the NN memorising specific copula tokens and FORCE it to learn
     // the copula POSITION (the filler between subject and value) as NONE, so it generalises to an unseen copula. With
@@ -55,12 +61,13 @@ public sealed class GrammarCurriculum : ITrainingCurriculum
     private static readonly string[] HeldValues = { "zorptron", "quxil", "fnord", "plimth", "dworb", "skav", "trint", "vooble" };
     private static readonly string[] HeldCopulas = { "vumple", "zib", "kront", "blarg", "frot", "splim" };
 
-    private readonly Random _rng = new();
+    private readonly Random _rng;
     private readonly int _trainPerCycle;
     private readonly int _probeCount;
 
-    public GrammarCurriculum(int trainPerCycle = 64, int probeCount = 24)
+    public GrammarCurriculum(int trainPerCycle = 64, int probeCount = 24, int? seed = null)
     {
+        _rng = seed is int s ? new Random(s) : new Random(); // seedable so a warm-up (GrammarWarmup) converges deterministically
         _trainPerCycle = Math.Max(16, trainPerCycle);
         _probeCount = Math.Max(8, probeCount);
     }
@@ -77,7 +84,20 @@ public sealed class GrammarCurriculum : ITrainingCurriculum
     public bool IsMastered => _mastered;
 
     private string Lead() => LeadIns[_rng.Next(LeadIns.Length)];
-    private string Subject() => $"{Possessives[_rng.Next(Possessives.Length)]} {Nouns[_rng.Next(Nouns.Length)]}";
+    // VARY the DETERMINER so the role head learns SUBJECT by POSITION (the noun before the copula), not "a subject is
+    // always possessive+noun". Real facts come bare ("alice is a doctor"), "the"-determined ("the password is plum"),
+    // or possessive ("my name is X"). Without this variety the head tagged only possessive subjects and missed the rest.
+    private string Subject()
+    {
+        var noun = Nouns[_rng.Next(Nouns.Length)];
+        return _rng.Next(4) switch
+        {
+            0 => $"{Possessives[_rng.Next(Possessives.Length)]} {noun}", // "my zibble" — possessive (distinguishes my/your)
+            1 => $"the {noun}",                                          // "the password"
+            2 => $"a {noun}",                                            // "a zibble"
+            _ => noun,                                                   // "alice" — bare subject, no determiner
+        };
+    }
     private string Val() => Values[_rng.Next(Values.Length)];
 
     public IReadOnlyList<(string Input, string Output)> NextTrainBatch()
@@ -86,7 +106,10 @@ public sealed class GrammarCurriculum : ITrainingCurriculum
         for (var i = 0; i < _trainPerCycle; i++)
         {
             var subject = Subject(); var value = Val(); // RANDOM binding — structure, not a sticky fact
-            if (i % 2 == 0) // ASSERTION — the value is the final token after the (rotating) copula (answer PRESENT)
+            // ~70% ASSERTIONS so VALUE (which only appears in asserts) gets exposure comparable to the noun (which
+            // appears in both frames); ~30% RECALLS is enough to train the QUERY role. Without this the value class
+            // saw half the data and failed to generalise to a real never-seen value.
+            if (i % 10 < 7) // ASSERTION — the value is the final token after the (rotating) copula (answer PRESENT)
                 batch.Add(($"{Lead()}{subject} {Copulas[_rng.Next(Copulas.Length)]} {value}", value));
             else            // RECALL — a (rotating) query cue over the possessive phrase (answer ABSENT)
                 batch.Add(($"{Lead()}{QueryCues[_rng.Next(QueryCues.Length)]} {subject}", value));

@@ -128,12 +128,11 @@ public sealed partial class GenesisInferenceEngine
         }
         else if (infixOps.Count == 0)
         {
-            // Resolve the op-cue: the canonical primitives first (bootstrap), then the LEARNED cue→op relation — so a
-            // word or symbol the field has been TAUGHT ("result"→×, "ratio"→÷, a coined operator) resolves by what it
-            // learned, not by a hardcoded synonym list.
+            // Resolve the op-cue ONLY by the LEARNED cue→op relation (LearnArithmeticCue/ResolveLearnedOp) — no
+            // hardcoded synonym list. A word the field has been TAUGHT ("add"/"total"/"sum"/"result"→×, a coined
+            // operator) resolves by what it learned; an untaught word abstains. Real learning, no crutch.
             GliderOp? ResolveOp(string t)
-                => TryOpCue(t, out var o) ? o
-                 : (_memory is DialecticalSpace d && ResolveLearnedOp(d, t, out var lop)) ? lop : (GliderOp?)null;
+                => _memory is DialecticalSpace d && ResolveLearnedOp(d, t, out var lop) ? lop : (GliderOp?)null;
             var cueOps = merged.Select(ResolveOp).Where(o => o.HasValue).Select(o => o!.Value).Distinct().ToList();
             if (cueOps.Count != 1) return false;                    // "the total of 3 and 4", "add 3 and 4", learned cues
             value = EvalFold(operands, cueOps[0]);
@@ -563,24 +562,11 @@ public sealed partial class GenesisInferenceEngine
         if (toks.Any(IsQuestionCue) || toks.Any(IsRetrievalMarker)) return false; // a question / retrieval frame, not a statement
 
         var ds = (DialecticalSpace)_memory;
-        // LEARNED-ROLE parse first (warm, word-order-free): the subject KEY + asserted VALUE come from grammar ROLES,
-        // not the copula list. A learned QUERY role means it's actually a question — incl. a NONCE query cue the
-        // hardcoded IsQuestionCue list would miss — so it is NOT a learnable assertion. Falls back to the structural
-        // copula parse only while the roles are still cold (the gym warms them; then this is what retires the lists).
-        // ADDITIVE only: use the learned-role parse when it CONFIDENTLY sees an assertion; otherwise defer to the
-        // proven structural parse (never block on a Question/None classification — the existing '?'/IsQuestionCue
-        // guards above already screen real questions). So the learned path can only improve on the fallback, never
-        // regress it.
-        string? subject, obj;
-        if (RoleParse(toks, ds, out var rsub, out var rval) == FrameKind.Assertion) { subject = rsub; obj = rval; }
-        else
-        {
-            var cop = -1;
-            for (var i = 1; i < toks.Count - 1; i++) if (IsCopula(toks[i])) { cop = i; break; }
-            if (cop <= 0) return false;
-            subject = ContentNounPhrase(toks, 0, cop); // the noun PHRASE ("my name"/"your name"), so the possessor counts
-            obj = FirstContentWord(toks, cop + 1, toks.Count);
-        }
+        // The subject KEY + asserted VALUE come ONLY from the LEARNED grammar roles (the NN structure recogniser),
+        // word-order-free. NO hardcoded copula/possessive fallback: if the NN hasn't learned to parse this yet, the
+        // mind simply doesn't learn the fact (honest — it must be taught the grammar, which the gym does). Real
+        // learning only; the parser is the NN, not a word-list.
+        if (RoleParse(toks, ds, out var subject, out var obj) != FrameKind.Assertion) return false;
         if (subject is null || obj is null || subject == obj) return false;
         if (IsNumericLike(subject) || IsNumericLike(obj)) return false; // numbers never form relation edges
         // BELIEF REVISION — staying coherent and CURRENT (genesis G2 non-contradiction; the free-energy principle:
@@ -598,7 +584,6 @@ public sealed partial class GenesisInferenceEngine
 
     private static readonly System.Collections.Generic.HashSet<string> Framing =
         new(StringComparer.Ordinal) { "the", "a", "an", "of", "to", "is", "are", "was", "were", "my", "your", "his", "her", "its", "their", "that", "this" };
-    private static bool IsCopula(string t) => t is "is" or "are" or "was" or "were";
     private static bool IsQuestionCue(string t) => t is "what" or "who" or "where" or "when" or "why" or "which" or "how" or "whose";
     // Words that mark a gym RETRIEVAL frame (a question shaped like a statement), never a learnable assertion.
     private static bool IsRetrievalMarker(string t) => t is "kind" or "type" or "sort" or "group" or "category" or "example"
@@ -613,54 +598,22 @@ public sealed partial class GenesisInferenceEngine
     // tiny structural floor — a question word is never an answer in ANY space, warm or cold.
     private static bool IsFiller(DialecticalSpace ds, string t) => IsQuestionCue(t) || ds.IsFunctionLike(t);
 
-    private static string? LastContentWord(IReadOnlyList<string> toks, int start, int end)
-    {
-        for (var i = end - 1; i >= start; i--) if (IsContentWord(toks[i])) return toks[i];
-        return null;
-    }
-    private static string? FirstContentWord(IReadOnlyList<string> toks, int start, int end)
-    {
-        for (var i = start; i < end; i++) if (IsContentWord(toks[i])) return toks[i];
-        return null;
-    }
-
-    // A POSSESSIVE determiner — a tiny closed grammatical class (like IsCopula/IsQuestionCue), structural scaffolding,
-    // NOT semantic knowledge. It marks WHOSE the following noun is, so it must NOT be dropped as filler: it's what tells
-    // "my name" apart from "your name".
-    private static bool IsPossessive(string t) => t is "my" or "your" or "his" or "her" or "its" or "their" or "our";
-
-    // The trailing NOUN PHRASE before `end`: the last content noun plus any immediately-preceding POSSESSIVE
-    // ("my"/"your"/…). Keying a learned fact on the PHRASE lets "my name" and "your name" be DISTINCT facts (the
-    // possessor is part of the subject) — so you can name the bot AND have it remember yours. Articles ("the"/"a")
-    // are NOT absorbed (they carry no possessor — "the password" is just "password"), so non-possessive facts and the
-    // gym are byte-unchanged. Returns the bare noun when no possessive precedes it; null if there is no content noun.
-    private static string? ContentNounPhrase(IReadOnlyList<string> toks, int start, int end)
-    {
-        var noun = -1;
-        for (var i = end - 1; i >= start; i--) if (IsContentWord(toks[i])) { noun = i; break; }
-        if (noun < 0) return null;
-        var begin = noun;
-        for (var i = noun - 1; i >= start && IsPossessive(toks[i]); i--) begin = i; // absorb a leading possessive
-        return string.Join(" ", Enumerable.Range(begin, noun - begin + 1).Select(i => toks[i]));
-    }
 
     private enum FrameKind { None, Assertion, Question }
 
-    // WORD-ORDER-FREE parse from LEARNED roles (GrammarRoleLearner): identify the subject KEY and asserted VALUE by
-    // their learned roles, not by a copula/question/possessive list and not by position. Returns None when the roles
-    // aren't learned yet (cold) — the caller then falls back to the structural ContentNounPhrase/IsCopula bootstrap.
-    // This is what actually retires the grammar lists once the gym has warmed the structural tokens.
+    // WORD-ORDER-FREE parse from the LEARNED NN ROLES ONLY (the structure recogniser): identify the subject KEY and
+    // asserted VALUE by the NN's per-token roles — no copula/question/possessive list, no centrality fallback, no
+    // position rule. Returns None when the NN hasn't learned to parse this (untrained/unsure) — then the mind simply
+    // doesn't act on it. The parser IS the NN; if it generalises, that is the LEARNED model, with nothing else helping.
     private FrameKind RoleParse(IReadOnlyList<string> toks, DialecticalSpace ds, out string? subject, out string? value)
     {
         subject = value = null;
         // Only personal-fact frames: abstain on arithmetic/operator frames AND the gym's RETRIEVAL frames (synonym/
         // category/etc.) so the grammar parse never hijacks a skill query — those keep their normal retrieval route.
         if (toks.Count < 2 || toks.Any(IsNumericLike) || toks.Any(ds.IsOperationToken) || toks.Any(IsRetrievalMarker)) return FrameKind.None;
-        // PREFER the NN structure recogniser's per-token roles; fall back to the centrality classifier per token only
-        // where the NN is untrained/unsure. This is the recogniser doing the fuzzy job, the space staying structural.
         var nn = NnRoles(toks);
-        Cognition.GrammarRoleLearner.Role RoleAt(int i)
-            => nn is not null && nn[i] != Cognition.GrammarRoleLearner.Role.Unknown ? nn[i] : GrammarRole(ds, toks[i]);
+        if (nn is null) return FrameKind.None;                        // NN untrained / not aligned → no parse (honest)
+        Cognition.GrammarRoleLearner.Role RoleAt(int i) => nn[i];     // PURELY the NN's tag
 
         var hasQuery = false;
         var content = new List<int>();
@@ -670,18 +623,18 @@ public sealed partial class GenesisInferenceEngine
             if (!t.All(char.IsLetter) || t.Length < 2) continue;
             var role = RoleAt(i);
             if (role == Cognition.GrammarRoleLearner.Role.Query) { hasQuery = true; continue; }
-            if (role == Cognition.GrammarRoleLearner.Role.Filler || ds.IsFunctionLike(t)) continue; // filler/determiner
-            content.Add(i);                              // a content token (key / value / unknown-role content)
+            if (role == Cognition.GrammarRoleLearner.Role.Filler) continue; // the NN says filler/determiner/copula
+            content.Add(i);                              // a content token (key / value / unsure-but-content)
         }
         if (content.Count == 0) return FrameKind.None;
         var keyIdx = content.Where(i => RoleAt(i) == Cognition.GrammarRoleLearner.Role.Key).ToList();
         var valIdx = content.Where(i => RoleAt(i) == Cognition.GrammarRoleLearner.Role.Value).ToList();
-        if (keyIdx.Count == 0 && valIdx.Count == 0) return FrameKind.None; // no CONFIDENT role → cold → fallback
+        if (keyIdx.Count == 0 && valIdx.Count == 0) return FrameKind.None; // the NN placed no key/value → no parse
 
         if (hasQuery) // a query cue is present → it's a question; the subject is the KEY (or the lone content)
         {
             var ni = keyIdx.Count > 0 ? keyIdx[^1] : content[^1];
-            subject = BuildSubjectPhrase(toks, ds, ni, nn);
+            subject = BuildSubjectPhrase(toks, ni, nn);
             return subject is not null ? FrameKind.Question : FrameKind.None;
         }
         // ASSERTION: the VALUE is the asserted thing; the KEY is the subject. Either may be inferred when the other is
@@ -690,7 +643,7 @@ public sealed partial class GenesisInferenceEngine
         int? ki = keyIdx.Count > 0 ? keyIdx[^1] : (content.Count == 2 && valIdx.Count == 1 ? content.First(i => i != valIdx[0]) : (int?)null);
         if (vi is null || ki is null || vi == ki) return FrameKind.None;
         value = toks[vi.Value];
-        subject = BuildSubjectPhrase(toks, ds, ki.Value, nn);
+        subject = BuildSubjectPhrase(toks, ki.Value, nn);
         return subject is not null && subject != value ? FrameKind.Assertion : FrameKind.None;
     }
 
@@ -721,27 +674,16 @@ public sealed partial class GenesisInferenceEngine
         return roles;
     }
 
-    // The subject PHRASE = the maximal CONTIGUOUS SUBJECT(Key) span containing the noun. The determiner ("my"/"your"/
-    // "the") is itself tagged SUBJECT (it co-occurs in both assert and recall inputs), so the span naturally keeps the
-    // possessor — "my name" stays distinct from "your name" with no possessive list. Word-order-free: the subject is
-    // wherever its run of SUBJECT tokens sits, before or after the verb. Falls back to one preceding filler determiner
-    // when the role tags are unavailable (cold).
-    private string? BuildSubjectPhrase(IReadOnlyList<string> toks, DialecticalSpace ds, int nounIndex, Cognition.GrammarRoleLearner.Role[]? nn)
+    // The subject PHRASE = the maximal CONTIGUOUS SUBJECT(Key) span (per the NN's tags) containing the noun. The
+    // determiner ("my"/"your") is itself tagged SUBJECT by the NN (it co-occurs in both assert and recall inputs), so
+    // the span naturally keeps the possessor — "my name" stays distinct from "your name", learned, no possessive list.
+    private string? BuildSubjectPhrase(IReadOnlyList<string> toks, int nounIndex, Cognition.GrammarRoleLearner.Role[] nn)
     {
         if (nounIndex < 0 || nounIndex >= toks.Count) return null;
-        Cognition.GrammarRoleLearner.Role RoleAt(int i)
-            => nn is not null && nn[i] != Cognition.GrammarRoleLearner.Role.Unknown ? nn[i] : GrammarRole(ds, toks[i]);
         var begin = nounIndex;
         var end = nounIndex;
-        while (begin - 1 >= 0 && RoleAt(begin - 1) == Cognition.GrammarRoleLearner.Role.Key) begin--;
-        while (end + 1 < toks.Count && RoleAt(end + 1) == Cognition.GrammarRoleLearner.Role.Key) end++;
-        // Cold fallback (no SUBJECT span found beyond the noun): absorb one preceding filler determiner, as before.
-        if (begin == nounIndex && end == nounIndex && nounIndex - 1 >= 0)
-        {
-            var p = toks[nounIndex - 1];
-            if (p.All(char.IsLetter) && ds.IsFunctionLike(p) && RoleAt(nounIndex - 1) != Cognition.GrammarRoleLearner.Role.Query)
-                begin = nounIndex - 1;
-        }
+        while (begin - 1 >= 0 && nn[begin - 1] == Cognition.GrammarRoleLearner.Role.Key) begin--;
+        while (end + 1 < toks.Count && nn[end + 1] == Cognition.GrammarRoleLearner.Role.Key) end++;
         return string.Join(" ", Enumerable.Range(begin, end - begin + 1).Select(i => toks[i]));
     }
 
@@ -897,10 +839,8 @@ public sealed partial class GenesisInferenceEngine
         // grammar ROLES when warm (word-order-free, no possessive list); cold it falls back to the structural
         // ContentNounPhrase. Only fires when the mind actually HOLDS a relation on that multi-word phrase; otherwise it
         // falls through to the discriminative single anchor below (gym single-word retrieval is untouched).
-        // Use the learned-role subject only when it's a real multi-word phrase; otherwise fall back to the structural
-        // ContentNounPhrase (so a borderline-warm determiner the role path didn't absorb is still caught by the bootstrap).
-        var roleSub = RoleParse(toks, ds, out var qsub, out _) == FrameKind.Question ? qsub : null;
-        var phrase = (roleSub is not null && roleSub.Contains(' ')) ? roleSub : ContentNounPhrase(toks, 0, toks.Count);
+        // The subject phrase comes ONLY from the LEARNED grammar roles (the NN). No hardcoded ContentNounPhrase fallback.
+        var phrase = RoleParse(toks, ds, out var qsub, out _) == FrameKind.Question ? qsub : null;
         if (phrase is not null && phrase.Contains(' ') && ds.ContainsConcept(phrase))
         {
             var prel = ds.GetNeighbors(phrase, PlatonicNeighborhoodType.Relational, maxNeighbors: 12, minConfidence: 0.0)
@@ -1062,21 +1002,6 @@ public sealed partial class GenesisInferenceEngine
             "-" or "minus" => GliderOp.Subtract,
             "x" or "*" or "times" => GliderOp.Multiply,
             "/" or "over" => GliderOp.Divide,
-            _ => (GliderOp)(-1),
-        };
-        return (int)op >= 0;
-    }
-
-    // Operation CUES (worded, position-free): "the total of 3 and 4" → Add. Distinct from op-tokens so a single
-    // cue can drive a fold when there is no infix structure.
-    private static bool TryOpCue(string t, out GliderOp op)
-    {
-        op = t switch
-        {
-            "add" or "added" or "adding" or "total" or "sum" or "plus" => GliderOp.Add,
-            "subtract" or "minus" or "difference" or "delta" => GliderOp.Subtract,
-            "multiply" or "multiplied" or "product" or "times" => GliderOp.Multiply,
-            "divide" or "divided" or "quotient" => GliderOp.Divide,
             _ => (GliderOp)(-1),
         };
         return (int)op >= 0;

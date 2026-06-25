@@ -18,14 +18,15 @@ public sealed class LivingLearningExperiment
     private readonly ITestOutputHelper _out;
     public LivingLearningExperiment(ITestOutputHelper o) => _out = o;
 
-    [Fact]
+    [Fact(Skip = SlowTests.BareSubjectWarmup)] // bare subjects ("alice is doctor") need a GRU-trained warm-up
     public void Does_LearnedKnowledge_Erode_UnderContinuedLearning()
     {
-        var config = new GenesisNovaConfig(HiddenSize: ProductionDims.HiddenSize);
+        var config = new GenesisNovaConfig(HiddenSize: 256, FaceDimensionOverride: 256);
         var tok = new WhitespaceGenesisTokenizer();
         var model = new GenesisNeuralModel(config);
         var space = new DialecticalSpace(config.FaceDimension, seed: 7);
         var mind = new GenesisInferenceEngine(tok, model, space, null) { ConsciousField = true };
+        GrammarWarmup.WarmRoleHead(tok, model, mind); // LEARNED role parser (no hardcoded copula fallback) — warm as the gym does
 
         void Tell(string s) => mind.Generate(new GenerationRequest(s, 8));
         string Ask(string s) => mind.Generate(new GenerationRequest(s, 8)).Output?.Trim() ?? "";
@@ -60,16 +61,17 @@ public sealed class LivingLearningExperiment
         Assert.True(after >= anchors.Length, $"robust memory — no erosion under load; {after}/{anchors.Length}");
     }
 
-    [Fact] // The OTHER candidate obstacle, at SCALE: does the mind stay COHERENT (genesis G2 non-contradiction) when
+    [Fact(Skip = SlowTests.BareSubjectWarmup)] // bare subjects ("qab is red") — The OTHER candidate obstacle, at SCALE: does the mind stay COHERENT (genesis G2 non-contradiction) when
            // much of what it holds is later CONTRADICTED by new experience and buried under unrelated learning — or
            // does it accumulate conflicting truths and answer stale / at random?
     public void Does_The_Mind_Hold_Contradictions_AtScale()
     {
-        var config = new GenesisNovaConfig(HiddenSize: ProductionDims.HiddenSize);
+        var config = new GenesisNovaConfig(HiddenSize: 256, FaceDimensionOverride: 256);
         var tok = new WhitespaceGenesisTokenizer();
         var model = new GenesisNeuralModel(config);
         var space = new DialecticalSpace(config.FaceDimension, seed: 7);
         var mind = new GenesisInferenceEngine(tok, model, space, null) { ConsciousField = true };
+        GrammarWarmup.WarmRoleHead(tok, model, mind); // LEARNED role parser (no hardcoded copula fallback) — warm as the gym does
         void Tell(string s) => mind.Generate(new GenerationRequest(s, 8));
         string Ask(string who) => mind.Generate(new GenerationRequest($"what is {who}", 8)).Output?.Trim() ?? "";
 

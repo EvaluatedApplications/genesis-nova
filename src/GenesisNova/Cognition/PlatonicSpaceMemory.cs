@@ -187,7 +187,12 @@ public sealed partial class PlatonicSpaceMemory : IPlatonicSpace
     /// they must NEVER be returned as a retrieval ANSWER, used as a retrieval anchor, or shown as an activated
     /// concept. They are not user-facing concepts.</summary>
     public static bool IsReservedConcept(string? concept)
-        => !string.IsNullOrEmpty(concept) && concept.StartsWith("face:", System.StringComparison.OrdinalIgnoreCase);
+        => !string.IsNullOrEmpty(concept)
+           && (concept.StartsWith("face:", System.StringComparison.OrdinalIgnoreCase)
+               // "∘"-prefixed = the INTERNAL arithmetic op anchors (∘add/∘sub/∘mul/∘div) that learned op-cues relate to.
+               // They are routing markers, never a vocabulary answer, so retrieval/relaxation must never emit one
+               // (else a synonym/category query that brushes a learned framing word surfaces "∘add" — see WarmOpCues).
+               || concept.StartsWith("∘", System.StringComparison.Ordinal));
 
     /// <summary>The magnitude of separation the contrastive dynamics (pull related / push unrelated) achieved.</summary>
     public sealed record GeometrySummary(

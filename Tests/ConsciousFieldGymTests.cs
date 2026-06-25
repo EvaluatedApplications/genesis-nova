@@ -34,6 +34,7 @@ public sealed class ConsciousFieldGymTests
         var model = new GenesisNeuralModel(config);
         var space = new DialecticalSpace(config.FaceDimension, seed: 7);
         var infer = new GenesisInferenceEngine(tok, model, space, null) { ConsciousField = true };
+        GrammarWarmup.WarmOpCues(infer); // worded op-cues ("plus"/"product") are LEARNED, not hardcoded — teach them (fast, no GRU training)
 
         static IReadOnlyList<string> Words(string s) =>
             s.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
@@ -104,6 +105,7 @@ public sealed class ConsciousFieldGymTests
         var config = new GenesisNovaConfig(HiddenSize: ProductionDims.HiddenSize);
         var infer = new GenesisInferenceEngine(new WhitespaceGenesisTokenizer(), new GenesisNeuralModel(config),
             new DialecticalSpace(config.FaceDimension, seed: 7), null) { ConsciousField = true };
+        GrammarWarmup.WarmOpCues(infer); // worded op-cues ("plus") are LEARNED, not hardcoded
         var items = new (string Prompt, string Expected)[]
         {
             ("1 + 1", "2"), ("9 - 2", "7"), ("3 x 4", "12"), ("2 + 5 + 3", "10"), ("3 x 4 + 2", "14"),

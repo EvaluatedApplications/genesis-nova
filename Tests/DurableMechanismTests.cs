@@ -21,7 +21,7 @@ public sealed class DurableMechanismTests
     private readonly ITestOutputHelper _out;
     public DurableMechanismTests(ITestOutputHelper o) => _out = o;
 
-    [Fact]
+    [SlowFact] // warms the LEARNED role parser (belief-revision/recall assert "qzx is red" via NN roles, no hardcoded copula fallback)
     public void Mechanisms_SurviveInANoisyTrainedModel()
     {
         const int HIDDEN = 256, SEED = 7;
@@ -43,6 +43,10 @@ public sealed class DurableMechanismTests
         for (var epoch = 1; epoch <= 6; epoch++)
             foreach (var (i, o) in train.OrderBy(_ => rng.Next()))
                 if (!AnswerEquivalence.Equivalent(Gen(i), o)) nova.Trainer.TrainStep(new GenesisExample(i, o));
+
+        // Warm the LEARNED role parser (head-only, no space writes) so the belief-revision/recall asserts below parse
+        // through NN roles — production warms it via the gym; the engine has no hardcoded copula/possessive fallback.
+        GrammarWarmup.WarmRoleHead(nova);
 
         var ds = (DialecticalSpace)nova.Memory;
         void Rel(string a, string b) { for (var i = 0; i < 3; i++) ds.FineEditFromExample(new[] { a }, new[] { b }, false); }

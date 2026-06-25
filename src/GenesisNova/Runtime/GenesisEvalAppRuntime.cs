@@ -36,6 +36,10 @@ public sealed partial class GenesisEvalAppRuntime : ILearningRuntime
     private int _reloadCount;
     public int ReloadCount => _reloadCount;
 
+    /// <summary>The underlying runtime state (model/space/trainer). Test seam — lets tests warm the role head the way
+    /// the gym does in production, instead of relying on a (removed) hardcoded grammar fallback.</summary>
+    internal GenesisRuntimeState State => _state;
+
     public GenesisEvalAppRuntime(GenesisNovaConfig? config = null)
     {
         _runtimeConfig = config ?? new GenesisNovaConfig();

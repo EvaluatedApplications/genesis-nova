@@ -1437,6 +1437,11 @@ public class MainWindow : Form
             // bounded muscle (it can master), so it rides along with the gym and persona. See [[nova-learned-grammar-roles]].
             children.Add(new GrammarCurriculum(trainPerCycle: _gymTrainPerCycle));
             AppendOutput("[train] grammar: assert/recall frame (learns copula/question/possessive roles → name memory)");
+            // OP-CUES: the same de-hardcoding for arithmetic WORDS — "the product of x and y" resolves multiply by a
+            // LEARNED cue→op relation, not a baked-in synonym list (the engine has no TryOpCue). Clean worded frames feed
+            // LearnArithmeticCue; proven the learned path then carries sum/difference/product/quotient. See OpCueCurriculum.
+            children.Add(new OpCueCurriculum(trainPerCycle: _gymTrainPerCycle));
+            AppendOutput("[train] op-cues: worded arithmetic synonyms (learns sum/difference/product/quotient → op word, no hardcoded list)");
         }
         var personalityOn = GetControl<CheckBox>("CurPersonality")?.Checked ?? false;
         PersonalityCurriculum? persona = null;

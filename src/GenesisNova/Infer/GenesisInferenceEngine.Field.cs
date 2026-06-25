@@ -34,7 +34,21 @@ public sealed partial class GenesisInferenceEngine
         // ("1 + 1") — the field handles either, which the gym writes spaced but a person at the REPL may not.
         var toks = TokenizeField(request.Input);
 
-        if (TryFieldInduction(toks, request, out var r) ||
+        // COREFERENCE (gated, default off): bind an anaphor ("it/that/those/…") in the query to the most-recent
+        // referent from PRIOR turns and reason about the RESOLVED entity — within-conversation holding. Resolved in
+        // the input STRING because the routes read request.Input, not the token list.
+        if (CoreferenceEnabled)
+        {
+            var resolved = ResolveAnaphora(request.Input);
+            if (!string.Equals(resolved, request.Input, StringComparison.Ordinal))
+            {
+                request = request with { Input = resolved };
+                toks = TokenizeField(request.Input);
+            }
+        }
+
+        GenerationResult r;
+        if (TryFieldInduction(toks, request, out r) ||
             TryFieldPredicate(toks, request, out r) ||
             TryFieldArithmetic(toks, request, out r) ||
             TryFieldNumberWord(toks, request, out r) ||
@@ -47,9 +61,13 @@ public sealed partial class GenesisInferenceEngine
             (TalkEnabled && TryFieldRespondDirect(request, out r)) ||
             TryFieldRelax(request, out r) ||
             (TalkEnabled && TryFieldRespondGeneralize(request, out r)))
-            return r;
+        { /* r is set by the matching route */ }
+        else
+            r = FieldAbstain(); // high free-energy, no basin — speak nothing
 
-        return FieldAbstain(); // high free-energy, no basin — speak nothing
+        // Record this turn's salient entities so a later "it/that" can bind to them (most-recent last).
+        if (CoreferenceEnabled) RecordTurnReferents(request.Input);
+        return r;
     }
 
     // ── INDUCTION: few-shot in-context rule ("fn 2 is 4 fn 5 is 10 fn 3 is" → 6). Induce the consistent transform
@@ -607,9 +625,44 @@ public sealed partial class GenesisInferenceEngine
     }
 
     // The mind's recent FOCUS — the content it has been attending to, threaded across thoughts (the continuous I).
-    // It conditions reasoning as a tiebreaker for ambiguous queries.
+    // It conditions reasoning as a tiebreaker for ambiguous queries, and (with coreference on) is the referent buffer
+    // an anaphor binds to.
     private readonly List<string> _focus = new();
     private const int FocusSize = 4;
+
+    // ── WITHIN-CONVERSATION COREFERENCE (gated; experimental). The conscious field already threads working memory as
+    //    MEANING (_focus/_selfField) across turns; this makes the binding EXPLICIT so a follow-up "is it bigger?" /
+    //    "what about that?" resolves the anaphor to the entity the previous turn was about. Default OFF (byte-identical).
+    public bool CoreferenceEnabled { get; set; }
+    private static readonly System.Collections.Generic.HashSet<string> Anaphors =
+        new(StringComparer.OrdinalIgnoreCase) { "it", "its", "that", "this", "they", "them", "those", "these" };
+
+    // Replace whole-word anaphors in the query with the most-recent referent from PRIOR turns (the last entity the
+    // mind attended to). One referent for all anaphors in a turn — enough for "is it bigger than that".
+    private string ResolveAnaphora(string input)
+    {
+        if (_focus.Count == 0 || string.IsNullOrWhiteSpace(input)) return input;
+        var referent = _focus[^1];
+        var words = input.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        var changed = false;
+        for (var i = 0; i < words.Length; i++)
+            if (Anaphors.Contains(words[i])) { words[i] = referent; changed = true; }
+        return changed ? string.Join(' ', words) : input;
+    }
+
+    // After answering, push this turn's salient ENTITIES (content words that are real concepts, not framing/anaphor)
+    // onto the focus, most-recent last — so the next turn's "it/that" binds to what we were just talking about.
+    private void RecordTurnReferents(string input)
+    {
+        var ds = (DialecticalSpace)_memory;
+        foreach (var w in TokenizeField(input))
+        {
+            if (!IsContentWord(w) || IsFunctionWord(w) || IsRetrievalMarker(w) || IsNumericLike(w) || Anaphors.Contains(w)) continue;
+            if (!ds.ActiveConcepts.Contains(w, StringComparer.OrdinalIgnoreCase)) continue; // only known entities are referents
+            _focus.Remove(w); _focus.Add(w);
+        }
+        while (_focus.Count > FocusSize) _focus.RemoveAt(0);
+    }
 
     // THE PERSISTENT SELF, in the mind's own meaning-space (PLATONIC_CONSCIOUSNESS.md / "a self that LEARNS, not a
     // learning thing with a self tacked on"). Where _focus is the discrete last-N attention (working memory, evicted

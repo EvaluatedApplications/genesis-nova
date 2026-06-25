@@ -39,6 +39,27 @@ public sealed class FactRecallExperiment
         Assert.Contains("rex", dog, StringComparison.OrdinalIgnoreCase);
     }
 
+    // THE DEMO: name the BOT and remember the USER — two facts that share the noun "name" but differ in POSSESSOR
+    // ("my name" vs "your name"). They must NOT collide: naming the bot must not erase the user's name. The possessor
+    // distinguishes them with NO hardcoded possessive list — the determiner is part of the subject phrase.
+    [Fact]
+    public void Field_Distinguishes_MyName_From_YourName()
+    {
+        var config = new GenesisNovaConfig(HiddenSize: ProductionDims.HiddenSize);
+        var tok = new WhitespaceGenesisTokenizer();
+        var space = new DialecticalSpace(config.FaceDimension, seed: 7);
+        var mind = new GenesisInferenceEngine(tok, new GenesisNeuralModel(config), space, null) { ConsciousField = true };
+        string Say(string s) { var r = mind.Generate(new GenerationRequest(s, 8)); _out.WriteLine($"  '{s}' → '{r.Output?.Trim()}' [{r.DecisionPath}]"); return r.Output?.Trim() ?? ""; }
+
+        Say("my name is stephen");          // the USER's name
+        Say("your name is rex");            // NAME THE BOT (must not overwrite the user's name)
+        var mine = Say("what is my name");  // → stephen
+        var yours = Say("what is your name"); // → rex
+
+        Assert.Contains("stephen", mine, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("rex", yours, StringComparison.OrdinalIgnoreCase);
+    }
+
     // The actual REPL path: through GenesisEvalAppRuntime.PredictAsync (what the app's REPL calls), production
     // mechanisms on. Confirms it works there too, and probes which PHRASINGS the general path covers.
     [Fact]

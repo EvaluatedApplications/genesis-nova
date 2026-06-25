@@ -45,7 +45,7 @@ public sealed partial class GenesisInferenceEngine
             (MeaningOpsEnabled && TryFieldComposeMeaning(toks, request, out r)) ||
             TryFieldLearn(toks, request, out r) ||
             (TalkEnabled && TryFieldRespondDirect(request, out r)) ||
-            TryFieldRelax(request, out r) ||
+            TryFieldRelax(toks, request, out r) ||
             (TalkEnabled && TryFieldRespondGeneralize(request, out r)))
             return r;
 
@@ -566,7 +566,7 @@ public sealed partial class GenesisInferenceEngine
         for (var i = 1; i < toks.Count - 1; i++) if (IsCopula(toks[i])) { cop = i; break; }
         if (cop <= 0) return false;
 
-        var subject = LastContentWord(toks, 0, cop);
+        var subject = ContentNounPhrase(toks, 0, cop); // the noun PHRASE ("my name"/"your name"), so the possessor counts
         var obj = FirstContentWord(toks, cop + 1, toks.Count);
         if (subject is null || obj is null || subject == obj) return false;
         if (IsNumericLike(subject) || IsNumericLike(obj)) return false; // numbers never form relation edges
@@ -611,6 +611,26 @@ public sealed partial class GenesisInferenceEngine
     {
         for (var i = start; i < end; i++) if (IsContentWord(toks[i])) return toks[i];
         return null;
+    }
+
+    // A POSSESSIVE determiner — a tiny closed grammatical class (like IsCopula/IsQuestionCue), structural scaffolding,
+    // NOT semantic knowledge. It marks WHOSE the following noun is, so it must NOT be dropped as filler: it's what tells
+    // "my name" apart from "your name".
+    private static bool IsPossessive(string t) => t is "my" or "your" or "his" or "her" or "its" or "their" or "our";
+
+    // The trailing NOUN PHRASE before `end`: the last content noun plus any immediately-preceding POSSESSIVE
+    // ("my"/"your"/…). Keying a learned fact on the PHRASE lets "my name" and "your name" be DISTINCT facts (the
+    // possessor is part of the subject) — so you can name the bot AND have it remember yours. Articles ("the"/"a")
+    // are NOT absorbed (they carry no possessor — "the password" is just "password"), so non-possessive facts and the
+    // gym are byte-unchanged. Returns the bare noun when no possessive precedes it; null if there is no content noun.
+    private static string? ContentNounPhrase(IReadOnlyList<string> toks, int start, int end)
+    {
+        var noun = -1;
+        for (var i = end - 1; i >= start; i--) if (IsContentWord(toks[i])) { noun = i; break; }
+        if (noun < 0) return null;
+        var begin = noun;
+        for (var i = noun - 1; i >= start && IsPossessive(toks[i]); i--) begin = i; // absorb a leading possessive
+        return string.Join(" ", Enumerable.Range(begin, noun - begin + 1).Select(i => toks[i]));
     }
 
     // The mind's recent FOCUS — the content it has been attending to, threaded across thoughts (the continuous I).
@@ -692,10 +712,30 @@ public sealed partial class GenesisInferenceEngine
     // ── RELAX: recall what the mind HOLDS about the subject. RELATION-FIRST (follow the explicit association — robust
     //    to hub dilution at scale, where a populous category's distributional cloud washes out a member's signal),
     //    context-disambiguated, falling back to semantic relaxation over the clouds when there is no held association. ─
-    private bool TryFieldRelax(GenerationRequest request, out GenerationResult result)
+    private bool TryFieldRelax(IReadOnlyList<string> toks, GenerationRequest request, out GenerationResult result)
     {
         result = default!;
         var ds = (DialecticalSpace)_memory;
+
+        // PHRASE-SUBJECT FIRST — "what is my name" vs "what is your name" key on the whole noun PHRASE ("my name" /
+        // "your name"), so the possessor distinguishes the two held facts (no possessive list). Only when the mind
+        // actually HOLDS a relation on that multi-word phrase; otherwise fall through to the discriminative single
+        // anchor below (gym single-word retrieval is untouched — a one-word phrase skips this branch).
+        var phrase = ContentNounPhrase(toks, 0, toks.Count);
+        if (phrase is not null && phrase.Contains(' ') && ds.ContainsConcept(phrase))
+        {
+            var prel = ds.GetNeighbors(phrase, PlatonicNeighborhoodType.Relational, maxNeighbors: 12, minConfidence: 0.0)
+                .Where(n => !string.IsNullOrEmpty(n.Concept) && !PlatonicSpaceMemory.IsReservedConcept(n.Concept)
+                         && !ds.IsOperationToken(n.Concept) && !n.Concept.Equals(phrase, StringComparison.Ordinal))
+                .OrderByDescending(n => n.Confidence).ThenByDescending(n => n.ObservationCount).ToList();
+            if (prel.Count > 0 && (prel.Count == 1 || prel[0].Confidence > prel[1].Confidence + 0.15))
+            {
+                PerceiveIntoSelfField(ds, phrase);
+                return EmitPlatonicResult(prel[0].Concept, "field-relax", Math.Clamp(prel[0].Confidence, 0.0, 1.0),
+                    hops: 1, request, evidence: null, out result);
+            }
+        }
+
         // Drop FUNCTION WORDS (the/of/to/is..., what/who/where...) from the candidate subjects: when an arithmetic or
         // other prompt falls through to here, its framing words must not become the query's subject — nor the answer.
         // Without this the relaxation seeded on "what" / "to" / "of" emitted those very words instead of abstaining.

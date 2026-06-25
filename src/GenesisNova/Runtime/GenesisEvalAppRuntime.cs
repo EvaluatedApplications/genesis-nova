@@ -31,6 +31,10 @@ public sealed partial class GenesisEvalAppRuntime : ILearningRuntime
     // rebuilds the inference engine (TalkEnabled defaults off), so it must be RE-APPLIED after every Replace, else an
     // autosave mid-gym silently switches the persona off on the next predict. See SetConversationalMode / Replace.
     private bool _conversationalMode;
+    // Count of checkpoint RELOADS (state-Replace). A reload mid-training is the "weird on restart" hazard; surfaced so
+    // diagnostics/tests can assert the gym's OWN autosave does NOT trigger a self-reload on the next predict.
+    private int _reloadCount;
+    public int ReloadCount => _reloadCount;
 
     public GenesisEvalAppRuntime(GenesisNovaConfig? config = null)
     {

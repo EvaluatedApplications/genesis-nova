@@ -230,7 +230,19 @@ public sealed partial class GenesisEvalAppRuntime
     }
 
     public async Task SaveAsync(string path)
-        => _ = await WithModelGateAsync(async () => await _savePipeline.RunAsync(new GenesisSaveTaskData(path)));
+        => _ = await WithModelGateAsync(async () =>
+        {
+            await _savePipeline.RunAsync(new GenesisSaveTaskData(path));
+            // CRITICAL: advance the reload-on-change watermark to the file we just wrote. RefreshLatestStateForReplPredict
+            // reloads when the watched autosave file's write-time differs from this watermark — and AutoPersist writes
+            // that file on every save. Without this, the gym's OWN autosave bumps the timestamp and the next probe
+            // predict RELOADS the checkpoint we just wrote, tearing down + rebuilding model/space/trainer mid-run
+            // (a lossy self-reload that reverts in-RAM progress, wipes conversation, and desyncs levels). Our own save
+            // is never an "external change", so this is always correct.
+            if (GenesisLocalStateStore.TryResolveBootstrapCheckpoint(_runtimeConfig, out var watched))
+                TrackLoadedCheckpoint(watched);
+            return true;
+        });
 
     public async Task LoadAsync(string path)
         => _ = await WithModelGateAsync(async () =>
@@ -300,6 +312,7 @@ public sealed partial class GenesisEvalAppRuntime
     {
         var loaded = GenesisCheckpointStore.LoadForRuntime(path, _runtimeConfig);
         _state.Replace(loaded.Config, loaded.Tokenizer, loaded.Model, loaded.PlatonicSpace, loaded.Conversation, loaded.TrainerLearningStateJson);
+        _reloadCount++;
         _state.Inference.TalkEnabled = _conversationalMode; // Replace built a fresh engine — re-apply the session talk route
         _historyStore.Restore(loaded.AutonomousTraining);
         TrackLoadedCheckpoint(path);

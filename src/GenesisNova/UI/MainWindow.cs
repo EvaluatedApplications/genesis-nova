@@ -89,6 +89,11 @@ public class MainWindow : Form
         _autonomousTrainingCts?.Cancel();
         _autonomousTrainingCts?.Dispose();
         _autonomousTrainingCts = null;
+        // Persist SYNCHRONOUSLY on close. The gym's final save runs on a background task we don't await, so the
+        // process can exit mid-write → a half-written / model-vs-substrate-inconsistent checkpoint that reloads weird
+        // next launch. Block here (bounded) for one clean save after the gym has been told to stop. Run off the UI
+        // thread so the gate wait can't deadlock against the close.
+        try { Task.Run(() => _runtime.SaveAsync(_runtime.AutoCheckpointPath)).Wait(TimeSpan.FromSeconds(30)); } catch { }
         _replCommandGate.Dispose();
         base.OnFormClosed(e);
     }
@@ -1435,7 +1440,12 @@ public class MainWindow : Form
             // probes reinforce the chunks). See [[nova-talk-by-chunk]].
             try
             {
-                persona = new PersonalityCurriculum(trainPerCycle: _gymTrainPerCycle);
+                // Restore the persona's level across restarts (its chunks persist in the space checkpoint, so its
+                // level should too — otherwise it shows L1 against a space that already knows the full repertoire).
+                var personaStart = 1;
+                var personaLvlPath = Path.Combine(_gymStateDir, "personality-level.txt");
+                try { if (File.Exists(personaLvlPath) && int.TryParse(File.ReadAllText(personaLvlPath).Trim(), out var pl) && pl >= 1) personaStart = pl; } catch { }
+                persona = new PersonalityCurriculum(trainPerCycle: _gymTrainPerCycle, startLevel: personaStart);
                 _runtime.SeedConversationalChunks(persona.Repertoire);
                 _runtime.SetConversationalMode(true);
                 AppendOutput("[train] personality (rude chatbot): reply chunks SEEDED + talk route ON (graded as a probe-only unit, not decode-trained)");
@@ -1526,6 +1536,7 @@ public class MainWindow : Form
             {
                 lastPersonaLevel = persona.Level;
                 try { _runtime.SeedConversationalChunks(persona.Repertoire); } catch { }
+                try { File.WriteAllText(Path.Combine(_gymStateDir, "personality-level.txt"), persona.Level.ToString()); } catch { }
                 AppendOutput($"[train] personality LEVEL → {persona.Level} (new situation unlocked + seeded)");
             }
             UpdateGymStats(m);

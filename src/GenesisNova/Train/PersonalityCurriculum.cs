@@ -85,10 +85,11 @@ public sealed class PersonalityCurriculum : ITrainingCurriculum
     private readonly int _trainPerCycle;
     private readonly int _probeCount;
 
-    public PersonalityCurriculum(int trainPerCycle = 64, int probeCount = 24)
+    public PersonalityCurriculum(int trainPerCycle = 64, int probeCount = 24, int startLevel = 1)
     {
         _trainPerCycle = Math.Max(16, trainPerCycle);
         _probeCount = Math.Max(8, probeCount);
+        Level = Math.Max(1, startLevel); // restored across restarts so it doesn't re-climb from L1 each launch
     }
 
     public string Name => "personality";

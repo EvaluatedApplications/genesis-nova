@@ -83,14 +83,17 @@ public sealed class GymPersonalityDurabilityTests
         using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(minutes));
         var cycles = 0; System.Collections.Generic.IReadOnlyList<long>? lastOp = null;
         System.Collections.Generic.IReadOnlyList<UnitProgress>? lastUnits = null;
+        var lastPersonaLevel = persona.Level;
         var sw = Stopwatch.StartNew();
         try
         {
             await new GenesisModularTrainingOrchestrator().RunAsync(runtime, curriculum, options, m =>
             {
                 cycles++; lastOp = m.OpClassBalance; if (m.Units is { Count: > 0 }) lastUnits = m.Units;
+                // Persona level grew its pool → seed the newly-active intents.
+                if (persona.Level != lastPersonaLevel) { lastPersonaLevel = persona.Level; runtime.SeedConversationalChunks(persona.Repertoire); }
                 if (m.Cycle <= 3 || m.Cycle % 10 == 0)
-                    _out.WriteLine($"  cycle {m.Cycle,3}  diff {m.Difficulty}  acc {m.Accuracy,5:P0}  purity {m.RoutePurity,5:P0}  {sw.Elapsed.TotalSeconds:F0}s");
+                    _out.WriteLine($"  cycle {m.Cycle,3}  diff {m.Difficulty}  persona L{persona.Level}  acc {m.Accuracy,5:P0}  purity {m.RoutePurity,5:P0}  {sw.Elapsed.TotalSeconds:F0}s");
             }, cts.Token);
         }
         catch (OperationCanceledException) { /* time budget — expected */ }

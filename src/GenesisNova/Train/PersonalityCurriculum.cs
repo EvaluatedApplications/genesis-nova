@@ -92,28 +92,38 @@ public sealed class PersonalityCurriculum : ITrainingCurriculum
     }
 
     public string Name => "personality";
-    public int Difficulty => 1;
-    public int MasteryDepth => 1;
 
-    // The persona is retrieval (no difficulty ladder); "mastery" = it reliably talks IN CHARACTER. Track a held-bar
-    // so the unified progress view shows it as mastered once its in-character rate stays high, like any other lesson.
-    private int _inCharacterStreak;
+    // DIFFICULTY = a GROWING POOL of conversational SITUATIONS (intents), exactly like GymTrainer's BuildPool grows
+    // its fact pool with the level. At L1 the persona handles a base set of situations; each level deterministically
+    // unlocks one more intent until all of them are in play — so it has a real ladder to climb, not a flat L1.
+    public int Level { get; private set; } = 1;
+    public double MasteryBar { get; init; } = 0.80;
+    public int StableCyclesToAdvance { get; init; } = 3;
+    private const int BaseActiveIntents = 5;                                  // situations active at level 1
+    private int MaxLevel => Math.Max(1, Intents.Length - BaseActiveIntents + 1); // level at which ALL intents are in play
+    private int ActiveCount => Math.Min(Intents.Length, BaseActiveIntents + Level - 1);
+    private (string[] Cues, string[] Replies)[] ActiveIntents => Intents.Take(ActiveCount).ToArray();
+
+    public int Difficulty => Level;
+    public int MasteryDepth => MaxLevel;       // "mastered" only once the full repertoire is in play AND held in character
+    private int _streak;
     private bool _mastered;
     public bool IsMastered => _mastered;
 
-    /// <summary>The FULL deterministic repertoire (every cue → every one of its intent's reply CHUNKS). The gym SEEDS
-    /// these as whole-reply chunk associations so <c>TryFieldRespond</c> retrieves a reply as a CHUNK — the gym's
-    /// token-decode training never builds the multi-word reply as one concept, so without seeding the talk path finds
-    /// no chunk and drifts. See [[nova-talk-by-chunk]].</summary>
+    /// <summary>The deterministic repertoire AT THE CURRENT LEVEL (every cue → every reply CHUNK of each ACTIVE
+    /// intent). The gym SEEDS these as whole-reply chunk associations so <c>TryFieldRespond</c> retrieves a reply as a
+    /// CHUNK; it grows as the level climbs, so the host re-seeds when <see cref="Level"/> advances. See
+    /// [[nova-talk-by-chunk]].</summary>
     public IReadOnlyList<(string Cue, string Reply)> Repertoire =>
-        Intents.SelectMany(it => it.Cues.SelectMany(c => it.Replies.Select(r => (Cue: c, Reply: r)))).ToList();
+        ActiveIntents.SelectMany(it => it.Cues.SelectMany(c => it.Replies.Select(r => (Cue: c, Reply: r)))).ToList();
 
     public IReadOnlyList<(string Input, string Output)> NextTrainBatch()
     {
+        var active = ActiveIntents;
         var batch = new List<(string Input, string Output)>(_trainPerCycle);
         for (var i = 0; i < _trainPerCycle; i++)
         {
-            var intent = Intents[_rng.Next(Intents.Length)];
+            var intent = active[_rng.Next(active.Length)];
             var cue = intent.Cues[_rng.Next(intent.Cues.Length)];
             var reply = intent.Replies[_rng.Next(intent.Replies.Length)]; // FAN-OUT: cue → a random valid reply
             batch.Add((cue, reply));
@@ -125,10 +135,11 @@ public sealed class PersonalityCurriculum : ITrainingCurriculum
     {
         // Sample cues this cycle; grade each against the intent's replies ∪ universal rude markers (any present
         // = an emergent hit), with polite words as the competing vocabulary. Route-agnostic.
+        var active = ActiveIntents;
         var probes = new List<TrainingProbe>(_probeCount);
         for (var i = 0; i < _probeCount; i++)
         {
-            var intent = Intents[_rng.Next(Intents.Length)];
+            var intent = active[_rng.Next(active.Length)];
             var cue = intent.Cues[_rng.Next(intent.Cues.Length)];
             var allowed = intent.Replies.Concat(RudeMarkers).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
             probes.Add(new TrainingProbe(cue, allowed, RequiredDepth: 1, AnswerVocabulary: PoliteMarkers, RequirePlatonic: false));
@@ -138,9 +149,18 @@ public sealed class PersonalityCurriculum : ITrainingCurriculum
 
     public void RecordCycle(CycleGrade grade)
     {
-        // Held-bar mastery on the in-character rate (route-agnostic): masters once it talks in character for a few
-        // cycles, re-opens if it regresses — so the unified view reports a real, comparable state.
-        if (grade.Accuracy >= 0.8) { if (++_inCharacterStreak >= 3) _mastered = true; }
-        else { _inCharacterStreak = 0; if (grade.Accuracy < 0.65) _mastered = false; }
+        // Held-bar advancement on the in-character rate (route-agnostic), mirroring GymTrainer: hold the bar a few
+        // cycles → UNLOCK the next intent (Level++, growing the pool); at the full pool, held → MASTERED; a regression
+        // re-opens it. So the unified view reports a real, climbing level like every other lesson.
+        if (grade.Accuracy >= MasteryBar)
+        {
+            if (++_streak >= StableCyclesToAdvance)
+            {
+                _streak = 0;
+                if (Level < MaxLevel) Level++;
+                else _mastered = true;
+            }
+        }
+        else { _streak = 0; if (grade.Accuracy < MasteryBar - 0.15) _mastered = false; }
     }
 }

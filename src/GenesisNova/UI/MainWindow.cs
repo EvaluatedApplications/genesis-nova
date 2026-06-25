@@ -1475,7 +1475,7 @@ public class MainWindow : Form
         if (persona is not null)
             curriculum = new ProbeAlongsideCurriculum(curriculum, persona); // graded each cycle → shows in the list, kept alive
         var ct = _gymCts.Token;
-        _ = RunLowPriorityTrainingAsync(async () => { await GymLoopAsync(curriculum, gymChildren, ct); return 0; }, ct);
+        _ = RunLowPriorityTrainingAsync(async () => { await GymLoopAsync(curriculum, gymChildren, persona, ct); return 0; }, ct);
     }
 
     private void StopGym()
@@ -1493,7 +1493,7 @@ public class MainWindow : Form
     /// UNBOUNDED difficulty level. Runs on a low-priority background thread; renders to the training panels.
     /// REPL queries share the runtime safely via its internal model-ops gate.
     /// </summary>
-    private async Task GymLoopAsync(ITrainingCurriculum curriculum, IReadOnlyList<GymTrainer> gymChildren, CancellationToken ct)
+    private async Task GymLoopAsync(ITrainingCurriculum curriculum, IReadOnlyList<GymTrainer> gymChildren, PersonalityCurriculum? persona, CancellationToken ct)
     {
         AppendOutput($"[train] started: {curriculum.Name} (model {_gymStateDir})");
 
@@ -1508,6 +1508,7 @@ public class MainWindow : Form
             TrainOnFailureOnly = true,                 // don't reinforce already-correct answers; train only failures
         };
         var lastLevels = gymChildren.ToDictionary(g => g, g => g.Level);
+        var lastPersonaLevel = persona?.Level ?? 0;
         await orchestrator.RunAsync(_runtime, curriculum, options, m =>
         {
             _gymCycle = m.Cycle; _lastDifficulty = m.Difficulty; _lastLoss = m.Loss; _lastAcc = m.Accuracy; _lastRoute = m.RoutePurity; _lastConf = m.Confidence;
@@ -1518,6 +1519,14 @@ public class MainWindow : Form
                 lastLevels[g] = g.Level;
                 try { File.WriteAllText(Path.Combine(_gymStateDir, g.Name + "-level.txt"), g.Level.ToString()); } catch { }
                 AppendOutput($"[train] {g.Name} LEVEL → {g.Level}");
+            }
+            // The persona's level grows its pool — when it unlocks a new situation, SEED the now-larger repertoire so
+            // the freshly-active intents are retrievable before they're probed next cycle.
+            if (persona is not null && persona.Level != lastPersonaLevel)
+            {
+                lastPersonaLevel = persona.Level;
+                try { _runtime.SeedConversationalChunks(persona.Repertoire); } catch { }
+                AppendOutput($"[train] personality LEVEL → {persona.Level} (new situation unlocked + seeded)");
             }
             UpdateGymStats(m);
             // Op-head class-balance window [abstain,add,sub,mul,div] — one dominant entry = the head COLLAPSING (the

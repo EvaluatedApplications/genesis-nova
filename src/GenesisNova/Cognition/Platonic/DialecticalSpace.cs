@@ -615,6 +615,57 @@ public sealed class DialecticalSpace : IPlatonicSpace
     private double Dot(double[] a, double[] b) { var d = 0.0; for (var i = 0; i < _semLen; i++) d += a[i] * b[i]; return d; }
     private bool NormalizeVec(double[] v) { var s = 0.0; for (var i = 0; i < _semLen; i++) s += v[i] * v[i]; s = Math.Sqrt(s); if (s <= 1e-9) return false; for (var i = 0; i < _semLen; i++) v[i] /= s; return true; }
 
+    // ── LEARNED function-word signal (replaces the hardcoded stopword list). A function/framing word (the/of/for/with…)
+    //    co-occurs with EVERYTHING, so its meaning-CLOUD averages toward the global centroid; a content word points at
+    //    its own cluster, AWAY from the centroid — even a POPULAR content word, which is exactly where relation-DEGREE
+    //    fails (it conflates a high-degree hub like "fruit" with filler). So "function-likeness" = how CENTRAL a cloud
+    //    is. Measured (FunctionWordResearch) in a gym-warmed space: function 0.70–0.82 vs content 0.0–0.42, a clean gap
+    //    once training spreads function words across many contexts. GYM SKILLS ARE WARM-START — the field abilities that
+    //    consult this only ever run in a trained space, so the distribution exists. In a cold/tiny or low-variance space
+    //    the signal SELF-ABSTAINS (returns false → nothing is filtered), so it can never over-filter while bootstrapping.
+    private double[]? _fnCentroid;
+    private double _fnMean, _fnStd;
+    private int _fnStamp = -1;
+    private const int FnMinWarm = 48;     // below this the body's distribution isn't real yet — don't filter anything
+    private const double FnSigma = 0.5;   // filler = a centrality OUTLIER above the body's own mean (scale-adaptive)
+    private const double FnFloor = 0.45;  // absolute guard so a low-variance space can't flag specific content as filler
+
+    private void EnsureFunctionStats()
+    {
+        var count = _concepts.ActiveCount;
+        if (_fnCentroid != null && Math.Abs(count - _fnStamp) < Math.Max(16, count / 16)) return; // amortize the O(N) rebuild
+        var centroid = new double[_semLen];
+        var cens = new List<double[]>();
+        foreach (var e in _concepts.All) // mean of every living concept's UNIT cloud = the global centroid
+        {
+            if (e.Archived || e.Kind == ElementKind.Atom || FaceCodec.IsNumeric(e.Symbol)) continue;
+            var v = CloudOf(e); // already unit in the semantic region (FullFace normalizes it)
+            for (var i = 0; i < _semLen; i++) centroid[i] += v[i];
+            cens.Add(v);
+        }
+        NormalizeVec(centroid);
+        double sum = 0, sumSq = 0; // the body's centrality distribution (cosine of each cloud to the centroid)
+        foreach (var v in cens) { var c = Dot(v, centroid); sum += c; sumSq += c * c; }
+        var nn = Math.Max(1, cens.Count);
+        _fnMean = sum / nn;
+        _fnStd = Math.Sqrt(Math.Max(0.0, sumSq / nn - _fnMean * _fnMean));
+        _fnCentroid = centroid; _fnStamp = count;
+    }
+
+    /// <summary>Has this concept's meaning-cloud collapsed toward the global centroid — i.e. is it FILLER (a
+    /// function/framing word that co-occurs with everything) rather than content? Learned from the live distribution,
+    /// NOT a hardcoded list. Self-abstains (false) in a cold/low-variance space where the signal isn't real yet.</summary>
+    public bool IsFunctionLike(string concept)
+    {
+        if (_concepts.ActiveCount < FnMinWarm) return false;
+        EnsureFunctionStats();
+        if (_fnCentroid == null || _fnStd < 1e-6) return false;
+        var v = SemanticVectorOf(concept);
+        if (v == null) return false;
+        var cen = Dot(v, _fnCentroid);
+        return cen >= _fnMean + FnSigma * _fnStd && cen >= FnFloor;
+    }
+
     // ─────────────────────────────────────────────────────────────────────────────── Recognition hierarchy (M3)
     /// <summary>The outcome of <see cref="Recognize"/>: the recognized/composed symbol, a confidence, whether it was
     /// a WHOLE hit (remembered directly) vs composed fresh, and how much of it was built from KNOWN components.</summary>

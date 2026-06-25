@@ -217,8 +217,12 @@ public sealed partial class GenesisInferenceEngine
         var matches = OpAnchors.Where(a => Math.Abs(FieldStep(nums[0], a.Op, nums[1]) - answer) < 1e-6).ToList();
         if (matches.Count != 1) return;
         var anchor = matches[0].Anchor;
+        // Relate EVERY non-operand token to the op anchor — no filler pre-filter. An op cue ("plus") maps to ONE op
+        // across examples; a framing word ("what"/"is") appears with ALL ops, so it accrues COMPETING op relations and
+        // ResolveLearnedOp ABSTAINS on it. The competing-op abstention is the general de-hardcoded hygiene here — a
+        // centrality filter would wrongly drop "plus" too (an op cue is distributionally as spread as a framing word).
         foreach (var t in merged)
-            if (!IsNumericLike(t) && !IsFunctionWord(t)) // the cue token(s): non-operand, non-framing (word OR symbol)
+            if (!IsNumericLike(t))
                 ds.FineEditFromExample(new[] { t }, new[] { anchor }, isNegativeExample: false);
     }
 
@@ -279,8 +283,10 @@ public sealed partial class GenesisInferenceEngine
         var tokens = request.Input.Trim().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
         var operands = tokens.Where(t => double.TryParse(t, numStyle, inv, out _)).ToArray();
         if (operands.Length is not (1 or 2)) return false;
+        // No filler pre-filter on the cues: a framing word ("what"/"is") resolves to NO op (or competing ops →
+        // abstains) below, while an op cue ("plus") resolves to one — so non-op words harmlessly drop out of resolution.
         var cues = tokens.Where(t => t.Any(char.IsLetter)).Select(t => t.ToLowerInvariant().Trim('?', '!', '.', ',', ';', ':'))
-                         .Where(t => t.Length > 0 && !IsFunctionWord(t)).ToArray();
+                         .Where(t => t.Length > 0).ToArray();
         if (cues.Length == 0) return false;
 
         var ds = (DialecticalSpace)_memory;
@@ -336,7 +342,7 @@ public sealed partial class GenesisInferenceEngine
             var t = tok.Trim('?', '!', '.', ',', ';', ':');
             if (double.TryParse(t, ns, inv, out var v)) { items.Add((true, v, "", default!)); continue; }
             var lc = t.ToLowerInvariant();
-            if (t.Any(char.IsLetter) && !IsFunctionWord(lc) && ResolveTransform(ds, lc, out var fn, out var tr))
+            if (t.Any(char.IsLetter) && ResolveTransform(ds, lc, out var fn, out var tr)) // a framing word resolves to no transform → drops out
                 items.Add((false, 0, fn, tr));
         }
         // Stage-1 scope: a single operand fed through a CHAIN of >= 2 learned ops (the genuinely multi-step case the
@@ -410,7 +416,7 @@ public sealed partial class GenesisInferenceEngine
         result = default!;
         if (toks.Any(IsQuestionCue) || toks.Any(IsRetrievalMarker)) return false;
         var ds = (DialecticalSpace)_memory;
-        var content = toks.Where(t => IsContentWord(t) && !IsFunctionWord(t) && !IsNumericLike(t) && ds.ContainsConcept(t))
+        var content = toks.Where(t => IsContentWord(t) && !IsFiller(ds, t) && !IsNumericLike(t) && ds.ContainsConcept(t))
                           .Distinct(StringComparer.Ordinal).ToList();
         if (content.Count < 2) return false;
 
@@ -431,7 +437,7 @@ public sealed partial class GenesisInferenceEngine
         result = default!;
         if (toks.Any(IsQuestionCue) || toks.Any(IsRetrievalMarker)) return false;
         var ds = (DialecticalSpace)_memory;
-        var frontier = toks.Where(t => IsContentWord(t) && !IsFunctionWord(t) && !IsNumericLike(t) && ds.ContainsConcept(t))
+        var frontier = toks.Where(t => IsContentWord(t) && !IsFiller(ds, t) && !IsNumericLike(t) && ds.ContainsConcept(t))
                           .Distinct(StringComparer.Ordinal).ToList();
         if (frontier.Count < 3) return false;
         // The learned director gates the meaning cascade too (it is a compose, multi-step).
@@ -469,7 +475,7 @@ public sealed partial class GenesisInferenceEngine
         var keys = new List<string>();
         var whole = (request.Input ?? string.Empty).Trim();
         if (whole.Length > 0) keys.Add(whole);
-        keys.AddRange(PlatonicConceptAnchors.ExtractSpecific(ds, whole).Where(a => !IsFunctionWord(a)));
+        keys.AddRange(PlatonicConceptAnchors.ExtractSpecific(ds, whole).Where(a => !IsFiller(ds, a)));
 
         foreach (var key in keys.Distinct(StringComparer.OrdinalIgnoreCase))
         {
@@ -588,12 +594,13 @@ public sealed partial class GenesisInferenceEngine
         or "classified" or "belongs" or "synonym" or "word" or "means" or "meaning" or "similar" or "same" or "close" or "match" or "near" or "like";
     private static bool IsNumericLike(string t) => double.TryParse(t, NumberStyles.Float, CultureInfo.InvariantCulture, out _);
     private static bool IsContentWord(string t) => t.Length > 1 && t.All(char.IsLetter) && !Framing.Contains(t);
-    // Function words beyond the copula/article Framing set — prepositions/conjunctions that show up as filler in a
-    // prompt and must never leak out as a relaxed "answer".
-    private static readonly System.Collections.Generic.HashSet<string> FunctionWords =
-        new(StringComparer.Ordinal) { "by", "for", "with", "from", "in", "on", "at", "and", "or", "as", "into", "onto", "than" };
-    // A grammatical FUNCTION word (article/preposition/conjunction/copula or a question cue) — never a subject or answer.
-    private static bool IsFunctionWord(string t) => Framing.Contains(t) || FunctionWords.Contains(t) || IsQuestionCue(t);
+    // FILLER — a token that must never leak out as a subject / answer / cue. The OPEN class of function words
+    // (prepositions/conjunctions/articles: of/for/with/the/by/from…) is now LEARNED from the space's own centrality
+    // distribution (DialecticalSpace.IsFunctionLike — a filler word's cloud collapses toward the global centroid) rather
+    // than a hardcoded stoplist: the code is the general framework, the gym's training teaches WHAT counts as filler
+    // (see FunctionWordResearch). The learned signal SELF-ABSTAINS in a cold/untrained space, so interrogatives stay a
+    // tiny structural floor — a question word is never an answer in ANY space, warm or cold.
+    private static bool IsFiller(DialecticalSpace ds, string t) => IsQuestionCue(t) || ds.IsFunctionLike(t);
 
     private static string? LastContentWord(IReadOnlyList<string> toks, int start, int end)
     {
@@ -693,12 +700,17 @@ public sealed partial class GenesisInferenceEngine
         // other prompt falls through to here, its framing words must not become the query's subject — nor the answer.
         // Without this the relaxation seeded on "what" / "to" / "of" emitted those very words instead of abstaining.
         var anchors = PlatonicConceptAnchors.ExtractSpecific(ds, request.Input ?? string.Empty)
-            .Where(a => !IsFunctionWord(a)).ToList();
+            .Where(a => !IsFiller(ds, a)).ToList();
         if (anchors.Count == 0) return false;
         var subject = anchors[0]; // the most-discriminative cue = the query's likely subject
 
-        bool Bad(string s) => string.IsNullOrEmpty(s) || PlatonicSpaceMemory.IsReservedConcept(s)
-            || ds.IsOperationToken(s) || IsFunctionWord(s) || s.Equals(subject, StringComparison.Ordinal);
+        // A relation TARGET is legitimate even if its cloud is central — a populous CATEGORY hub ("animal", "vehicle")
+        // sits near the centroid exactly like a filler word, but it IS a valid answer because a STRONG explicit relation
+        // reaches it (a filler is never the target of one). So the filler-filter must NOT veto relation targets; it
+        // guards only subject selection and the cloud-relaxation fallback (where filler can surface as noise).
+        bool BadTarget(string s) => string.IsNullOrEmpty(s) || PlatonicSpaceMemory.IsReservedConcept(s)
+            || ds.IsOperationToken(s) || s.Equals(subject, StringComparison.Ordinal);
+        bool Bad(string s) => BadTarget(s) || IsFiller(ds, s);
         // Attending to a subject both threads the discrete focus AND folds its meaning into the persistent self —
         // the mind becomes, a little, what it has just thought about.
         void Attend() { _focus.Remove(subject); _focus.Add(subject); while (_focus.Count > FocusSize) _focus.RemoveAt(0); PerceiveIntoSelfField(ds, subject); }
@@ -709,7 +721,7 @@ public sealed partial class GenesisInferenceEngine
         // gets (the cloud-only path silently rotted at scale — a member of a populous category fell below the settle
         // threshold and abstained). For COMPARABLE associations (genuine ambiguity) we fall through to the clouds.
         var rels = ds.GetNeighbors(subject, PlatonicNeighborhoodType.Relational, maxNeighbors: 12, minConfidence: 0.0)
-                     .Where(n => !Bad(n.Concept))
+                     .Where(n => !BadTarget(n.Concept))
                      .OrderByDescending(n => n.Confidence).ThenByDescending(n => n.ObservationCount).ToList();
         if (rels.Count > 0 && (rels.Count == 1 || rels[0].Confidence > rels[1].Confidence + 0.15))
         {

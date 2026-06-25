@@ -26,22 +26,25 @@ public sealed class GrammarCurriculum : ITrainingCurriculum
     // their KEY/VALUE/QUERY roles), NOT specific facts. Possessors and nouns warm as KEYS; the large value pool warms
     // as VALUES; bindings are RANDOM each example so no "my name"->X fact sticks (a fixed world would plant a strong
     // relation that fights the user's real runtime fact). The user's own assertions are what carry actual bindings.
+    // Possessives are REAL (a small closed set users actually say) — they don't pollute (no "my"->value relation forms).
     private static readonly string[] Possessives = { "my", "your", "his", "her", "our", "their", "blorp" }; // blorp = NONCE
-    private static readonly string[] Nouns = { "name", "dog", "car", "job", "city", "color", "food", "book", "song", "friend", "team", "drink", "hobby", "boss" };
+    // Nouns + values are NONCE — the role head GENERALISES to unseen nouns (proven 8/8), so it learns the STRUCTURE
+    // from made-up nouns and tags real nouns ("name") SUBJECT by position, WITHOUT planting "my name"->value relations
+    // that would pollute the user's real "my name"->stephen. This is what decouples "teach grammar" from "plant facts".
+    private static readonly string[] Nouns =
+        { "zibble", "quax", "florp", "glim", "wozit", "tarn", "vmoo", "skree", "drelb", "fnug", "gorm", "tweel", "plost", "brindle" };
     private static readonly string[] Values =
-    {
-        "sam", "rex", "leo", "mia", "fido", "audi", "coder", "lisbon", "rovers", "cola", "teal", "ramen",
-        "alex", "kim", "max", "nova", "pixel", "echo", "blue", "jade", "ace", "milo", "luna", "ziggy",
-    };
+        { "zorp", "quil", "fnordle", "blivet", "zarn", "morblo", "drav", "skell", "trisk", "vunk", "phlim", "grottle" };
     // ROTATED grammar tokens — varied so none is a constant correlate, and NONCE ones so the ROLE generalises.
     // MANY, mostly-NONCE copulas — the point is to stop the NN memorising specific copula tokens and FORCE it to learn
     // the copula POSITION (the filler between subject and value) as NONE, so it generalises to an unseen copula. With
     // only {is,was,ploo} it learned those tokens; a held-out copula then read SUBJECT (measured). Variety breaks that.
     private static readonly string[] Copulas =
         { "is", "was", "are", "be", "ploo", "vex", "glip", "borp", "zud", "plim", "krof", "snil", "drask", "wis" };
-    // SINGLE-TOKEN query cues only — a multi-word cue ("what is") would leak the copula "is" into recall frames and
-    // pollute its role label (it would look like it appears in answer-absent inputs). One token = one clean role.
-    private static readonly string[] QueryCues = { "whats", "who", "which", "recall", "tellme" };
+    // REALISTIC query phrasings — how people actually ask. Multi-word cues ("what is") are fine now: the copula "is"
+    // is labelled NONE by its value-adjacent POSITION in assertions (GrammarRoleLearner.AsCopula), not mislabelled
+    // SUBJECT for also appearing in these recall frames. The cue words themselves appear ONLY in recalls -> QUERY.
+    private static readonly string[] QueryCues = { "what is", "whats", "tell me", "who is", "do you know", "remind me of" };
     private static readonly string[] LeadIns = { "" }; // keep frames clean so the per-token role labels stay clean
 
     private readonly Random _rng = new();

@@ -26,7 +26,7 @@ public sealed class GrammarRoleLearner
 {
     public enum Role { Unknown, Filler, Query, Key, Value }
 
-    private sealed class Tally { public int InAnswerPresent; public int InAnswerAbsent; public int AsAnswer; }
+    private sealed class Tally { public int InAnswerPresent; public int InAnswerAbsent; public int AsAnswer; public int AsCopula; }
     private readonly Dictionary<string, Tally> _stats = new(StringComparer.OrdinalIgnoreCase);
 
     private static string N(string t) => t.Trim().ToLowerInvariant();
@@ -38,7 +38,8 @@ public sealed class GrammarRoleLearner
     {
         if (inputTokens is null || inputTokens.Count == 0 || string.IsNullOrWhiteSpace(output)) return;
         var outNorm = N(output);
-        var inNorm = inputTokens.Select(N).Where(t => t.Length > 0).Distinct().ToList();
+        var raw = inputTokens.Select(N).Where(t => t.Length > 0).ToList(); // keep ORDER (for the copula position)
+        var inNorm = raw.Distinct().ToList();
         var answerPresent = inNorm.Contains(outNorm); // assertion (answer is stated) vs recall (answer is asked for)
         foreach (var t in inNorm)
         {
@@ -46,6 +47,14 @@ public sealed class GrammarRoleLearner
             if (answerPresent) s.InAnswerPresent++; else s.InAnswerAbsent++;
         }
         if (!string.IsNullOrWhiteSpace(outNorm)) Get(outNorm).AsAnswer++;
+        // COPULA position: in an ASSERTION the token IMMEDIATELY BEFORE the value is the copula. This is what tells the
+        // copula ("is") apart from the subject noun ("name") — both appear in assert AND "what is …" recall frames, so
+        // the present/absent counters alone label both SUBJECT; the copula's POSITION (adjacent to the value) does not.
+        if (answerPresent)
+        {
+            var valuePos = raw.LastIndexOf(outNorm);
+            if (valuePos > 0) Get(raw[valuePos - 1]).AsCopula++;
+        }
     }
 
     /// <summary>True once a token has been seen enough to classify it (cold tokens stay Unknown — honest abstention,
@@ -82,6 +91,9 @@ public sealed class GrammarRoleLearner
     {
         if (!_stats.TryGetValue(N(token), out var s)) return -1;
         if (s.InAnswerPresent + s.InAnswerAbsent + s.AsAnswer < MinObservations) return -1;
+        // COPULA first: a token that is PREDOMINANTLY the value-adjacent slot in assertions is a copula -> NONE, even if
+        // it also shows up in "what is …" recall frames (which would otherwise mislabel it SUBJECT via the both-counter).
+        if (s.AsCopula > 0 && s.AsCopula >= 0.5 * s.InAnswerPresent) return 0; // NONE — copula
         if (s.AsAnswer > 0) return 2;                                       // VALUE — has been an answer
         if (s.InAnswerPresent == 0 && s.InAnswerAbsent > 0) return 3;       // QUERY — only ever in recall inputs
         if (s.InAnswerAbsent == 0) return 0;                               // NONE — present-only (copula)

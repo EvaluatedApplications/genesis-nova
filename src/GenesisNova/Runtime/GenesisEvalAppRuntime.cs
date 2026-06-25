@@ -160,6 +160,19 @@ public sealed partial class GenesisEvalAppRuntime : ILearningRuntime
     public IReadOnlyList<(string Token, int Role, double Confidence)> ProbeRoles(string input)
         => WithModelGate(() => _state.Inference.DiagnoseRoles(input));
 
+    /// <summary>DIAGNOSTIC: does this concept exist, and what relations does it hold (concept, confidence, obs)? For
+    /// debugging recall (what is stored vs what is retrieved). Model-ops gated.</summary>
+    public (bool Exists, IReadOnlyList<(string Concept, double Confidence, long Obs)> Relations) ProbeRelations(string concept)
+        => WithModelGate(() =>
+        {
+            if (_state.Memory is not Cognition.Platonic.DialecticalSpace ds || !ds.ContainsConcept(concept))
+                return (false, (IReadOnlyList<(string, double, long)>)System.Array.Empty<(string, double, long)>());
+            IReadOnlyList<(string, double, long)> rels;
+            try { rels = ds.GetNeighbors(concept, Cognition.PlatonicNeighborhoodType.Relational, 16, 0.0).Select(n => (n.Concept, n.Confidence, (long)n.ObservationCount)).ToList(); }
+            catch { rels = System.Array.Empty<(string, double, long)>(); }
+            return (true, rels);
+        });
+
     public IReadOnlyList<(string Token, int Degree, double Centrality, bool Known)> ProbeTokenSignals(IReadOnlyList<string> tokens)
         => WithModelGate(() =>
         {

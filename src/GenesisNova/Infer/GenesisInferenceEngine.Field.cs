@@ -57,6 +57,7 @@ public sealed partial class GenesisInferenceEngine
             (FieldTicksEnabled && TryFieldMeaningTick(toks, request, out r)) ||
             (MeaningOpsEnabled && TryFieldAnalogy(toks, request, out r)) ||
             (MeaningOpsEnabled && TryFieldComposeMeaning(toks, request, out r)) ||
+            (TalkEnabled && TryFieldNameMemory(request, out r)) ||
             TryFieldLearn(toks, request, out r) ||
             (TalkEnabled && TryFieldRespondDirect(request, out r)) ||
             TryFieldRelax(request, out r) ||
@@ -517,7 +518,7 @@ public sealed partial class GenesisInferenceEngine
                 }
             }
             Spoke(pick); PerceiveIntoSelfField(ds, pick); // the mind becomes what it SAYS — the persona builds in the self
-            return EmitField(pick, "field-respond", request, out result);
+            return EmitField(AddressIfKnown(pick), "field-respond", request, out result);
         }
         return false;
     }
@@ -533,7 +534,67 @@ public sealed partial class GenesisInferenceEngine
         var voice = NearestChunkToSelf(ds);
         if (voice is null) return false;
         Spoke(voice); PerceiveIntoSelfField(ds, voice);
-        return EmitField(voice, "field-respond-self", request, out result);
+        return EmitField(AddressIfKnown(voice), "field-respond-self", request, out result);
+    }
+
+    // ── NAME MEMORY (within-conversation; gated by TalkEnabled). A demo of persistent context with personality: the
+    //    bot REMEMBERS the user's name when given, RECALLS it when asked, and addresses them by it — rudely. Session-
+    //    scoped (a field on the engine), so restarting the app forgets it and the demo runs fresh.
+    private string? _userName;
+    private int _quip;                         // rotates the rude variants (deterministic = testable)
+    private bool _address;                     // alternates so only ~half the replies tack the name on
+    private string Quip(params string[] options) => options[(_quip++ % options.Length + options.Length) % options.Length];
+    private string AddressIfKnown(string reply) => (_userName is not null && (_address = !_address)) ? $"{reply}, {_userName}" : reply;
+
+    private bool TryFieldNameMemory(GenerationRequest request, out GenerationResult result)
+    {
+        result = default!;
+        var input = (request.Input ?? string.Empty).Trim();
+        if (input.Length == 0) return false;
+        var lower = input.ToLowerInvariant();
+
+        // RECALL — "what's my name", "do you know my name", "who am i".
+        if ((lower.Contains("my name") && (lower.Contains("what") || lower.Contains("know") || lower.Contains("remember")))
+            || lower == "who am i" || lower.StartsWith("who am i "))
+        {
+            var reply = _userName is null
+                ? Quip("how would i know, you never told me", "you never said, and i didn't ask", "do i look like i memorise strangers")
+                : Quip($"it's {_userName}, genius", $"{_userName}. did you forget your own name", $"you're {_userName}, try to keep up", $"{_userName}, obviously");
+            return EmitField(reply, "field-name", request, out result);
+        }
+
+        // CAPTURE — "my name is X", "call me X", "i'm X".
+        if (TryExtractName(input, out var name))
+        {
+            _userName = name;
+            var reply = Quip($"whatever, {name}", $"great, {name}, like i care", $"noted, {name}. now what", $"{name}, huh. thrilling");
+            return EmitField(reply, "field-name", request, out result);
+        }
+        return false;
+    }
+
+    private static readonly string[] NameTriggers =
+        { "my name is ", "my name's ", "the name is ", "the name's ", "call me ", "i go by ", "name is ", "name's " };
+    private static bool TryExtractName(string input, out string name)
+    {
+        name = string.Empty;
+        var lower = input.ToLowerInvariant();
+        foreach (var trig in NameTriggers)
+        {
+            var idx = lower.IndexOf(trig, StringComparison.Ordinal);
+            if (idx >= 0) { name = FirstToken(input.Substring(idx + trig.Length)); return name.Length > 0; }
+        }
+        // "I'm X" / "I am X" with a CAPITALISED word = a proper name (so "i'm tired" doesn't become a name).
+        var m = System.Text.RegularExpressions.Regex.Match(input, @"\b[Ii](?:'m| am)\s+([A-Z][a-z]+)\b");
+        if (m.Success) { name = m.Groups[1].Value; return true; }
+        return false;
+    }
+    private static string FirstToken(string s)
+    {
+        var parts = s.Split(new[] { ' ', '.', '!', '?', ',', ';', ':' }, StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length == 0) return string.Empty;
+        var w = parts[0];
+        return char.ToUpperInvariant(w[0]) + (w.Length > 1 ? w.Substring(1) : string.Empty);
     }
 
     // The persona's working memory of what it just said — so it ROTATES through its repertoire instead of looping —

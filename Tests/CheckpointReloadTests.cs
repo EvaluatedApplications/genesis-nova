@@ -16,40 +16,59 @@ namespace GenesisNova.Tests;
 /// </summary>
 public sealed class CheckpointReloadTests
 {
-    private static GenesisNovaConfig Config(string dir) => new GenesisNovaConfig(
-        HiddenSize: 64, AutoPersist: true, AutoResume: true, LocalStateDirectory: dir).WithProductionMechanisms();
+    private static GenesisNovaConfig Config(string dir, bool watch = false) => new GenesisNovaConfig(
+        HiddenSize: 64, AutoPersist: true, AutoResume: true, WatchExternalCheckpoint: watch, LocalStateDirectory: dir).WithProductionMechanisms();
 
     [Fact]
-    public async Task OwnAutosave_DoesNotTriggerSelfReload_OnNextPredict()
+    public async Task PredictReload_OffByDefault_NoSelfReload()
     {
-        var dir = Path.Combine(Path.GetTempPath(), "gn-reload-" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(dir);
-        try
-        {
-            var rt = new GenesisEvalAppRuntime(Config(dir));
-            await rt.SaveAsync(rt.AutoCheckpointPath);            // the gym's autosave
-            var before = rt.ReloadCount;
-            await rt.PredictAsync("1 + 1", 4);                    // would self-reload without the watermark fix
-            await rt.PredictAsync("2 + 2", 4);
-            Assert.Equal(before, rt.ReloadCount);                 // our own save is NOT an external change
-        }
-        finally { try { Directory.Delete(dir, true); } catch { } }
-    }
-
-    [Fact]
-    public async Task ExternalCheckpointChange_StillTriggersReload()
-    {
+        // DEFAULT (watch off): predicts NEVER reload — even after our own save AND even if the file's timestamp moves.
+        // This is the real-world default that kills the self-reload that degraded the model on resume.
         var dir = Path.Combine(Path.GetTempPath(), "gn-reload-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(dir);
         try
         {
             var rt = new GenesisEvalAppRuntime(Config(dir));
             await rt.SaveAsync(rt.AutoCheckpointPath);
+            File.SetLastWriteTimeUtc(rt.AutoCheckpointPath, DateTime.UtcNow.AddMinutes(5)); // looks like a change
             var before = rt.ReloadCount;
-            // Simulate a DIFFERENT process writing a newer checkpoint: bump the watched pointer file's write time.
-            File.SetLastWriteTimeUtc(rt.AutoCheckpointPath, DateTime.UtcNow.AddMinutes(5));
-            await rt.PredictAsync("1 + 1", 4);                    // a real external change SHOULD be picked up
-            Assert.True(rt.ReloadCount > before, "an external checkpoint change still reloads");
+            await rt.PredictAsync("1 + 1", 4);
+            await rt.PredictAsync("2 + 2", 4);
+            Assert.Equal(before, rt.ReloadCount); // no predict-time reload when not watching
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
+    }
+
+    [Fact]
+    public async Task OwnSave_DoesNotSelfReload_EvenWhenWatching()
+    {
+        // Even with watching ON, our OWN save advances the watermark (fix A), so it is not mistaken for an external change.
+        var dir = Path.Combine(Path.GetTempPath(), "gn-reload-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var rt = new GenesisEvalAppRuntime(Config(dir, watch: true));
+            await rt.SaveAsync(rt.AutoCheckpointPath);
+            var before = rt.ReloadCount;
+            await rt.PredictAsync("1 + 1", 4);
+            Assert.Equal(before, rt.ReloadCount);
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
+    }
+
+    [Fact]
+    public async Task ExternalChange_ReloadsWhenWatching()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "gn-reload-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var rt = new GenesisEvalAppRuntime(Config(dir, watch: true));
+            await rt.SaveAsync(rt.AutoCheckpointPath);
+            var before = rt.ReloadCount;
+            File.SetLastWriteTimeUtc(rt.AutoCheckpointPath, DateTime.UtcNow.AddMinutes(5)); // external writer
+            await rt.PredictAsync("1 + 1", 4);
+            Assert.True(rt.ReloadCount > before, "an external checkpoint change still reloads when watching is enabled");
         }
         finally { try { Directory.Delete(dir, true); } catch { } }
     }

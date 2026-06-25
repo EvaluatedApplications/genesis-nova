@@ -297,6 +297,11 @@ public sealed partial class GenesisEvalAppRuntime
 
     private void RefreshLatestStateForReplPredict()
     {
+        // OFF by default: the in-process gym is the sole writer, so a "change" is always our OWN autosave — reloading
+        // it tears down + rebuilds model/space/trainer mid-run (lossy → the 0%-on-resume / "model lost" bug). Only
+        // when an EXTERNAL process writes the live checkpoint is this worth doing. See [[nova-save-reload-lifecycle]].
+        if (!_runtimeConfig.WatchExternalCheckpoint)
+            return;
         if (!GenesisLocalStateStore.TryResolveBootstrapCheckpoint(_runtimeConfig, out var path) || !File.Exists(path))
             return;
 

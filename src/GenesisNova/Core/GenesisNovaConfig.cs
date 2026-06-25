@@ -12,6 +12,12 @@ public sealed record GenesisNovaConfig(
     ComputeBackend Backend = ComputeBackend.Gpu,
     bool AutoPersist = true,
     bool AutoResume = false,
+    // Reload the checkpoint mid-session when its file changes on disk. This existed for the RETIRED ClaudeMemory
+    // daemon (a SEPARATE process that wrote checkpoints the REPL should pick up). The gym is now IN-PROCESS and the
+    // sole writer, so watching makes every predict reload the runtime's OWN autosave — a lossy mid-training
+    // teardown+rebuild that degrades the model. Default OFF; only enable if an external process writes the live
+    // checkpoint. See [[nova-save-reload-lifecycle]].
+    bool WatchExternalCheckpoint = false,
     bool AutoScaleVram = true,
     double TargetVramUtilization = 0.82,
     int ReserveVramMb = 1536,

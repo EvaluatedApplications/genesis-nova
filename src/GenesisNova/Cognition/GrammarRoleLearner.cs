@@ -73,6 +73,21 @@ public sealed class GrammarRoleLearner
 
     private const double QueryAbsentRate = 0.80; // appears overwhelmingly in answer-absent (recall) inputs
 
+    /// <summary>SELF-SUPERVISED TRAINING LABEL for the NN role head — derived PURELY from the alignment counters, with
+    /// NO centrality/filler signal (so it's robust where the geometric classifier is fragile; the NN then learns to
+    /// recognise and generalise). 2=VALUE (ever an answer); 3=QUERY (only ever in recall inputs, never asserted/answer);
+    /// 0=NONE (present-only, never an answer — a copula); 1=SUBJECT (in BOTH assert and recall inputs — the subject,
+    /// determiner lumped in, which is correct for the phrase); -1=ignore (too few observations).</summary>
+    public int LabelFor(string token)
+    {
+        if (!_stats.TryGetValue(N(token), out var s)) return -1;
+        if (s.InAnswerPresent + s.InAnswerAbsent + s.AsAnswer < MinObservations) return -1;
+        if (s.AsAnswer > 0) return 2;                                       // VALUE — has been an answer
+        if (s.InAnswerPresent == 0 && s.InAnswerAbsent > 0) return 3;       // QUERY — only ever in recall inputs
+        if (s.InAnswerAbsent == 0) return 0;                               // NONE — present-only (copula)
+        return 1;                                                          // SUBJECT — in both present and absent inputs
+    }
+
     /// <summary>Snapshot for persistence (the learned grammar is just these tallies).</summary>
     public IReadOnlyList<(string Token, int Present, int Absent, int AsAnswer)> Export()
         => _stats.Select(kv => (kv.Key, kv.Value.InAnswerPresent, kv.Value.InAnswerAbsent, kv.Value.AsAnswer)).ToList();

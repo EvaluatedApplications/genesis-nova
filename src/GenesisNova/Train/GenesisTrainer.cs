@@ -551,6 +551,7 @@ public sealed class GenesisTrainer
           var weight = ComputeTrainingWeight(example);
           var labels = ResolveLabels(example, inputTokens);
           var concepts = ObserveLearningSignals(example);
+          var roleLabels = _inferencePolicy.DeriveRoleLabels(example.Input); // self-supervised structure labels (after warming this example)
           var shouldSkip = ShouldSkipTrainingExample(example, targetTokens);
           TrainingLoss loss;
           var effectiveWeight = weight;
@@ -570,7 +571,8 @@ public sealed class GenesisTrainer
                    lossScale: effectiveWeight,
                    routeLabel: labels.Route,
                    queryLabel: labels.Query,
-                   planLabel: labels.Plan);
+                   planLabel: labels.Plan,
+                   roleLabels: roleLabels);
                 totalTokenLoss += loss.TokenLoss * targetTokens.Length * effectiveWeight;
                 totalTokenWeight += targetTokens.Length * effectiveWeight;
              }
@@ -588,7 +590,8 @@ public sealed class GenesisTrainer
                 lossScale: effectiveWeight,
                 routeLabel: labels.Route,
                 queryLabel: labels.Query,
-                planLabel: labels.Plan);
+                planLabel: labels.Plan,
+                roleLabels: roleLabels);
              totalTokenLoss += loss.TokenLoss * targetTokens.Length * effectiveWeight;
              totalTokenWeight += targetTokens.Length * effectiveWeight;
           }

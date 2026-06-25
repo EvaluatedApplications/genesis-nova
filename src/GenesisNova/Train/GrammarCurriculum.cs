@@ -35,8 +35,10 @@ public sealed class GrammarCurriculum : ITrainingCurriculum
     };
     // ROTATED grammar tokens — varied so none is a constant correlate, and NONCE ones so the ROLE generalises.
     private static readonly string[] Copulas = { "is", "was", "is", "ploo" };           // ploo = NONCE copula
-    private static readonly string[] QueryCues = { "what is", "whats", "tell me", "remind me of", "who is" };
-    private static readonly string[] LeadIns = { "", "", "", "hey, ", "ok so, ", "quick one, " };
+    // SINGLE-TOKEN query cues only — a multi-word cue ("what is") would leak the copula "is" into recall frames and
+    // pollute its role label (it would look like it appears in answer-absent inputs). One token = one clean role.
+    private static readonly string[] QueryCues = { "whats", "who", "which", "recall", "tellme" };
+    private static readonly string[] LeadIns = { "" }; // keep frames clean so the per-token role labels stay clean
 
     private readonly Random _rng = new();
     private readonly int _trainPerCycle;

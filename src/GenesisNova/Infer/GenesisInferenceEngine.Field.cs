@@ -719,24 +719,28 @@ public sealed partial class GenesisInferenceEngine
         return roles;
     }
 
-    // The subject PHRASE = the key noun + its immediately-preceding determiner (any filler that is not a query cue — so
-    // "my"/"your"/"the" stay with the noun and "my name" != "your name"), keeping the possessor without a possessive
-    // list. Determiner-detection prefers the NN roles. (Determiner-before-noun; refine per word order for non-English.)
+    // The subject PHRASE = the maximal CONTIGUOUS SUBJECT(Key) span containing the noun. The determiner ("my"/"your"/
+    // "the") is itself tagged SUBJECT (it co-occurs in both assert and recall inputs), so the span naturally keeps the
+    // possessor — "my name" stays distinct from "your name" with no possessive list. Word-order-free: the subject is
+    // wherever its run of SUBJECT tokens sits, before or after the verb. Falls back to one preceding filler determiner
+    // when the role tags are unavailable (cold).
     private string? BuildSubjectPhrase(IReadOnlyList<string> toks, DialecticalSpace ds, int nounIndex, Cognition.GrammarRoleLearner.Role[]? nn)
     {
         if (nounIndex < 0 || nounIndex >= toks.Count) return null;
         Cognition.GrammarRoleLearner.Role RoleAt(int i)
             => nn is not null && nn[i] != Cognition.GrammarRoleLearner.Role.Unknown ? nn[i] : GrammarRole(ds, toks[i]);
         var begin = nounIndex;
-        if (nounIndex - 1 >= 0)
+        var end = nounIndex;
+        while (begin - 1 >= 0 && RoleAt(begin - 1) == Cognition.GrammarRoleLearner.Role.Key) begin--;
+        while (end + 1 < toks.Count && RoleAt(end + 1) == Cognition.GrammarRoleLearner.Role.Key) end++;
+        // Cold fallback (no SUBJECT span found beyond the noun): absorb one preceding filler determiner, as before.
+        if (begin == nounIndex && end == nounIndex && nounIndex - 1 >= 0)
         {
             var p = toks[nounIndex - 1];
-            var pr = RoleAt(nounIndex - 1);
-            var isDeterminer = (pr == Cognition.GrammarRoleLearner.Role.Filler || ds.IsFunctionLike(p))
-                               && pr != Cognition.GrammarRoleLearner.Role.Query;
-            if (p.All(char.IsLetter) && isDeterminer) begin = nounIndex - 1;
+            if (p.All(char.IsLetter) && ds.IsFunctionLike(p) && RoleAt(nounIndex - 1) != Cognition.GrammarRoleLearner.Role.Query)
+                begin = nounIndex - 1;
         }
-        return string.Join(" ", Enumerable.Range(begin, nounIndex - begin + 1).Select(i => toks[i]));
+        return string.Join(" ", Enumerable.Range(begin, end - begin + 1).Select(i => toks[i]));
     }
 
     // The mind's recent FOCUS — the content it has been attending to, threaded across thoughts (the continuous I).
@@ -770,6 +774,21 @@ public sealed partial class GenesisInferenceEngine
     private Cognition.GrammarRoleLearner.Role GrammarRole(DialecticalSpace ds, string token)
         => _grammar.Classify(token, ds.IsFunctionLike);
 
+    /// <summary>DIAGNOSTIC: the NN recogniser's per-token role tag + confidence for an input (untrained → empty/low),
+    /// so a test can see whether the NN learned to recognise structure, separately from retrieval. 0=NONE 1=SUBJECT
+    /// 2=VALUE 3=QUERY.</summary>
+    public IReadOnlyList<(string Token, int Role, double Confidence)> DiagnoseRoles(string input)
+    {
+        if (_memory is not DialecticalSpace) return System.Array.Empty<(string, int, double)>();
+        var toks = TokenizeField(input ?? string.Empty);
+        var ids = _tokenizer.Encode(string.Join(" ", toks)).ToArray();
+        var pred = ids.Length == toks.Count ? _model.PredictRoles(ids) : System.Array.Empty<(int, double)>();
+        var result = new List<(string, int, double)>();
+        for (var i = 0; i < toks.Count; i++)
+            result.Add((toks[i], i < pred.Length ? pred[i].Item1 : -1, i < pred.Length ? pred[i].Item2 : 0.0));
+        return result;
+    }
+
     /// <summary>SELF-SUPERVISED per-token ROLE LABELS for training the NN recogniser — one class per input token
     /// (0=NONE/filler, 1=SUBJECT, 2=VALUE, 3=QUERY) from the learned assert/recall alignment, or a negative "ignore"
     /// for a token whose role isn't settled yet. Null for a non-grammar frame (numeric/operator/retrieval) or when
@@ -784,14 +803,9 @@ public sealed partial class GenesisInferenceEngine
         var any = false;
         for (var i = 0; i < toks.Count; i++)
         {
-            labels[i] = GrammarRole(ds, toks[i]) switch
-            {
-                Cognition.GrammarRoleLearner.Role.Filler => 0,
-                Cognition.GrammarRoleLearner.Role.Key => 1,
-                Cognition.GrammarRoleLearner.Role.Value => 2,
-                Cognition.GrammarRoleLearner.Role.Query => 3,
-                _ => -1, // Unknown → ignore (don't supervise a token whose role isn't settled)
-            };
+            // CENTRALITY-FREE labels straight from the alignment counters (LabelFor) — robust where the geometric
+            // role classifier is fragile. -1 = ignore (the per-token CE skips it).
+            labels[i] = _grammar.LabelFor(toks[i]);
             if (labels[i] >= 0) any = true;
         }
         return any ? labels : null;

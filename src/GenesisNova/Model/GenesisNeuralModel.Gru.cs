@@ -354,7 +354,9 @@ public partial class GenesisNeuralModel
                     var roleLogits = cat(supLogits.ToArray(), 0); // [n, RoleCount]
                     forwardTensors.Add(roleLogits);
                     var roleTarget = tensor(supTargets.ToArray(), dtype: ScalarType.Int64, device: _trainingDevice);
-                    var roleLoss = nn.functional.cross_entropy(roleLogits, roleTarget) * RoleLossWeight;
+                    var roleWeight = tensor(RoleClassWeights(supTargets), dtype: ScalarType.Float32, device: _trainingDevice);
+                    forwardTensors.Add(roleWeight);
+                    var roleLoss = nn.functional.cross_entropy(roleLogits, roleTarget, weight: roleWeight) * RoleLossWeight;
                     roleTarget.Dispose();
                     forwardTensors.Add(roleLoss);
                     if (accumulatedLoss is null)

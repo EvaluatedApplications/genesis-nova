@@ -100,9 +100,13 @@ public partial class GenesisNeuralModel
     // (it stores the binding the NN extracts). 0=NONE/filler, 1=SUBJECT (the key), 2=VALUE (the asserted thing),
     // 3=QUERY (a retrieval cue). Reads the raw [hidden] per-token state, so it is hidden-dependent (resize nulls it).
     public const int RoleCount = 4;
-    private const double RoleLossWeight = 0.5; // modest — it shapes the shared encoder; only fires on grammar frames
+    private const double RoleLossWeight = 1.0; // the structure recogniser is a primary signal on grammar frames
     private TorchSharp.Modules.Parameter? _roleWT; // [hidden, RoleCount]
     private TorchSharp.Modules.Parameter? _roleB;  // [RoleCount]
+    // Inverse-frequency CLASS BALANCE for the per-token ROLE head — SUBJECT tokens dominate (subject phrases are 2+
+    // tokens, value/copula 1), so without balancing the head collapses to SUBJECT (the op-head collapse, per-class).
+    private readonly object _roleClassBalanceLock = new();
+    private readonly double[] _roleClassCounts = System.Linq.Enumerable.Repeat(1.0, RoleCount).ToArray();
 
     // PLAN head — the learned composer's SHAPE selector. From the input it classifies which block-
     // composition to assemble + run on the substrate (the op/operand heads supply the arguments; this

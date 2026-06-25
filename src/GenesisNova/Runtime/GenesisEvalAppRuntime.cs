@@ -156,6 +156,10 @@ public sealed partial class GenesisEvalAppRuntime : ILearningRuntime
     /// DEGREE and cloud CENTRALITY (cosine of its meaning-cloud to the space's global centroid). The hypothesis: a
     /// function word's cloud sits near the centroid (it co-occurs with everything) while a content word — even a
     /// popular one — points somewhere specific. Lets a test SEE which signal actually separates them.</summary>
+    /// <summary>DIAGNOSTIC: the NN structure-recogniser's per-token role tags for an input (model-ops gated).</summary>
+    public IReadOnlyList<(string Token, int Role, double Confidence)> ProbeRoles(string input)
+        => WithModelGate(() => _state.Inference.DiagnoseRoles(input));
+
     public IReadOnlyList<(string Token, int Degree, double Centrality, bool Known)> ProbeTokenSignals(IReadOnlyList<string> tokens)
         => WithModelGate(() =>
         {

@@ -181,6 +181,22 @@ public partial class GenesisNeuralModel
     private double ObserveRouteClassWeight(int routeLabel)
         => ObserveClassWeight(_routeClassCounts, _routeClassBalanceLock, NumRoutes, RouteClassBalanceEnabled, routeLabel);
 
+    /// <summary>Per-CLASS inverse-frequency weights for the per-token role CE (decays then counts this example's role
+    /// labels, then total/(K·count) clamped) — so the dominant SUBJECT class can't collapse the head.</summary>
+    private float[] RoleClassWeights(IReadOnlyList<long> targets)
+    {
+        lock (_roleClassBalanceLock)
+        {
+            for (var i = 0; i < _roleClassCounts.Length; i++) _roleClassCounts[i] *= ClassBalanceDecay;
+            foreach (var t in targets) if (t >= 0 && t < _roleClassCounts.Length) _roleClassCounts[(int)t] += 1.0;
+            var total = _roleClassCounts.Sum();
+            var w = new float[RoleCount];
+            for (var c = 0; c < RoleCount; c++)
+                w[c] = (float)Math.Clamp(total / (RoleCount * Math.Max(1e-6, _roleClassCounts[c])), 0.25, 4.0);
+            return w;
+        }
+    }
+
     /// <summary>
     /// Snapshot of the cumulative SUPERVISED route-label counts (index = route id). Seeded at
     /// {1,1,1} (Laplace) and incremented only when a training example carried a route label — so

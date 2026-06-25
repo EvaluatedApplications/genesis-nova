@@ -64,6 +64,8 @@ public sealed class GrammarStabilityResearch
             _out.WriteLine($"  noun->SUBJECT  : {nounSubj}/{nouns.Length}");
             _out.WriteLine($"  value->VALUE   : {valVal}/{values.Length}");
             foreach (var c in copulas) _out.WriteLine($"    my name {c} sam -> {c}:{RoleAt($"my name {c} sam", c)}");
+            // NOTE (measured separately): with roles reliable, asserts PARSE+LEARN ("my name is stephen"->field-learn),
+            // but recall ABSTAINS ("what is my name"->''). So name-recall's remaining problem is RETRIEVAL, not roles.
 
             // Robust claim still gated; copula RATE is the research output (the answer to 'can more training fix it').
             Assert.True(nounSubj >= nouns.Length - 1 && valVal >= values.Length - 1,

@@ -809,21 +809,44 @@ public sealed class DialecticalSpace : IPlatonicSpace
     // ─────────────────────────────────────────────────────────────────────────────── Snapshots (checkpoint compat)
     public PlatonicMemorySnapshot ExportSnapshot()
     {
-        var nodes = _concepts.All.Where(e => !FaceCodec.IsNumeric(e.Symbol) && e.Kind != ElementKind.Atom).Select(e =>
-        {
-            var pf = FullFace(e.Symbol, e);
-            return new PlatonicNodeSnapshot(e.Symbol, pf, FaceCodec.Negate(pf), (int)e.ObservationCount);
-        }).ToArray();
+        // FAITHFUL: capture EVERY non-numeric element (INCLUDING atoms) with its learned ORBITAL + kind + lifecycle.
+        // The orbital (semantic-face slice) is the ONLY mutable state; identity faces are codec-derived from the
+        // symbol and ▷-components are re-derived from the symbol, so storing the orbital + kind round-trips exactly.
+        // Numeric elements are codec-exact and never relate, so they're recreated on demand (omitted). Nodes are left
+        // EMPTY — Elements supersedes the old lossy full-face node path (which only ever restored the orbital anyway).
+        var elements = _concepts.All
+            .Where(e => !FaceCodec.IsNumeric(e.Symbol))
+            .Select(e => new DialecticalElementSnapshot(e.Symbol, (int)e.Kind, (double[])e.SemanticFace.Clone(), e.ObservationCount, e.Archived))
+            .ToArray();
         var rels = _relations.Values.Select(r => new PlatonicRelationSnapshot(
             r.Left, r.Right, r.Thesis, r.LastObserved, r.Synthesis, r.ObservationCount, r.UseCount, r.SuccessCount, r.FailureCount, r.LastUsedStep)).ToArray();
         var chunks = _chunks.SelectMany(t => t.Value.Select(c => new PlatonicChunkSnapshot(t.Key, c.Key, c.Value))).ToArray();
-        return new PlatonicMemorySnapshot(_dim, nodes, rels, chunks, _operationTokens.ToArray());
+        return new PlatonicMemorySnapshot(_dim, Array.Empty<PlatonicNodeSnapshot>(), rels, chunks, _operationTokens.ToArray(), elements);
     }
 
     public void ImportSnapshot(PlatonicMemorySnapshot snapshot)
     {
         if (snapshot == null) return;
-        foreach (var n in snapshot.Nodes ?? Array.Empty<PlatonicNodeSnapshot>())
+        if (snapshot.Elements is { Length: > 0 })
+        {
+            // FAITHFUL path: recreate each element through the SAME creation φ the live space uses (so kind + ▷-
+            // components match exactly), then overwrite its orbital + counters. GetOrCreate is idempotent, so atom
+            // entries and the concepts that reference them converge regardless of order.
+            foreach (var el in snapshot.Elements)
+            {
+                var key = Normalize(el.Symbol);
+                if (FaceCodec.IsNumeric(key)) continue;
+                var e = (ElementKind)el.Kind == ElementKind.Atom
+                    ? _concepts.GetOrCreate(el.Symbol, ElementKind.Atom, () => new double[_semLen])
+                    : GetOrCreateConcept(el.Symbol);
+                if (el.Orbital is { Length: > 0 })
+                    for (var i = 0; i < _semLen && i < el.Orbital.Length && i < e.SemanticFace.Length; i++)
+                        e.SemanticFace[i] = el.Orbital[i];
+                e.ObservationCount = el.ObservationCount;
+                if (el.Archived && !e.Archived) _concepts.Archive(el.Symbol); // restore G6 dormancy (keeps ActiveCount correct)
+            }
+        }
+        else foreach (var n in snapshot.Nodes ?? Array.Empty<PlatonicNodeSnapshot>()) // LEGACY checkpoints (no Elements)
         {
             if (FaceCodec.IsNumeric(Normalize(n.Name))) continue;
             var e = GetOrCreateConcept(n.Name);

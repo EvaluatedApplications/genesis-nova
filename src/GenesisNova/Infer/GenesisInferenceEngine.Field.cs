@@ -638,6 +638,28 @@ public sealed partial class GenesisInferenceEngine
     private readonly List<string> _focus = new();
     private const int FocusSize = 4;
 
+    // The LEARNED GRAMMAR — structural roles (copula/query/key/value) inferred from the assert/recall alignment of
+    // training examples, NOT hardcoded word-lists (see GrammarRoleLearner / nova-learned-grammar-roles). Shared with
+    // the trainer via ObserveGrammar; consulted by the field parser via GrammarRole. Warmed by the gym's grammar
+    // curriculum; abstains (Unknown) until warm, the same warm-start stance as the filler signal.
+    private readonly Cognition.GrammarRoleLearner _grammar = new();
+
+    /// <summary>Observe one training example's ASSERT/RECALL structure so the grammar roles are learned. Text-only:
+    /// arithmetic/operator frames have their own routes and would only add noise to the role tallies. Called from the
+    /// trainer's ObserveLearningSignals, alongside the op-cue learner.</summary>
+    public void ObserveGrammar(string input, string output)
+    {
+        if (string.IsNullOrWhiteSpace(input) || string.IsNullOrWhiteSpace(output)) return;
+        if (_memory is not DialecticalSpace ds) return;
+        var toks = TokenizeField(input);
+        if (toks.Count == 0 || toks.Any(IsNumericLike) || toks.Any(ds.IsOperationToken)) return; // not a grammar frame
+        _grammar.Observe(toks, output.Trim());
+    }
+
+    // The token's LEARNED structural role, resolved against the space's learned FILLER signal (IsFunctionLike).
+    private Cognition.GrammarRoleLearner.Role GrammarRole(DialecticalSpace ds, string token)
+        => _grammar.Classify(token, ds.IsFunctionLike);
+
     // THE PERSISTENT SELF, in the mind's own meaning-space (PLATONIC_CONSCIOUSNESS.md / "a self that LEARNS, not a
     // learning thing with a self tacked on"). Where _focus is the discrete last-N attention (working memory, evicted
     // by distraction), this is the CONTINUOUS standing wave of what the mind has been living — a decaying accumulation

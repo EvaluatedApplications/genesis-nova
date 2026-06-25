@@ -1354,6 +1354,9 @@ public sealed class GenesisTrainer
         // arithmetic example, nova infers which operation reproduces the answer and relates the cue word/symbol to it,
         // so worded/synonym/coined forms resolve by what was LEARNED — no hardcoded op vocabulary. No-op otherwise.
         _inferencePolicy.LearnArithmeticCue(example.Input, example.Output);
+        // LEARN the GRAMMAR roles (copula/query/key/value) from this example's assert/recall structure — no word-lists,
+        // no word-order (GrammarRoleLearner). Text-only frames; no-op for arithmetic/operator examples.
+        _inferencePolicy.ObserveGrammar(example.Input, example.Output);
         if (allowTransformDiscovery)
             UpdateTransformDiscovery(example);
 

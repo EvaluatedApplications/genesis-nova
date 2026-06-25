@@ -173,6 +173,7 @@ public class MainWindow : Form
         flow.Controls.Add(new CheckBox { Name = "CurMemCode", Text = "Memory + Code index", Checked = false, AutoSize = true });
         flow.Controls.Add(new CheckBox { Name = "CurCreators", Text = "Creators (skill ladder: number-word → category → arithmetic)", Checked = false, AutoSize = true });
         flow.Controls.Add(new CheckBox { Name = "CurPersonality", Text = "Personality (rude chatbot)", Checked = true, AutoSize = true });
+        flow.Controls.Add(new CheckBox { Name = "CurGrammar", Text = "Grammar (learns assert/recall structure → name memory)", Checked = true, AutoSize = true });
         flow.Controls.Add(new CheckBox { Name = "CurFocused", Text = "Focused + rehearsal (unticked = all tasks every cycle)", Checked = true, AutoSize = true });
         flow.Controls.Add(new Label { Text = "Memory index file (MEMORY.md):", AutoSize = true, Margin = new Padding(0, 8, 0, 2) });
         flow.Controls.Add(new TextBox { Name = "MemPath", Width = 270, Text = DefaultMemoryIndexPath() });
@@ -1428,6 +1429,14 @@ public class MainWindow : Form
                 AppendOutput($"[train] memory+code: {mc.Stats.Cues} cues, {mc.Stats.Edges} edges, {mc.Stats.Probes} probes");
             }
             catch (Exception ex) { AppendOutput($"[train] memory+code load failed: {ex.Message}"); }
+        }
+        if (GetControl<CheckBox>("CurGrammar")?.Checked ?? false)
+        {
+            // GRAMMAR: warms the structural tokens (copula/question/possessive) across varied frames so their ROLES
+            // are learned distributionally instead of hardcoded — the foundation for de-hardcoded name memory. A
+            // bounded muscle (it can master), so it rides along with the gym and persona. See [[nova-learned-grammar-roles]].
+            children.Add(new GrammarCurriculum(trainPerCycle: _gymTrainPerCycle));
+            AppendOutput("[train] grammar: assert/recall frame (learns copula/question/possessive roles → name memory)");
         }
         var personalityOn = GetControl<CheckBox>("CurPersonality")?.Checked ?? false;
         PersonalityCurriculum? persona = null;

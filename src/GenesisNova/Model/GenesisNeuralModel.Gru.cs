@@ -63,9 +63,10 @@ public partial class GenesisNeuralModel
         double lossScale = 1.0,
         int? routeLabel = null,
         GenesisQueryLabel? queryLabel = null,
-        int? planLabel = null)
+        int? planLabel = null,
+        int[]? roleLabels = null)
     {
-        return TrainExampleGpu(inputTokens, targetTokens, bosTokenId, lossScale, routeLabel, queryLabel, planLabel);
+        return TrainExampleGpu(inputTokens, targetTokens, bosTokenId, lossScale, routeLabel, queryLabel, planLabel, roleLabels);
     }
 
     private int PredictNextTokenGpu(
@@ -160,7 +161,8 @@ public partial class GenesisNeuralModel
         double lossScale,
         int? routeLabel,
         GenesisQueryLabel? queryLabel = null,
-        int? planLabel = null)
+        int? planLabel = null,
+        int[]? roleLabels = null)
     {
         EnsureModelInitialized();
         EnsureGruInitialized();
@@ -171,6 +173,13 @@ public partial class GenesisNeuralModel
         var supervisePlan = planLabel is >= 0 and < PlanKindCount;
         if (superviseQuery || supervisePlan)
             EnsureQueryHeadsInitialized(); // creates the query + plan heads together
+        // PER-TOKEN ROLE supervision — the NN structure recogniser. Labels (one role class per input token, or a
+        // negative "ignore") come from the self-supervised assert/recall alignment. Needs the per-token states below.
+        var superviseRole = false;
+        if (roleLabels is not null && roleLabels.Length == inputTokens.Count)
+            for (var i = 0; i < roleLabels.Length; i++) if (roleLabels[i] >= 0 && roleLabels[i] < RoleCount) { superviseRole = true; break; }
+        if (superviseRole)
+            EnsureRoleHeadInitialized();
 
         double totalLoss = 0.0;
         var prev = bosTokenId;
@@ -191,7 +200,7 @@ public partial class GenesisNeuralModel
             // read. All encoder intermediates are tracked in forwardTensors for post-backward disposal.
             // When query supervision is present, also collect the per-token hidden states for the
             // operand-selection head.
-            var perTokenStates = superviseQuery ? new List<torch.Tensor>() : null;
+            var perTokenStates = (superviseQuery || superviseRole) ? new List<torch.Tensor>() : null;
             var hInput = EncodeInput(inputTokens, forwardTensors, _trainingDevice, perTokenStates);
 
             // DECODER: start the recurrence from hInput and step the SAME GRU once per target token,
@@ -321,6 +330,42 @@ public partial class GenesisNeuralModel
                 {
                     accumulatedLoss = accumulatedLoss + queryLoss;
                     forwardTensors.Add(accumulatedLoss);
+                }
+            }
+
+            // PER-TOKEN ROLE head: CE per supervised token — what grammatical role does THIS token play? Scores each
+            // per-token hidden over {NONE,SUBJECT,VALUE,QUERY} and backprops into the shared encoder, so the GRU learns
+            // a representation that recognises structure (the NN-as-recogniser; tokens with a negative label are skipped).
+            if (superviseRole && perTokenStates is { Count: > 0 })
+            {
+                var supLogits = new List<torch.Tensor>();
+                var supTargets = new List<long>();
+                for (var t = 0; t < perTokenStates.Count && t < roleLabels!.Length; t++)
+                {
+                    var r = roleLabels[t];
+                    if (r < 0 || r >= RoleCount) continue;
+                    var logit = (perTokenStates[t].matmul(_roleWT!) + _roleB!).unsqueeze(0); // [1, RoleCount]
+                    forwardTensors.Add(logit);
+                    supLogits.Add(logit);
+                    supTargets.Add(r);
+                }
+                if (supLogits.Count > 0)
+                {
+                    var roleLogits = cat(supLogits.ToArray(), 0); // [n, RoleCount]
+                    forwardTensors.Add(roleLogits);
+                    var roleTarget = tensor(supTargets.ToArray(), dtype: ScalarType.Int64, device: _trainingDevice);
+                    var roleLoss = nn.functional.cross_entropy(roleLogits, roleTarget) * RoleLossWeight;
+                    roleTarget.Dispose();
+                    forwardTensors.Add(roleLoss);
+                    if (accumulatedLoss is null)
+                    {
+                        accumulatedLoss = roleLoss;
+                    }
+                    else
+                    {
+                        accumulatedLoss = accumulatedLoss + roleLoss;
+                        forwardTensors.Add(accumulatedLoss);
+                    }
                 }
             }
 

@@ -346,6 +346,7 @@ public sealed class GenesisTrainer
         var example = new GenesisExample(inputText, outputText);
         var weight = ComputeTrainingWeight(example);
         var labels = ResolveLabels(example, inputTokens);
+        var roleLabels = _inferencePolicy.DeriveRoleLabels(example.Input); // self-supervised structure labels (warm grammar frames)
         var baseLoss = _model.TrainExample(
             inputTokens,
             targetTokens,
@@ -353,7 +354,8 @@ public sealed class GenesisTrainer
             lossScale: weight,
             routeLabel: labels.Route,
             queryLabel: labels.Query,
-            planLabel: labels.Plan);
+            planLabel: labels.Plan,
+            roleLabels: roleLabels);
 
         // Break computation graph after training
         _model.CloneParametersToBreakGraph();
@@ -393,6 +395,7 @@ public sealed class GenesisTrainer
 
         var weight = ComputeTrainingWeight(example);
         var labels = ResolveLabels(example, inputTokens);
+        var roleLabels = _inferencePolicy.DeriveRoleLabels(example.Input); // self-supervised structure labels (warm grammar frames)
 
         var baseLoss = _model.TrainExample(
             inputTokens,
@@ -401,7 +404,8 @@ public sealed class GenesisTrainer
             lossScale: weight,
             routeLabel: labels.Route,
             queryLabel: labels.Query,
-            planLabel: labels.Plan);
+            planLabel: labels.Plan,
+            roleLabels: roleLabels);
 
         // Break computation graph after each example to allow sequential training
         _model.CloneParametersToBreakGraph();

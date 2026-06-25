@@ -732,6 +732,33 @@ public sealed partial class GenesisInferenceEngine
     private Cognition.GrammarRoleLearner.Role GrammarRole(DialecticalSpace ds, string token)
         => _grammar.Classify(token, ds.IsFunctionLike);
 
+    /// <summary>SELF-SUPERVISED per-token ROLE LABELS for training the NN recogniser — one class per input token
+    /// (0=NONE/filler, 1=SUBJECT, 2=VALUE, 3=QUERY) from the learned assert/recall alignment, or a negative "ignore"
+    /// for a token whose role isn't settled yet. Null for a non-grammar frame (numeric/operator/retrieval) or when
+    /// nothing is confident — so the trainer only role-supervises clean fact frames once the alignment has warmed.
+    /// Aligned to TokenizeField, which matches the model tokenization for the number-free frames this fires on.</summary>
+    public int[]? DeriveRoleLabels(string input)
+    {
+        if (_memory is not DialecticalSpace ds) return null;
+        var toks = TokenizeField(input);
+        if (toks.Count == 0 || toks.Any(IsNumericLike) || toks.Any(ds.IsOperationToken) || toks.Any(IsRetrievalMarker)) return null;
+        var labels = new int[toks.Count];
+        var any = false;
+        for (var i = 0; i < toks.Count; i++)
+        {
+            labels[i] = GrammarRole(ds, toks[i]) switch
+            {
+                Cognition.GrammarRoleLearner.Role.Filler => 0,
+                Cognition.GrammarRoleLearner.Role.Key => 1,
+                Cognition.GrammarRoleLearner.Role.Value => 2,
+                Cognition.GrammarRoleLearner.Role.Query => 3,
+                _ => -1, // Unknown → ignore (don't supervise a token whose role isn't settled)
+            };
+            if (labels[i] >= 0) any = true;
+        }
+        return any ? labels : null;
+    }
+
     // THE PERSISTENT SELF, in the mind's own meaning-space (PLATONIC_CONSCIOUSNESS.md / "a self that LEARNS, not a
     // learning thing with a self tacked on"). Where _focus is the discrete last-N attention (working memory, evicted
     // by distraction), this is the CONTINUOUS standing wave of what the mind has been living — a decaying accumulation

@@ -100,6 +100,7 @@ public partial class GenesisNeuralModel
     // (it stores the binding the NN extracts). 0=NONE/filler, 1=SUBJECT (the key), 2=VALUE (the asserted thing),
     // 3=QUERY (a retrieval cue). Reads the raw [hidden] per-token state, so it is hidden-dependent (resize nulls it).
     public const int RoleCount = 4;
+    private const double RoleLossWeight = 0.5; // modest — it shapes the shared encoder; only fires on grammar frames
     private TorchSharp.Modules.Parameter? _roleWT; // [hidden, RoleCount]
     private TorchSharp.Modules.Parameter? _roleB;  // [RoleCount]
 

@@ -25,7 +25,7 @@ public class MainWindow : Form
     private int _gymCycle;
     private int _lastDifficulty;
     private double _lastLoss, _lastAcc, _lastRoute, _lastConf;
-    private double _gymBar = 0.50;
+    private double _gymBar = 0.90;
     private int _gymTrainPerCycle = 256;
     private int _gymThrottlePct = 100;  // 0..500 — rest this % of the last cycle's time between cycles (0 = full speed)
     private HttpListener? _control;
@@ -155,7 +155,7 @@ public class MainWindow : Form
         flow.Controls.Add(stopBtn);
 
         flow.Controls.Add(new Label { Text = "Mastery bar (level-up threshold)", AutoSize = true, Margin = new Padding(0, 16, 0, 2) });
-        flow.Controls.Add(new NumericUpDown { Name = "GymBar", Width = 120, DecimalPlaces = 2, Increment = 0.05M, Minimum = 0.50M, Maximum = 0.99M, Value = 0.50M });
+        flow.Controls.Add(new NumericUpDown { Name = "GymBar", Width = 120, DecimalPlaces = 2, Increment = 0.05M, Minimum = 0.50M, Maximum = 0.99M, Value = 0.90M });
 
         flow.Controls.Add(new Label { Text = "Examples per cycle", AutoSize = true, Margin = new Padding(0, 12, 0, 2) });
         flow.Controls.Add(new NumericUpDown { Name = "GymTrainPerCycle", Width = 120, Minimum = 16, Maximum = 256, Increment = 16, Value = 256 });

@@ -1,8 +1,11 @@
 using System;
+using System.IO;
+using System.Threading.Tasks;
 using GenesisNova.Cognition.Platonic;
 using GenesisNova.Core;
 using GenesisNova.Infer;
 using GenesisNova.Model;
+using GenesisNova.Runtime;
 using GenesisNova.Tokenization;
 using Xunit;
 using Xunit.Abstractions;
@@ -34,5 +37,30 @@ public sealed class FactRecallExperiment
 
         Assert.Contains("stephen", name, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("rex", dog, StringComparison.OrdinalIgnoreCase);
+    }
+
+    // The actual REPL path: through GenesisEvalAppRuntime.PredictAsync (what the app's REPL calls), production
+    // mechanisms on. Confirms it works there too, and probes which PHRASINGS the general path covers.
+    [Fact]
+    public async Task ReplRuntimePath_LearnsThenRecalls()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "gn-fact-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var config = new GenesisNovaConfig(Backend: ComputeBackend.Cpu, HiddenSize: 256, FaceDimensionOverride: 256,
+                AutoPersist: false, AutoResume: false, LocalStateDirectory: dir).WithProductionMechanisms();
+            var rt = new GenesisEvalAppRuntime(config);
+            async Task<string> P(string s) { var r = (await rt.PredictAsync(s, 8)).Result; var o = r?.Output?.Trim() ?? ""; _out.WriteLine($"  '{s}' → '{o}' [{r?.DecisionPath}]"); return o; }
+
+            await P("my name is stephen");                 // learn (copula assertion)
+            var q1 = await P("what is my name");           // recall — should be stephen
+            var q2 = await P("whats my name");             // contraction-ish phrasing — coverage probe
+            var q3 = await P("do you know my name");        // another phrasing — coverage probe
+
+            Assert.Contains("stephen", q1, StringComparison.OrdinalIgnoreCase); // the core path works on the REPL runtime
+            _out.WriteLine($"coverage: 'what is my name'={(q1.Contains("stephen", StringComparison.OrdinalIgnoreCase))}  'whats my name'={(q2.Contains("stephen", StringComparison.OrdinalIgnoreCase))}  'do you know my name'={(q3.Contains("stephen", StringComparison.OrdinalIgnoreCase))}");
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
     }
 }

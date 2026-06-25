@@ -93,6 +93,16 @@ public partial class GenesisNeuralModel
     private TorchSharp.Modules.Parameter? _queryOperandWT; // [hidden, 1]
     private TorchSharp.Modules.Parameter? _queryOperandB;  // [1]
 
+    // PER-TOKEN ROLE head — the NN as a general STRUCTURE RECOGNISER (nova-nn-recognizer-space-structural): it tags
+    // each input token's grammatical role from the GRU's raw per-token hidden, the same shape as the operand head but
+    // multi-class. Trained by SELF-SUPERVISED labels (the assert/recall alignment), it learns to recognise subject /
+    // value / query and GENERALISES (nonce copulas, new phrasings) — so the platonic space can stay purely structural
+    // (it stores the binding the NN extracts). 0=NONE/filler, 1=SUBJECT (the key), 2=VALUE (the asserted thing),
+    // 3=QUERY (a retrieval cue). Reads the raw [hidden] per-token state, so it is hidden-dependent (resize nulls it).
+    public const int RoleCount = 4;
+    private TorchSharp.Modules.Parameter? _roleWT; // [hidden, RoleCount]
+    private TorchSharp.Modules.Parameter? _roleB;  // [RoleCount]
+
     // PLAN head — the learned composer's SHAPE selector. From the input it classifies which block-
     // composition to assemble + run on the substrate (the op/operand heads supply the arguments; this
     // supplies the shape). Lazily initialised + autograd-trained (CE) exactly like the query op head.

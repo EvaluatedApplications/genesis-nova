@@ -232,6 +232,18 @@ public partial class GenesisNeuralModel
             ((rand(new long[] { EditPerceptionDim, PlanKindCount }, device: _trainingDevice) * 2.0) - 1.0) * 0.05, true);
     }
 
+    // The per-token ROLE head (the structure recogniser). Independent of the op/plan heads — it reads the raw
+    // per-token hidden like the operand head, so it is initialised lazily on the first role-supervised example.
+    private void EnsureRoleHeadInitialized()
+    {
+        if (_roleWT is not null) return;
+        _roleWT = new TorchSharp.Modules.Parameter(
+            ((rand(new long[] { _hiddenSize, RoleCount }, device: _trainingDevice) * 2.0) - 1.0) * 0.05, true);
+        _roleB = new TorchSharp.Modules.Parameter(
+            zeros(new long[] { RoleCount }, dtype: ScalarType.Float32, device: _trainingDevice), true);
+        RecreateOptimizer();
+    }
+
     private void EnsureEditHeadInitialized()
     {
         if (_editWT is null)

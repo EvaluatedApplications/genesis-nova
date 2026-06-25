@@ -207,6 +207,19 @@ public partial class GenesisNeuralModel
                 try { oldPb!.Dispose(); } catch { }
             }
 
+            // PER-TOKEN ROLE head — clone+detach like the query heads (autograd param).
+            if (_roleWT is not null)
+            {
+                var rwClone = _roleWT.clone().detach().to(_trainingDevice);
+                var rbClone = _roleB!.clone().detach().to(_trainingDevice);
+                var oldRw = _roleWT;
+                var oldRb = _roleB;
+                _roleWT = new TorchSharp.Modules.Parameter(rwClone, true);
+                _roleB = new TorchSharp.Modules.Parameter(rbClone, true);
+                try { oldRw.Dispose(); } catch { }
+                try { oldRb!.Dispose(); } catch { }
+            }
+
             // SHARED REASONING TRUNK — clone+detach like the heads (autograd param read by route/op/plan).
             if (_trunkW is not null)
             {
@@ -370,6 +383,18 @@ public partial class GenesisNeuralModel
             try { oldPb?.Dispose(); } catch { }
         }
 
+        // PER-TOKEN ROLE head is [oldHidden, RoleCount] — hidden-dependent; null it so it lazily reinitializes at
+        // the new hidden size (same graceful degradation as the operand/query heads).
+        if (_roleWT is not null)
+        {
+            var oldRw = _roleWT;
+            var oldRb = _roleB;
+            _roleWT = null;
+            _roleB = null;
+            try { oldRw.Dispose(); } catch { }
+            try { oldRb?.Dispose(); } catch { }
+        }
+
         // SHARED GRU gate weights are [3*oldHidden, oldHidden] — incompatible after a hidden resize;
         // reinitialize a fresh untrained GRU at the new hidden size (same init as EnsureGruInitialized).
         // We do NOT attempt to copy old weights: the gate blocks are stacked [3h,h] so a grow would need
@@ -421,6 +446,9 @@ public partial class GenesisNeuralModel
         if (_queryOperandB is not null) parameters.Add(_queryOperandB!);
         if (_planWT is not null) parameters.Add(_planWT);
         if (_planB is not null) parameters.Add(_planB!);
+        // PER-TOKEN ROLE head — autograd-trained (per-token CE), like the operand head.
+        if (_roleWT is not null) parameters.Add(_roleWT);
+        if (_roleB is not null) parameters.Add(_roleB!);
         // SHARED REASONING TRUNK — autograd-trained with the heads it feeds (route/op/plan).
         if (_trunkW is not null) parameters.Add(_trunkW);
         if (_trunkB is not null) parameters.Add(_trunkB!);
@@ -523,6 +551,11 @@ public partial class GenesisNeuralModel
         _planWT = null;
         _planB = null;
         _planPerceptionW = null;
+        // PER-TOKEN ROLE head — torn down with the rest (same discipline; not persisted yet → lazily reinitialises).
+        try { _roleWT?.Dispose(); } catch { }
+        try { _roleB?.Dispose(); } catch { }
+        _roleWT = null;
+        _roleB = null;
         // SHARED REASONING TRUNK — torn down with the heads it feeds (same discipline).
         try { _trunkW?.Dispose(); } catch { }
         try { _trunkB?.Dispose(); } catch { }

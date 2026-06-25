@@ -62,6 +62,9 @@ public static class GenesisCheckpointStore
             // Persist the shared reasoning trunk so a loaded model routes identically (not random trunk × head).
             TrunkWeights: snapshot.TrunkWeights is not null ? MatrixSnapshot.From(snapshot.TrunkWeights) : null,
             TrunkBias: snapshot.TrunkBias,
+            // Persist the per-token ROLE head so the trained grammar parser (name memory) survives a reload.
+            RoleWeights: snapshot.RoleWeights is not null ? MatrixSnapshot.From(snapshot.RoleWeights) : null,
+            RoleBias: snapshot.RoleBias,
             Version: GenesisCheckpoint.CurrentVersion);
 
         // BINARY SHARDED storage (see MODEL_STORAGE.md): the NN goes to a sharded model directory, the substrate
@@ -326,7 +329,9 @@ public static class GenesisCheckpointStore
             PlanWeights: payload.PlanWeights?.ToMatrix(),
             PlanBias: payload.PlanBias,
             TrunkWeights: payload.TrunkWeights?.ToMatrix(),
-            TrunkBias: payload.TrunkBias);
+            TrunkBias: payload.TrunkBias,
+            RoleWeights: payload.RoleWeights?.ToMatrix(),
+            RoleBias: payload.RoleBias);
 
         // Hidden-size growth can't reshape the GRU/edit head — Import rejects the mismatch and
         // reinitialises them; the embeddings/output/route heads still expand.

@@ -264,4 +264,8 @@ public sealed record ModelSnapshot(
     // SHARED REASONING TRUNK weights [hidden, ReasoningTrunkDim] + bias [ReasoningTrunkDim]. The route/op/plan
     // heads read this, so it MUST persist or a loaded model routes differently (random trunk × trained head).
     double[,]? TrunkWeights = null,
-    double[]? TrunkBias = null);
+    double[]? TrunkBias = null,
+    // PER-TOKEN ROLE head [hidden, RoleCount] + bias [RoleCount] — the learned structure recogniser. Persisted so a
+    // reload restores the trained grammar PARSER (name memory etc.) instead of relearning it from the gym each session.
+    double[,]? RoleWeights = null,
+    double[]? RoleBias = null);

@@ -44,9 +44,13 @@ public sealed record GenesisCheckpoint(
     // SHARED REASONING TRUNK (route/op/plan heads read it). Null on pre-trunk checkpoints (lazily reinit on load).
     MatrixSnapshot? TrunkWeights = null,
     double[]? TrunkBias = null,
+    // PER-TOKEN ROLE head — the learned grammar parser (structure recogniser). Null on pre-role-head checkpoints
+    // (lazily reinit on load). Persisted so the trained generalising parser (name memory) survives a reload.
+    MatrixSnapshot? RoleWeights = null,
+    double[]? RoleBias = null,
     int Version = 0)
 {
-    public const int CurrentVersion = 4;
+    public const int CurrentVersion = 5;
 }
 
 public sealed record MatrixSnapshot(int Rows, int Cols, double[] Values)

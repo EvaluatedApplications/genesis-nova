@@ -50,7 +50,10 @@ public partial class GenesisNeuralModel
             _planWT is not null ? TensorToMatrix(_planWT) : null,
             _planB is not null ? TensorToVector(_planB) : null,
             _trunkW is not null ? TensorToMatrix(_trunkW) : null,
-            _trunkB is not null ? TensorToVector(_trunkB) : null);
+            _trunkB is not null ? TensorToVector(_trunkB) : null,
+            // PER-TOKEN ROLE head (null until lazily initialised by the first grammar example).
+            _roleWT is not null ? TensorToMatrix(_roleWT) : null,
+            _roleB is not null ? TensorToVector(_roleB) : null);
     }
 
     public void Import(ModelSnapshot snapshot)
@@ -102,7 +105,22 @@ public partial class GenesisNeuralModel
             _trunkW = MatrixToParameter(snapshot.TrunkWeights!);
             _trunkB = VectorToParameter(snapshot.TrunkBias!);
         }
+        // PER-TOKEN ROLE head — restore the trained grammar parser if shape-compatible, else leave null so it lazily
+        // reinitialises (pre-role-head checkpoints / hidden resize degrade gracefully, like the other heads).
+        if (HasUsableRoleHead(snapshot.RoleWeights, snapshot.RoleBias, _hiddenSize))
+        {
+            _roleWT = MatrixToParameter(snapshot.RoleWeights!);
+            _roleB = VectorToParameter(snapshot.RoleBias!);
+        }
         RecreateOptimizer();
+    }
+
+    private static bool HasUsableRoleHead(double[,]? roleWeights, double[]? roleBias, int hiddenSize)
+    {
+        if (roleWeights is null || roleBias is null || hiddenSize <= 0)
+            return false;
+        return roleWeights.GetLength(0) == hiddenSize && roleWeights.GetLength(1) == RoleCount
+            && roleBias.Length == RoleCount;
     }
 
     private static bool HasUsableQueryPlanHeads(ModelSnapshot s, int hiddenSize)

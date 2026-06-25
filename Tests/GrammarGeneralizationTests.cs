@@ -69,10 +69,22 @@ public sealed class GrammarGeneralizationTests
             var copOK = RoleOf(copulaHO, "vumple") == 0;     // unseen copula -> NONE (the hardest)
             _out.WriteLine($"\nGENERALISES: heldout-subject={subjOK} heldout-value={valOK} heldout-querysubject={qSubjOK} heldout-copula={copOK}");
 
-            // The verdict. Require the CONTENT roles to transfer to unseen vocabulary (subject + value), which is the
-            // meaningful claim ("my <newthing> is <newvalue>" parses). If this fails, the head is memorising — cut it.
+            // SYNONYM discrimination (the parallel fix — expanded cluster mass): "big" must return a BIG-cluster
+            // synonym, not bleed to another cluster (was "chilly"). Same training run, so one validation covers both.
+            var syn = (await rt.PredictAsync("a synonym for big", 8)).Result?.Output?.Trim() ?? "";
+            _out.WriteLine($"SYNONYM: 'a synonym for big' -> '{syn}'");
+            var bigCluster = new[] { "large", "huge", "giant", "enormous" };
+            var synOK = bigCluster.Contains(syn, StringComparer.OrdinalIgnoreCase);
+
+            // The verdict. Require the CONTENT roles to transfer to unseen vocabulary (subject + value), the meaningful
+            // claim ("my <newthing> is <newvalue>" parses). If this fails, the head is memorising — cut it.
             Assert.True(subjOK && valOK,
                 $"role head must generalise to UNSEEN vocab by structure (else it's memorising): subj={subjOK} val={valOK}");
+            // And — after diversifying the curriculum's copulas — a held-out COPULA must read NONE by POSITION, not be
+            // mistaken for SUBJECT. This is the copula-class sharpening gate (was the memorisation-leaning weak spot).
+            Assert.True(copOK,
+                $"held-out copula must generalise to NONE by position (diverse-copula training): cop={copOK}");
+            Assert.True(synOK, $"synonym must return a BIG-cluster word (expanded cluster mass), not bleed: got '{syn}'");
         }
         finally { try { Directory.Delete(dir, true); } catch { } }
     }

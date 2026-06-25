@@ -34,7 +34,11 @@ public sealed class GrammarCurriculum : ITrainingCurriculum
         "alex", "kim", "max", "nova", "pixel", "echo", "blue", "jade", "ace", "milo", "luna", "ziggy",
     };
     // ROTATED grammar tokens — varied so none is a constant correlate, and NONCE ones so the ROLE generalises.
-    private static readonly string[] Copulas = { "is", "was", "is", "ploo" };           // ploo = NONCE copula
+    // MANY, mostly-NONCE copulas — the point is to stop the NN memorising specific copula tokens and FORCE it to learn
+    // the copula POSITION (the filler between subject and value) as NONE, so it generalises to an unseen copula. With
+    // only {is,was,ploo} it learned those tokens; a held-out copula then read SUBJECT (measured). Variety breaks that.
+    private static readonly string[] Copulas =
+        { "is", "was", "are", "be", "ploo", "vex", "glip", "borp", "zud", "plim", "krof", "snil", "drask", "wis" };
     // SINGLE-TOKEN query cues only — a multi-word cue ("what is") would leak the copula "is" into recall frames and
     // pollute its role label (it would look like it appears in answer-absent inputs). One token = one clean role.
     private static readonly string[] QueryCues = { "whats", "who", "which", "recall", "tellme" };

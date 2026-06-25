@@ -152,6 +152,39 @@ public sealed partial class GenesisEvalAppRuntime : ILearningRuntime
     /// </summary>
     public void RegisterOperationToken(string token) => _state.Memory.RegisterOperationToken(token);
 
+    /// <summary>DIAGNOSTIC for the function-word research: for each token, return its learned signals — relation
+    /// DEGREE and cloud CENTRALITY (cosine of its meaning-cloud to the space's global centroid). The hypothesis: a
+    /// function word's cloud sits near the centroid (it co-occurs with everything) while a content word — even a
+    /// popular one — points somewhere specific. Lets a test SEE which signal actually separates them.</summary>
+    public IReadOnlyList<(string Token, int Degree, double Centrality, bool Known)> ProbeTokenSignals(IReadOnlyList<string> tokens)
+        => WithModelGate(() =>
+        {
+            var result = new List<(string, int, double, bool)>();
+            if (_state.Memory is not Cognition.Platonic.DialecticalSpace ds) return result;
+            // Global centroid = mean of every concept's (unit) cloud.
+            double[]? centroid = null; var n = 0;
+            foreach (var c in ds.ActiveConcepts)
+            {
+                var v = ds.SemanticVectorOf(c);
+                if (v is null) continue;
+                centroid ??= new double[v.Length];
+                for (var i = 0; i < v.Length && i < centroid.Length; i++) centroid[i] += v[i];
+                n++;
+            }
+            if (centroid is not null) { var nn = 0.0; for (var i = 0; i < centroid.Length; i++) nn += centroid[i] * centroid[i]; nn = System.Math.Sqrt(nn); if (nn > 1e-9) for (var i = 0; i < centroid.Length; i++) centroid[i] /= nn; }
+            foreach (var t in tokens)
+            {
+                var tok = t.ToLowerInvariant();
+                var known = ds.ContainsConcept(tok);
+                var deg = ds.GetRelationDegree(tok);
+                var v = ds.SemanticVectorOf(tok);
+                var cen = 0.0;
+                if (v is not null && centroid is not null) { for (var i = 0; i < v.Length && i < centroid.Length; i++) cen += v[i] * centroid[i]; }
+                result.Add((tok, deg, cen, known));
+            }
+            return result;
+        });
+
     /// <summary>Turn the CONVERSATIONAL talk route (<c>TryFieldRespond</c>) on/off on the live engine. The gym
     /// enables it while the PersonalityCurriculum is in the mix so the persona is GRADED in-character — it follows
     /// the learned cue→reply CHUNK relation instead of relaxation (which drifts to a cue word, ~8%), so the

@@ -91,13 +91,22 @@ public sealed class GymTrainer : ITrainingCurriculum
     };
     public static readonly string[] PredicateVocab = { "greater", "less", "equal" }; // competing-answer set for predicate
 
-    // OPTIONAL conversational lead-ins — surface "cruft" that ROTATES (and is often empty) so it adds VARIETY without
-    // any one filler token becoming a constant correlate (the bare-beats-CONSISTENT-filler lesson, not bare-beats-
-    // VARIED). Applied only to natural-language retrieval/worded frames — NEVER to bare arithmetic, which works and
-    // has no framing hub. The empties weight toward "no lead-in" so most prompts stay clean.
+    // OPTIONAL conversational lead-ins + trailers — surface "cruft" that ROTATES (and is often empty) so it adds
+    // VARIETY without any one filler token becoming a constant correlate (the bare-beats-CONSISTENT-filler lesson, not
+    // bare-beats-VARIED). Applied only to natural-language retrieval/worded frames — NEVER to bare arithmetic.
+    // DELIBERATELY rich + DIVERSE: the point is to put FUNCTION words (can/you/do/for/me/the/of/if/with/about/...) in
+    // MANY different contexts so they become semantically EMPTY (central cloud) and the model can LEARN function-word-
+    // ness from distribution — instead of a hardcoded stopword list. A function word locked to one frame looks
+    // specific; spread across hundreds of contexts it averages out to the centroid. Empties weight toward clean.
     private static readonly string[] LeadIns =
-        { "", "", "", "", "hey, ", "quick one, ", "tell me, ", "i wonder, ", "ok so, ", "remind me, ", "just curious, " };
-    private string Cruft(string frame) => LeadIns[_rng.Next(LeadIns.Length)] + frame;
+        { "", "", "", "hey, ", "quick one, ", "tell me, ", "i wonder, ", "ok so, ", "remind me, ", "just curious, ",
+          "can you tell me, ", "do you know, ", "i was wondering, ", "give me, ", "what about, ", "help me with, ",
+          "i need to know, ", "could you say, ", "any idea of, ", "so like, ", "for the record, ", "out of curiosity, ",
+          "by the way, ", "real quick, ", "if you can, " };
+    private static readonly string[] Trailers =
+        { "", "", "", "", " for me", " please", " if you can", " real quick", " i forget", " thanks", " you know",
+          " or something", " by the way", " if you would", " for a second", " off the top of your head", " in your view" };
+    private string Cruft(string frame) => LeadIns[_rng.Next(LeadIns.Length)] + frame + Trailers[_rng.Next(Trailers.Length)];
     private int _streak;
     private int _stuck; // consecutive sub-mastery cycles → back off a level when it gets stuck
 

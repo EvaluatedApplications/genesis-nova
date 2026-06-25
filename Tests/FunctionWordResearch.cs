@@ -39,9 +39,11 @@ public sealed class FunctionWordResearch
         using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(seconds)))
             try { await new GenesisModularTrainingOrchestrator().RunAsync(rt, curriculum, opt, _ => { }, cts.Token); } catch (OperationCanceledException) { }
 
-        // Function words appear across the gym's frames; content words are the actual cues/answers (incl. POPULAR ones).
-        var fns = new[] { "what", "is", "a", "of", "the", "for", "kind", "thing", "to", "in", "how", "does" };
-        var content = new[] { "apple", "fruit", "big", "large", "huge", "dog", "animal", "five", "greater", "vehicle" };
+        // Function words appear across the gym's frames + the diversified cruft; content words are the actual
+        // cues/answers (incl. POPULAR ones, which degree wrongly flags as hubs).
+        var fns = new[] { "what", "is", "a", "of", "the", "for", "kind", "thing", "to", "in",
+                          "can", "you", "do", "me", "i", "if", "with", "about", "could", "any" };
+        var content = new[] { "apple", "fruit", "big", "large", "huge", "dog", "animal", "greater", "vehicle", "color" };
 
         var stats = rt.ProbeTokenSignals(fns.Concat(content).ToArray())
             .ToDictionary(s => s.Token, s => s, StringComparer.OrdinalIgnoreCase);

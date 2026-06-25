@@ -24,6 +24,7 @@ public sealed class FocusedCurriculum : ITrainingCurriculum
     private readonly int _replayCap;
     private readonly int _rehearsalRidersPerCycle;
     private int _riderCursor;
+    private int _focusCursor;
     private FocusUnit? _focus;
 
     public FocusedCurriculum(IEnumerable<ITrainingCurriculum> children, double masteryBar = 0.80,
@@ -52,7 +53,7 @@ public sealed class FocusedCurriculum : ITrainingCurriculum
         if (_focus is null || _focus.Mastered || _focus.TurnExhausted)
         {
             _focus?.ResetTurn();                  // hand off — the just-finished focus gets a fresh budget next pass
-            _focus = NextNotMastered(_focus);     // round-robin to the next un-mastered unit (null IFF all mastered)
+            _focus = NextWeakest();               // give the next turn to the WEAKEST un-mastered unit (by held-out accuracy)
             _focus?.BeginTurn();                  // marks it introduced + starts its turn counter
         }
         foreach (var u in _all) u.IsFocus = u == _focus;
@@ -79,17 +80,22 @@ public sealed class FocusedCurriculum : ITrainingCurriculum
         _riderCursor = (_riderCursor + window) % riders.Count;
     }
 
-    // The next not-yet-mastered unit AFTER `from` in round-robin order (wraps). Null only if every unit mastered.
-    private FocusUnit? NextNotMastered(FocusUnit? from)
+    // WEAKEST-FIRST focus selection (the general, future-proof "give more examples to whatever is struggling"): the
+    // next turn goes to the un-mastered unit with the LOWEST recent accuracy. This ONLY works because every unit grades
+    // HELD-OUT generalisation (gym holds out members; grammar asserts+recalls never-seen tokens), so low accuracy means
+    // genuine inability, not under-exposure — a unit that can recall its trained set but cannot generalise reports LOW
+    // and gets prioritised. Never-introduced units come first (no data yet); equal-accuracy ties rotate via a cursor.
+    private FocusUnit? NextWeakest()
     {
-        if (_all.Count == 0) return null;
-        var start = from is null ? -1 : _all.IndexOf(from);
-        for (var step = 1; step <= _all.Count; step++)
-        {
-            var u = _all[(start + step) % _all.Count];   // start=-1 → begins at index 0 and sweeps once
-            if (!u.Mastered) return u;
-        }
-        return null;
+        var unmastered = _all.Where(u => !u.Mastered).ToList();
+        if (unmastered.Count == 0) return null;
+        var fresh = unmastered.Where(u => !u.HasBeenFocused).ToList();
+        var pool = fresh.Count > 0 ? fresh : unmastered;
+        var minAcc = pool.Min(u => u.RecentAccuracy);
+        var tied = pool.Where(u => u.RecentAccuracy <= minAcc + 1e-6).ToList();
+        var pick = tied[_focusCursor % tied.Count];
+        _focusCursor++;
+        return pick;
     }
 
     // Grade only the ACTIVE set (focus + introduced/mastered riders) — held-back, not-yet-introduced units don't
@@ -128,6 +134,7 @@ public sealed class FocusUnit : ITrainingCurriculum
     public bool IsFocus { get; set; }
     public bool HasBeenFocused { get; private set; }            // introduced at least once → eligible to rehearse
     public bool Mastered { get; private set; }
+    public double RecentAccuracy { get; private set; }          // EMA of graded (held-out) accuracy — drives weakest-first
     bool ITrainingCurriculum.IsMastered => Mastered;            // surface mastery for the unified progress view
     public bool TurnExhausted => _turnAttempts >= _focusBudget; // this TURN is spent (per-turn, resets on handoff)
 
@@ -144,6 +151,7 @@ public sealed class FocusUnit : ITrainingCurriculum
     public void RecordCycle(CycleGrade grade)
     {
         _inner.RecordCycle(grade);                       // inner advances its OWN difficulty (drive-to-depth)
+        RecentAccuracy = HasBeenFocused ? 0.5 * RecentAccuracy + 0.5 * grade.Accuracy : grade.Accuracy; // EMA for weakest-first
         if (IsFocus && !Mastered) _turnAttempts++;       // only the focus spends its turn budget
         if (grade.Accuracy >= _bar)
         {

@@ -47,6 +47,14 @@ public sealed class GrammarCurriculum : ITrainingCurriculum
     private static readonly string[] QueryCues = { "what is", "whats", "tell me", "who is", "do you know", "remind me of" };
     private static readonly string[] LeadIns = { "" }; // keep frames clean so the per-token role labels stay clean
 
+    // HELD-OUT pools (DISJOINT from the training tokens above) for HONEST grading: the probe asserts a fact with
+    // never-seen noun/copula/value then recalls it, so accuracy reflects GENERALISATION (can the role head parse a
+    // novel frame), not memorisation of the trained set. A unit that can only recall what it trained on reports LOW
+    // here and the weakest-first scheduler prioritises it. A small fixed pool → bounded, nonce → no real-phrase collision.
+    private static readonly string[] HeldNouns = { "blixnar", "gizmo", "wodget", "plonk", "trizzle", "quomp", "snarf", "vlim" };
+    private static readonly string[] HeldValues = { "zorptron", "quxil", "fnord", "plimth", "dworb", "skav", "trint", "vooble" };
+    private static readonly string[] HeldCopulas = { "vumple", "zib", "kront", "blarg", "frot", "splim" };
+
     private readonly Random _rng = new();
     private readonly int _trainPerCycle;
     private readonly int _probeCount;
@@ -88,11 +96,22 @@ public sealed class GrammarCurriculum : ITrainingCurriculum
 
     public IReadOnlyList<TrainingProbe> NextProbes()
     {
+        // HONEST held-out grading: each pair ASSERTS a fact with NEVER-SEEN tokens (the assert runs through the
+        // inference path, so it actually learns it) then RECALLS it. Correct only if the role head GENERALISES the
+        // novel frame (parses subject/value/copula by position) AND retrieval returns it. So this unit's accuracy
+        // tracks GENERALISATION, giving the weakest-first scheduler a truthful weakness signal. The held-out pools are
+        // nonce + small, so the probe asserts cannot collide with real user phrases and grow the space unboundedly.
         var probes = new List<TrainingProbe>(_probeCount);
-        for (var i = 0; i < _probeCount; i++)
-            // STRUCTURAL grading: bindings are ephemeral, so accept ANY value-pool token — the lesson is producing a
-            // value-shaped recall through the frame, not memorising a specific fact (the user's assertions carry those).
-            probes.Add(new TrainingProbe($"{QueryCues[_rng.Next(QueryCues.Length)]} {Subject()}", Values, RequiredDepth: 1, RequirePlatonic: false));
+        for (var i = 0; i < _probeCount / 2; i++)
+        {
+            var poss = Possessives[_rng.Next(Possessives.Length)];
+            var noun = HeldNouns[_rng.Next(HeldNouns.Length)];
+            var value = HeldValues[_rng.Next(HeldValues.Length)];
+            var cop = HeldCopulas[_rng.Next(HeldCopulas.Length)];
+            var query = QueryCues[_rng.Next(QueryCues.Length)];
+            probes.Add(new TrainingProbe($"{poss} {noun} {cop} {value}", new[] { value }, RequiredDepth: 1, RequirePlatonic: false)); // assert (held-out) → echoes value if it parses
+            probes.Add(new TrainingProbe($"{query} {poss} {noun}", new[] { value }, RequiredDepth: 1, RequirePlatonic: false));        // recall it right after → tests generalise + retrieve
+        }
         return probes;
     }
 

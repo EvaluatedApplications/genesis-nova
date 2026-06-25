@@ -654,49 +654,87 @@ public sealed partial class GenesisInferenceEngine
     {
         subject = value = null;
         if (toks.Count < 2 || toks.Any(IsNumericLike)) return FrameKind.None;
+        // PREFER the NN structure recogniser's per-token roles; fall back to the centrality classifier per token only
+        // where the NN is untrained/unsure. This is the recogniser doing the fuzzy job, the space staying structural.
+        var nn = NnRoles(toks);
+        Cognition.GrammarRoleLearner.Role RoleAt(int i)
+            => nn is not null && nn[i] != Cognition.GrammarRoleLearner.Role.Unknown ? nn[i] : GrammarRole(ds, toks[i]);
+
         var hasQuery = false;
         var content = new List<int>();
         for (var i = 0; i < toks.Count; i++)
         {
             var t = toks[i];
             if (!t.All(char.IsLetter) || t.Length < 2) continue;
-            if (GrammarRole(ds, t) == Cognition.GrammarRoleLearner.Role.Query) { hasQuery = true; continue; }
-            if (ds.IsFunctionLike(t)) continue;          // filler (determiner/copula) → phrase building handles it
+            var role = RoleAt(i);
+            if (role == Cognition.GrammarRoleLearner.Role.Query) { hasQuery = true; continue; }
+            if (role == Cognition.GrammarRoleLearner.Role.Filler || ds.IsFunctionLike(t)) continue; // filler/determiner
             content.Add(i);                              // a content token (key / value / unknown-role content)
         }
         if (content.Count == 0) return FrameKind.None;
-        var keyIdx = content.Where(i => GrammarRole(ds, toks[i]) == Cognition.GrammarRoleLearner.Role.Key).ToList();
-        var valIdx = content.Where(i => GrammarRole(ds, toks[i]) == Cognition.GrammarRoleLearner.Role.Value).ToList();
+        var keyIdx = content.Where(i => RoleAt(i) == Cognition.GrammarRoleLearner.Role.Key).ToList();
+        var valIdx = content.Where(i => RoleAt(i) == Cognition.GrammarRoleLearner.Role.Value).ToList();
         if (keyIdx.Count == 0 && valIdx.Count == 0) return FrameKind.None; // no CONFIDENT role → cold → fallback
 
         if (hasQuery) // a query cue is present → it's a question; the subject is the KEY (or the lone content)
         {
             var ni = keyIdx.Count > 0 ? keyIdx[^1] : content[^1];
-            subject = BuildSubjectPhrase(toks, ds, ni);
+            subject = BuildSubjectPhrase(toks, ds, ni, nn);
             return subject is not null ? FrameKind.Question : FrameKind.None;
         }
         // ASSERTION: the VALUE is the asserted thing; the KEY is the subject. Either may be inferred when the other is
-        // known and there are exactly two content tokens (a new value like "zorptron" has no learned role yet).
+        // known and there are exactly two content tokens (a new value like "zorptron" the NN/alignment hasn't placed).
         int? vi = valIdx.Count > 0 ? valIdx[^1] : (content.Count == 2 && keyIdx.Count == 1 ? content.First(i => i != keyIdx[0]) : (int?)null);
         int? ki = keyIdx.Count > 0 ? keyIdx[^1] : (content.Count == 2 && valIdx.Count == 1 ? content.First(i => i != valIdx[0]) : (int?)null);
         if (vi is null || ki is null || vi == ki) return FrameKind.None;
         value = toks[vi.Value];
-        subject = BuildSubjectPhrase(toks, ds, ki.Value);
+        subject = BuildSubjectPhrase(toks, ds, ki.Value, nn);
         return subject is not null && subject != value ? FrameKind.Assertion : FrameKind.None;
     }
 
-    // The subject PHRASE = the key noun + its immediately-preceding determiner (any learned filler that is not a query
-    // cue — so "my"/"your"/"the" stay with the noun and "my name" != "your name"), keeping the possessor without a
-    // possessive list. (Determiner-before-noun; refine per word order when targeting non-English grammars.)
-    private string? BuildSubjectPhrase(IReadOnlyList<string> toks, DialecticalSpace ds, int nounIndex)
+    // The NN STRUCTURE RECOGNISER's per-token roles, aligned to the field tokens. Grammar frames are number-free so the
+    // model tokenization matches TokenizeField; returns null if the head is untrained or the tokenizations don't align,
+    // and Unknown for a token the NN isn't confident about (→ centrality fallback). Maps the head's class ids to the
+    // role enum (0=NONE→Filler, 1=SUBJECT→Key, 2=VALUE→Value, 3=QUERY→Query — the same map as DeriveRoleLabels).
+    private const double NnRoleMinConfidence = 0.5;
+    private Cognition.GrammarRoleLearner.Role[]? NnRoles(IReadOnlyList<string> toks)
+    {
+        if (toks.Count == 0) return null;
+        var ids = _tokenizer.Encode(string.Join(" ", toks)).ToArray();
+        if (ids.Length != toks.Count) return null;
+        var pred = _model.PredictRoles(ids);
+        if (pred.Length != toks.Count) return null;
+        var roles = new Cognition.GrammarRoleLearner.Role[toks.Count];
+        for (var i = 0; i < toks.Count; i++)
+            roles[i] = pred[i].Confidence >= NnRoleMinConfidence
+                ? pred[i].Role switch
+                {
+                    0 => Cognition.GrammarRoleLearner.Role.Filler,
+                    1 => Cognition.GrammarRoleLearner.Role.Key,
+                    2 => Cognition.GrammarRoleLearner.Role.Value,
+                    3 => Cognition.GrammarRoleLearner.Role.Query,
+                    _ => Cognition.GrammarRoleLearner.Role.Unknown,
+                }
+                : Cognition.GrammarRoleLearner.Role.Unknown;
+        return roles;
+    }
+
+    // The subject PHRASE = the key noun + its immediately-preceding determiner (any filler that is not a query cue — so
+    // "my"/"your"/"the" stay with the noun and "my name" != "your name"), keeping the possessor without a possessive
+    // list. Determiner-detection prefers the NN roles. (Determiner-before-noun; refine per word order for non-English.)
+    private string? BuildSubjectPhrase(IReadOnlyList<string> toks, DialecticalSpace ds, int nounIndex, Cognition.GrammarRoleLearner.Role[]? nn)
     {
         if (nounIndex < 0 || nounIndex >= toks.Count) return null;
+        Cognition.GrammarRoleLearner.Role RoleAt(int i)
+            => nn is not null && nn[i] != Cognition.GrammarRoleLearner.Role.Unknown ? nn[i] : GrammarRole(ds, toks[i]);
         var begin = nounIndex;
         if (nounIndex - 1 >= 0)
         {
             var p = toks[nounIndex - 1];
-            if (p.All(char.IsLetter) && ds.IsFunctionLike(p) && GrammarRole(ds, p) != Cognition.GrammarRoleLearner.Role.Query)
-                begin = nounIndex - 1;
+            var pr = RoleAt(nounIndex - 1);
+            var isDeterminer = (pr == Cognition.GrammarRoleLearner.Role.Filler || ds.IsFunctionLike(p))
+                               && pr != Cognition.GrammarRoleLearner.Role.Query;
+            if (p.All(char.IsLetter) && isDeterminer) begin = nounIndex - 1;
         }
         return string.Join(" ", Enumerable.Range(begin, nounIndex - begin + 1).Select(i => toks[i]));
     }

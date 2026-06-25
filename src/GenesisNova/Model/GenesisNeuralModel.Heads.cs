@@ -73,6 +73,40 @@ public partial class GenesisNeuralModel
         }
     }
 
+    /// <summary>The NN STRUCTURE RECOGNISER: per-token grammatical role from the raw per-token hidden — argmax over
+    /// {0=NONE,1=SUBJECT,2=VALUE,3=QUERY} with its softmax confidence. Empty until the role head is trained, so the
+    /// field parser degrades gracefully to its bootstrap. This is the learned, generalising replacement for the
+    /// hand-coded centrality/tally role classifier (nova-nn-recognizer-space-structural).</summary>
+    public (int Role, double Confidence)[] PredictRoles(IReadOnlyList<int> inputTokens)
+    {
+        if (_roleWT is null || inputTokens.Count == 0)
+            return System.Array.Empty<(int, double)>();
+
+        EnsureModelInitialized();
+        EnsureGruInitialized();
+        using var noGrad = no_grad();
+        var scratch = new List<Tensor>();
+        try
+        {
+            var perTokenStates = new List<Tensor>();
+            EncodeInput(inputTokens, scratch, _inferenceDevice, perTokenStates);
+            Tensor rW = ToInfer(_roleWT, scratch), rB = ToInfer(_roleB!, scratch);
+            var roles = new (int, double)[perTokenStates.Count];
+            for (var t = 0; t < perTokenStates.Count; t++)
+            {
+                var logits = perTokenStates[t].matmul(rW) + rB; scratch.Add(logits);
+                var probs = nn.functional.softmax(logits, 0); scratch.Add(probs);
+                using var cpu = probs.cpu();
+                var s = cpu.data<float>().ToArray();
+                var best = 0;
+                for (var i = 1; i < s.Length; i++) if (s[i] > s[best]) best = i;
+                roles[t] = (best, s.Length > 0 ? s[best] : 0.0);
+            }
+            return roles;
+        }
+        finally { foreach (var t in scratch) { try { t?.Dispose(); } catch { } } }
+    }
+
     /// <summary>
     /// The GRU classifies which block-COMPOSITION SHAPE the input asks for — the learned composer's shape
     /// selector: 0=none/abstain, 1=arithmetic, 2=predicate, 3=retrieval. Softmax over the plan-kind head.

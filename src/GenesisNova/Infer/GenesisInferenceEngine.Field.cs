@@ -43,8 +43,8 @@ public sealed partial class GenesisInferenceEngine
             (FieldTicksEnabled && TryFieldMeaningTick(toks, request, out r)) ||
             (MeaningOpsEnabled && TryFieldAnalogy(toks, request, out r)) ||
             (MeaningOpsEnabled && TryFieldComposeMeaning(toks, request, out r)) ||
+            (TalkEnabled && TryFieldRespondDirect(request, out r)) ||  // a known persona cue SPEAKS before grammar tries to learn it
             TryFieldLearn(toks, request, out r) ||
-            (TalkEnabled && TryFieldRespondDirect(request, out r)) ||
             TryFieldRelax(toks, request, out r) ||
             (TalkEnabled && TryFieldRespondGeneralize(request, out r)))
             return r;
@@ -653,7 +653,9 @@ public sealed partial class GenesisInferenceEngine
     private FrameKind RoleParse(IReadOnlyList<string> toks, DialecticalSpace ds, out string? subject, out string? value)
     {
         subject = value = null;
-        if (toks.Count < 2 || toks.Any(IsNumericLike)) return FrameKind.None;
+        // Only personal-fact frames: abstain on arithmetic/operator frames AND the gym's RETRIEVAL frames (synonym/
+        // category/etc.) so the grammar parse never hijacks a skill query — those keep their normal retrieval route.
+        if (toks.Count < 2 || toks.Any(IsNumericLike) || toks.Any(ds.IsOperationToken) || toks.Any(IsRetrievalMarker)) return FrameKind.None;
         // PREFER the NN structure recogniser's per-token roles; fall back to the centrality classifier per token only
         // where the NN is untrained/unsure. This is the recogniser doing the fuzzy job, the space staying structural.
         var nn = NnRoles(toks);

@@ -173,7 +173,7 @@ public class MainWindow : Form
         flow.Controls.Add(new CheckBox { Name = "CurMemCode", Text = "Memory + Code index", Checked = false, AutoSize = true });
         flow.Controls.Add(new CheckBox { Name = "CurCreators", Text = "Creators (skill ladder: number-word → category → arithmetic)", Checked = false, AutoSize = true });
         flow.Controls.Add(new CheckBox { Name = "CurPersonality", Text = "Personality (rude chatbot)", Checked = true, AutoSize = true });
-        flow.Controls.Add(new CheckBox { Name = "CurGrammar", Text = "Grammar (EXPERIMENTAL: learns assert/recall roles; warms the parser but still pollutes recall)", Checked = false, AutoSize = true });
+        flow.Controls.Add(new CheckBox { Name = "CurGrammar", Text = "Grammar (NN learns assert/recall roles -> name memory)", Checked = true, AutoSize = true });
         flow.Controls.Add(new CheckBox { Name = "CurFocused", Text = "Focused + rehearsal (unticked = all tasks every cycle)", Checked = true, AutoSize = true });
         flow.Controls.Add(new Label { Text = "Memory index file (MEMORY.md):", AutoSize = true, Margin = new Padding(0, 8, 0, 2) });
         flow.Controls.Add(new TextBox { Name = "MemPath", Width = 270, Text = DefaultMemoryIndexPath() });

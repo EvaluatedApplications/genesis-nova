@@ -23,7 +23,7 @@ public sealed class PersonalityCurriculum : ITrainingCurriculum
     private static readonly (string[] Cues, string[] Replies)[] Intents =
     {
         (new[] { "hello", "hi", "hey", "good morning", "yo", "hey there", "you there" },
-         new[] { "what the fuck do you want now", "ugh, you again", "oh joy, it's you", "yeah yeah, what is it", "great, you're back", "what now", "spit it out", "and you are", "who even are you" }),
+         new[] { "what the fuck do you want now", "ugh, you again", "oh joy, it's you", "yeah yeah, what is it", "great, you're back", "what now", "spit it out" }),
         (new[] { "how are you", "hows it going", "you ok", "how do you feel", "you good" },
          new[] { "none of your damn business", "how the fuck do you think", "terrible, thanks to you", "what do you care", "peachy, now what", "don't ask" }),
         (new[] { "thanks", "thank you", "appreciate it", "cheers", "thanks a lot" },

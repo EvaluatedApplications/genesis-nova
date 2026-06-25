@@ -1477,10 +1477,14 @@ public class MainWindow : Form
         // the thin SHARED heads (op-classifier, decode) from mode-collapsing toward the current skill — the
         // catastrophic forgetting a plain rotate-one-at-a-time scheduler caused. Untick → CompositeCurriculum
         // (every muscle, full batch, every cycle). One trainer → just run it.
+        // RESUMING = any muscle restored above level 1 (it was trained before). Then mark all units introduced so the
+        // FULL trained mix is probed from cycle 1 — otherwise the reported accuracy starts at just the first focus
+        // muscle and only climbs back as the rotation re-introduces them (reads as "starts lower than it ended").
+        var resuming = gymChildren.Any(g => g.Level > 1);
         ITrainingCurriculum curriculum = children.Count == 1
             ? children[0]
             : (GetControl<CheckBox>("CurFocused")?.Checked ?? true)
-                ? new FocusedCurriculum(children, focusBudget: 8) // focus + rider-replay; prompt handoff for unbounded muscles
+                ? new FocusedCurriculum(children, focusBudget: 8, resuming: resuming) // focus + rider-replay; prompt handoff for unbounded muscles
                 : new CompositeCurriculum(children);
         if (persona is not null)
             curriculum = new ProbeAlongsideCurriculum(curriculum, persona); // graded each cycle → shows in the list, kept alive

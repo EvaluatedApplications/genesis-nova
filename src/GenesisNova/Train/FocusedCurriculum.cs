@@ -27,11 +27,18 @@ public sealed class FocusedCurriculum : ITrainingCurriculum
     private FocusUnit? _focus;
 
     public FocusedCurriculum(IEnumerable<ITrainingCurriculum> children, double masteryBar = 0.80,
-        int stabilityWindow = 3, int focusBudget = 30, int replayCap = 8, int rehearsalRidersPerCycle = 3)
+        int stabilityWindow = 3, int focusBudget = 30, int replayCap = 8, int rehearsalRidersPerCycle = 3,
+        bool resuming = false)
     {
         _all = children.Select(c => new FocusUnit(c, masteryBar, stabilityWindow, focusBudget)).ToList();
         _replayCap = replayCap;
         _rehearsalRidersPerCycle = Math.Max(1, rehearsalRidersPerCycle);
+        // RESUMING a prior session: every unit was already trained, so mark them all INTRODUCED. Otherwise the probe
+        // set (Units = focus + introduced) starts as just the first focus muscle, so the reported accuracy on the
+        // first cycles reflects ONE muscle (often a hard one) and only climbs back to the true mix as the rotation
+        // re-introduces them — which reads as "training always starts lower than it ended" on every reload. With this,
+        // the full trained mix is graded + rehearsed from cycle 1, so the resumed accuracy matches where it left off.
+        if (resuming) foreach (var u in _all) u.MarkIntroduced();
     }
 
     public string Name => "focused(" + string.Join(",", _all.Select(u => u.Name)) + ")";
@@ -126,6 +133,7 @@ public sealed class FocusUnit : ITrainingCurriculum
 
     public void BeginTurn() { HasBeenFocused = true; _turnAttempts = 0; } // claim focus: introduce + fresh budget
     public void ResetTurn() => _turnAttempts = 0;                         // hand off: clear the spent turn counter
+    public void MarkIntroduced() => HasBeenFocused = true;               // resume: this unit was trained before → already in the mix
 
     public string Name => _inner.Name;
     public int Difficulty => _inner.Difficulty;

@@ -72,18 +72,19 @@ public static class GenesisCheckpointStore
             Directory.CreateDirectory(dir);
         ExecuteWithCheckpointLock(path, () =>
         {
-            GenesisShardedCheckpointStore.WriteModel(GenesisShardedCheckpointStore.ModelDir(path), payload);
+            // One GENERATION per save, stamped on the model + substrate manifests and the pointer (written LAST as
+            // the commit). A crash between the writes leaves them at different generations → IsConsistent() detects
+            // the tear on load and falls back to last-good, so we never resume a model-vs-substrate-mismatched brain.
+            var generation = Guid.NewGuid().ToString("N");
+            GenesisShardedCheckpointStore.WriteModel(GenesisShardedCheckpointStore.ModelDir(path), payload, generation);
             if (platonicSpace is not null)
-                GenesisShardedCheckpointStore.WriteSubstrate(GenesisShardedCheckpointStore.SubstrateDir(path), platonicSpace);
-            WriteAtomic(path, ShardedPointerJson);
+                GenesisShardedCheckpointStore.WriteSubstrate(GenesisShardedCheckpointStore.SubstrateDir(path), platonicSpace, generation);
+            WriteAtomic(path, GenesisShardedCheckpointStore.PointerJson(generation)); // commit
             // A stale legacy substrate companion (data now lives in the .platonic dir) would only confuse — drop it.
             var companion = PlatonicCompanionPath(path);
             if (File.Exists(companion)) try { File.Delete(companion); } catch { }
         });
     }
-
-    // The legacy ".json" checkpoint path now holds this tiny pointer; the real data is in the sharded model dir.
-    private const string ShardedPointerJson = "{\"GnvSharded\":true,\"FormatVersion\":1}";
 
     /// <summary>The companion file holding the platonic space for a given NN checkpoint path. Deleting it
     /// resets the substrate while keeping the long-lived NN.</summary>
@@ -115,9 +116,33 @@ public static class GenesisCheckpointStore
         string path,
         GenesisNovaConfig runtimeConfig)
     {
-        var (payload, platonic) = ResolveStored(path);
+        var loadPath = ResolveConsistentPath(path, runtimeConfig);
+        var (payload, platonic) = ResolveStored(loadPath);
         var loaded = CreateRuntimePayload(payload, runtimeConfig);
         return (loaded.Config, loaded.Tokenizer, loaded.Model, platonic, loaded.Conversation, loaded.AutonomousTraining, loaded.TrainerLearningStateJson);
+    }
+
+    /// <summary>Guard against a TORN save (a crash between writing the model dir, the substrate dir, and the pointer):
+    /// if the checkpoint's generations don't all match, resume from the last-good (probe-passing, consistent)
+    /// checkpoint instead of a model-vs-substrate-mismatched brain. Falls through to the original path when it is
+    /// consistent, legacy (unverifiable), or there is no consistent last-good (graceful: a one-generation-stale
+    /// substrate beats refusing to resume a long run).</summary>
+    private static string ResolveConsistentPath(string path, GenesisNovaConfig runtimeConfig)
+    {
+        if (!GenesisShardedCheckpointStore.ModelExists(GenesisShardedCheckpointStore.ModelDir(path))
+            || GenesisShardedCheckpointStore.IsConsistent(path))
+            return path;
+
+        var lastGood = GenesisLocalStateStore.ResolveLastGoodCheckpointPath(runtimeConfig);
+        if (!string.Equals(lastGood, path, StringComparison.OrdinalIgnoreCase)
+            && GenesisShardedCheckpointStore.ModelExists(GenesisShardedCheckpointStore.ModelDir(lastGood))
+            && GenesisShardedCheckpointStore.IsConsistent(lastGood))
+        {
+            try { GenesisLocalStateStore.AppendJournalEntry(runtimeConfig, "torn-checkpoint-fallback", detail: $"{path} -> {lastGood}"); } catch { }
+            return lastGood;
+        }
+        try { GenesisLocalStateStore.AppendJournalEntry(runtimeConfig, "torn-checkpoint-no-fallback", detail: path); } catch { }
+        return path;
     }
 
     /// <summary>Resolve a checkpoint at <paramref name="path"/>: read the sharded model if present, otherwise
@@ -145,9 +170,10 @@ public static class GenesisCheckpointStore
     {
         ExecuteWithCheckpointLock(path, () =>
         {
-            GenesisShardedCheckpointStore.WriteModel(GenesisShardedCheckpointStore.ModelDir(path), payload with { PlatonicSpace = null });
+            var generation = Guid.NewGuid().ToString("N");
+            GenesisShardedCheckpointStore.WriteModel(GenesisShardedCheckpointStore.ModelDir(path), payload with { PlatonicSpace = null }, generation);
             if (platonic is not null)
-                GenesisShardedCheckpointStore.WriteSubstrate(GenesisShardedCheckpointStore.SubstrateDir(path), platonic);
+                GenesisShardedCheckpointStore.WriteSubstrate(GenesisShardedCheckpointStore.SubstrateDir(path), platonic, generation);
 
             // Clean up: move the legacy files into .legacy-backup so the active dir only holds what's relevant
             // (no confusion), then leave the pointer marker at the original path.
@@ -159,7 +185,7 @@ public static class GenesisCheckpointStore
                 MoveToBackup(path, backup);
                 MoveToBackup(PlatonicCompanionPath(path), backup);
             }
-            WriteAtomic(path, ShardedPointerJson);
+            WriteAtomic(path, GenesisShardedCheckpointStore.PointerJson(generation));
         });
     }
 

@@ -29,7 +29,7 @@ public static class GenesisShardedCheckpointStore
     public static bool ModelExists(string modelDir) => File.Exists(Path.Combine(modelDir, "manifest.json"));
 
     // ── Write ─────────────────────────────────────────────────────────────────────────────────────────────
-    public static void WriteModel(string modelDir, GenesisCheckpoint nn)
+    public static void WriteModel(string modelDir, GenesisCheckpoint nn, string? generation = null)
     {
         var sections = new Dictionary<string, Section>(StringComparer.Ordinal);
         var shardsDir = Path.Combine(modelDir, "shards");
@@ -67,16 +67,16 @@ public static class GenesisShardedCheckpointStore
         AddF64(sections, shardsDir, "planWeights", nn.PlanWeights);
         AddF64(sections, shardsDir, "trunkWeights", nn.TrunkWeights);
 
-        WriteManifest(modelDir, shardsDir, nn.Version, sections);
+        WriteManifest(modelDir, shardsDir, nn.Version, sections, generation);
     }
 
-    public static void WriteSubstrate(string substrateDir, PlatonicMemorySnapshot substrate)
+    public static void WriteSubstrate(string substrateDir, PlatonicMemorySnapshot substrate, string? generation = null)
     {
         var sections = new Dictionary<string, Section>(StringComparer.Ordinal);
         var shardsDir = Path.Combine(substrateDir, "shards");
         Directory.CreateDirectory(shardsDir);
         AddJson(sections, shardsDir, "platonic", substrate);
-        WriteManifest(substrateDir, shardsDir, 0, sections);
+        WriteManifest(substrateDir, shardsDir, 0, sections, generation);
     }
 
     // ── Read ──────────────────────────────────────────────────────────────────────────────────────────────
@@ -114,6 +114,49 @@ public static class GenesisShardedCheckpointStore
         return ReadJson<PlatonicMemorySnapshot>(manifest, shardsDir, "platonic");
     }
 
+    // ── Crash-atomicity: per-save generation stamp ───────────────────────────────────────────────────────────
+    /// <summary>The pointer-marker JSON, carrying the save <paramref name="generation"/> (the commit token).</summary>
+    public static string PointerJson(string? generation)
+        => JsonSerializer.Serialize(new ShardedPointer(true, FormatVersion, generation), Json);
+
+    /// <summary>The generation stamped in a sharded dir's manifest (null if absent / unreadable / legacy).</summary>
+    public static string? ReadGeneration(string dir)
+    {
+        try
+        {
+            var file = Path.Combine(dir, "manifest.json");
+            if (!File.Exists(file)) return null;
+            return JsonSerializer.Deserialize<ManifestDoc>(File.ReadAllText(file), Json)?.Generation;
+        }
+        catch { return null; }
+    }
+
+    /// <summary>The generation recorded in the pointer marker at <paramref name="pointerPath"/> (null if absent /
+    /// unreadable / legacy pointer without a generation).</summary>
+    public static string? ReadPointerGeneration(string pointerPath)
+    {
+        try
+        {
+            if (!File.Exists(pointerPath)) return null;
+            return JsonSerializer.Deserialize<ShardedPointer>(File.ReadAllText(pointerPath), Json)?.Generation;
+        }
+        catch { return null; }
+    }
+
+    /// <summary>True if the checkpoint at <paramref name="pointerPath"/> is a CONSISTENT save: the pointer's
+    /// generation matches the model manifest's AND (if a substrate dir exists) the substrate manifest's. A torn save
+    /// (crash between writing the two dirs) leaves them at different generations → false. A LEGACY checkpoint (no
+    /// generation anywhere) returns true — we can't verify it, so we don't block resuming it.</summary>
+    public static bool IsConsistent(string pointerPath)
+    {
+        var pointerGen = ReadPointerGeneration(pointerPath);
+        if (pointerGen is null) return true; // legacy / pre-generation checkpoint — cannot verify, don't block
+        if (!string.Equals(ReadGeneration(ModelDir(pointerPath)), pointerGen, StringComparison.Ordinal)) return false;
+        var substrateDir = SubstrateDir(pointerPath);
+        if (ModelExists(substrateDir) && !string.Equals(ReadGeneration(substrateDir), pointerGen, StringComparison.Ordinal)) return false;
+        return true;
+    }
+
     /// <summary>Copy a sharded model dir (and its substrate dir, if any) to a destination — for last-good promotion.</summary>
     public static void CopyModel(string srcModelDir, string dstModelDir)
     {
@@ -124,8 +167,15 @@ public static class GenesisShardedCheckpointStore
 
     // ── Section helpers ───────────────────────────────────────────────────────────────────────────────────
     private sealed record Section(string Kind, long Length, int Rows, int Cols, List<string> Shards);
+    // Generation = a per-SAVE id stamped on BOTH the model and substrate manifests AND the pointer marker, so a load
+    // can verify they all came from the SAME save. A crash between writing the two dirs leaves them at DIFFERENT
+    // generations → detectable → fall back to last-good instead of resuming an inconsistent (torn) brain.
     private sealed record ManifestDoc(int FormatVersion, int ModelVersion, long ShardBytes, string CreatedUtc,
-        Dictionary<string, Section> Sections);
+        Dictionary<string, Section> Sections, string? Generation = null);
+
+    // The pointer marker (the legacy ".json" path) — the COMMIT of a save, written LAST and atomically. It carries
+    // the save Generation so a torn save (dirs written, commit's generation not matching) is detectable.
+    private sealed record ShardedPointer(bool GnvSharded, int FormatVersion, string? Generation);
 
     private static void AddF64(IDictionary<string, Section> sections, string shardsDir, string name, MatrixSnapshot? m)
     {
@@ -195,10 +245,10 @@ public static class GenesisShardedCheckpointStore
     }
 
     // ── Manifest I/O + prune ──────────────────────────────────────────────────────────────────────────────
-    private static void WriteManifest(string dir, string shardsDir, int modelVersion, Dictionary<string, Section> sections)
+    private static void WriteManifest(string dir, string shardsDir, int modelVersion, Dictionary<string, Section> sections, string? generation = null)
     {
         var manifest = new ManifestDoc(FormatVersion, modelVersion, TargetShardBytes,
-            DateTimeOffset.UtcNow.ToString("O"), sections);
+            DateTimeOffset.UtcNow.ToString("O"), sections, generation);
         var tmp = Path.Combine(dir, $"manifest.json.{Environment.ProcessId}.{Guid.NewGuid():N}.tmp");
         File.WriteAllText(tmp, JsonSerializer.Serialize(manifest, Json));
         File.Move(tmp, Path.Combine(dir, "manifest.json"), overwrite: true);

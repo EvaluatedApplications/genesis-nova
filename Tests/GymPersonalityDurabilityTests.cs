@@ -64,15 +64,15 @@ public sealed class GymPersonalityDurabilityTests
         }
         _out.WriteLine($"  [t=0] persona in-character right after seed: {seedCheck}/5\n");
 
-        // Skills train (one GymTrainer per muscle, FocusedCurriculum with rehearsal). The persona is NOT a training
-        // unit and NOT probed by the orchestrator — both decode-training and the probe-driven learning modules SCRAMBLE
-        // its seeded relations within a few cycles (measured). Instead the persona is FIXED KNOWLEDGE: RE-SEEDED each
-        // cycle (below) so it's always fresh when you chat with it. THE QUESTION: do skills AND the re-pinned persona
-        // both hold after a long run?
+        // Skills train (one GymTrainer per muscle, FocusedCurriculum with rehearsal); the persona rides alongside as a
+        // PROBE-ONLY unit (so it shows in the train list + gets graded every cycle) but is never decode-trained. With
+        // the talk route preserved across reloads, its probes score CORRECT, so the credit-assignment module reinforces
+        // its chunk edges instead of the disruption module repelling them. THE QUESTION: do skills AND persona hold?
         var children = Enum.GetValues<GymSkill>()
             .Select(s => (ITrainingCurriculum)new GymTrainer(startLevel: 1, skills: new[] { s }) { MasteryBar = 0.8, TrainPerCycle = 64 })
             .ToList();
-        var curriculum = (ITrainingCurriculum)new FocusedCurriculum(children, masteryBar: 0.8, focusBudget: 8);
+        var curriculum = (ITrainingCurriculum)new ProbeAlongsideCurriculum(
+            new FocusedCurriculum(children, masteryBar: 0.8, focusBudget: 8), persona);
 
         var options = new GenesisModularTrainingOrchestrator.Options
         {
@@ -82,12 +82,13 @@ public sealed class GymPersonalityDurabilityTests
 
         using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(minutes));
         var cycles = 0; System.Collections.Generic.IReadOnlyList<long>? lastOp = null;
+        System.Collections.Generic.IReadOnlyList<UnitProgress>? lastUnits = null;
         var sw = Stopwatch.StartNew();
         try
         {
             await new GenesisModularTrainingOrchestrator().RunAsync(runtime, curriculum, options, m =>
             {
-                cycles++; lastOp = m.OpClassBalance;
+                cycles++; lastOp = m.OpClassBalance; if (m.Units is { Count: > 0 }) lastUnits = m.Units;
                 if (m.Cycle <= 3 || m.Cycle % 10 == 0)
                     _out.WriteLine($"  cycle {m.Cycle,3}  diff {m.Difficulty}  acc {m.Accuracy,5:P0}  purity {m.RoutePurity,5:P0}  {sw.Elapsed.TotalSeconds:F0}s");
             }, cts.Token);
@@ -133,6 +134,14 @@ public sealed class GymPersonalityDurabilityTests
             if (inChar) rudeHits++;
             _out.WriteLine($"  {c,-22} → {got,-34} [{res?.DecisionPath}] {(inChar ? "in-character" : "")}");
         }
+
+        // ── UNIFIED progress view (the whole picture: every lesson + personality, with level + acc + mastered) ──
+        _out.WriteLine("\n── UNIFIED PROGRESS ──");
+        if (lastUnits is not null)
+            foreach (var u in lastUnits.OrderBy(u => u.Mastered).ThenBy(u => u.Accuracy))
+                _out.WriteLine($"  {(u.Mastered ? "✓" : "·")} {u.Name,-24} L{u.Level,-3} {u.Accuracy,5:P0}");
+        Assert.True(lastUnits is { Count: > 0 } && lastUnits.Any(u => u.Name == "personality"),
+            "the unified progress view reports every lesson including personality");
 
         var opStr = lastOp is { Count: 5 } op ? $"+{op[1]} -{op[2]} x{op[3]} /{op[4]}" : "n/a";
         _out.WriteLine($"\nskills {skillHits}/{skillProbes.Length}  persona {rudeHits}/{convo.Length}  op-balance [{opStr}]");

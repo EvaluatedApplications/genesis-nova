@@ -37,6 +37,10 @@ public interface ITrainingCurriculum
     /// <summary>The <see cref="Difficulty"/> this unit must reach (DRIVE-TO-DEPTH) before FocusedCurriculum marks
     /// it mastered. Open-ended/flat units use 1; a creator uses its max difficulty so the focus climbs first.</summary>
     int MasteryDepth => 1;
+
+    /// <summary>Whether this unit has reached mastery (held the bar). Surfaced for the unified progress view so every
+    /// lesson reports a coherent state; default false (a leaf that doesn't track its own mastery).</summary>
+    bool IsMastered => false;
 }
 
 /// <summary>A probe: a query plus the FULL set of valid answers (fuzzy full-list grading) and how many distinct
@@ -53,7 +57,13 @@ public readonly record struct CycleMetrics(
     int Cycle, int Difficulty, double Loss, double Accuracy, double RoutePurity, double Confidence, double CycleSeconds,
     IReadOnlyList<ProbeSample> Samples, int TrainedCount = 0, int GeneratedCount = 0,
     IReadOnlyList<long>? OpClassBalance = null,                  // op head window [abstain,add,sub,mul,div] — collapse visible
-    IReadOnlyDictionary<string, double>? ModuleMetrics = null); // per-learning-module activity counters
+    IReadOnlyDictionary<string, double>? ModuleMetrics = null,  // per-learning-module activity counters
+    IReadOnlyList<UnitProgress>? Units = null);                 // UNIFIED per-lesson progress (every muscle + persona)
+
+/// <summary>One lesson's live progress, for the unified leveling view: which lesson, its current level, this cycle's
+/// accuracy, and whether it has mastered. Lets the host show the WHOLE picture (all sub-lessons at once) instead of a
+/// single conflated level.</summary>
+public readonly record struct UnitProgress(string Name, int Level, double Accuracy, bool Mastered);
 
 /// <summary>A periodic diagnostic sample — a probe query, the model's output, whether it was correct, and
 /// whether it routed platonic (vs neural fallback).</summary>

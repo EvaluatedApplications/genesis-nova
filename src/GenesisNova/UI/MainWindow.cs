@@ -1425,20 +1425,22 @@ public class MainWindow : Form
             catch (Exception ex) { AppendOutput($"[train] memory+code load failed: {ex.Message}"); }
         }
         var personalityOn = GetControl<CheckBox>("CurPersonality")?.Checked ?? false;
+        PersonalityCurriculum? persona = null;
         if (personalityOn)
         {
             // The persona is SEEDED as reply CHUNKS, not decode-trained: in the conscious field the GRU decoder is
             // bypassed (TryFieldRespond retrieves a reply as a whole chunk), and decoding a reply token-by-token only
-            // builds stray cue→WORD edges that crowd the chunk out of retrieval. Seed once (stable space edges; persona
-            // cues aren't skill cues, so the skill gym below doesn't erode them) and turn the talk route on so you can
-            // chat with it live while the skills train. See [[nova-talk-by-chunk]].
+            // builds stray cue→WORD edges that crowd the chunk out of retrieval. Seed once + turn the talk route on, and
+            // add it as a PROBE-ONLY unit below so it shows in the train list and gets graded each cycle (its correct
+            // probes reinforce the chunks). See [[nova-talk-by-chunk]].
             try
             {
-                _runtime.SeedConversationalChunks(new PersonalityCurriculum().Repertoire);
+                persona = new PersonalityCurriculum(trainPerCycle: _gymTrainPerCycle);
+                _runtime.SeedConversationalChunks(persona.Repertoire);
                 _runtime.SetConversationalMode(true);
-                AppendOutput("[train] personality (rude chatbot): reply chunks SEEDED + talk route ON (retrieval, not decode-trained)");
+                AppendOutput("[train] personality (rude chatbot): reply chunks SEEDED + talk route ON (graded as a probe-only unit, not decode-trained)");
             }
-            catch (Exception ex) { AppendOutput($"[train] personality seed failed: {ex.Message}"); }
+            catch (Exception ex) { AppendOutput($"[train] personality seed failed: {ex.Message}"); persona = null; }
         }
         else
         {
@@ -1446,7 +1448,11 @@ public class MainWindow : Form
         }
         if (children.Count == 0)
         {
-            AppendOutput("[train] no curriculum enabled — tick Gym and/or Memory+Code.");
+            // Personality alone has nothing to gradient-TRAIN (it's retrieval) — it's seeded + chat-ready, but a probe
+            // loop with no training is idle, so don't start one. Tick a gym skill to also train alongside it.
+            AppendOutput(persona is not null
+                ? "[train] personality is SEEDED + chat-ready. Tick a Gym skill to run the training loop alongside it."
+                : "[train] no curriculum enabled — tick Gym and/or Memory+Code.");
             _gymCts.Cancel();
             return;
         }
@@ -1466,6 +1472,8 @@ public class MainWindow : Form
             : (GetControl<CheckBox>("CurFocused")?.Checked ?? true)
                 ? new FocusedCurriculum(children, focusBudget: 8) // focus + rider-replay; prompt handoff for unbounded muscles
                 : new CompositeCurriculum(children);
+        if (persona is not null)
+            curriculum = new ProbeAlongsideCurriculum(curriculum, persona); // graded each cycle → shows in the list, kept alive
         var ct = _gymCts.Token;
         _ = RunLowPriorityTrainingAsync(async () => { await GymLoopAsync(curriculum, gymChildren, ct); return 0; }, ct);
     }
@@ -1511,7 +1519,7 @@ public class MainWindow : Form
                 try { File.WriteAllText(Path.Combine(_gymStateDir, g.Name + "-level.txt"), g.Level.ToString()); } catch { }
                 AppendOutput($"[train] {g.Name} LEVEL → {g.Level}");
             }
-            UpdateGymStats(m.Cycle, m.Difficulty, m.Loss, m.Accuracy, m.RoutePurity, m.Confidence);
+            UpdateGymStats(m);
             // Op-head class-balance window [abstain,add,sub,mul,div] — one dominant entry = the head COLLAPSING (the
             // erosion failure mode, now visible live). Shown as the four operator shares.
             var opStr = m.OpClassBalance is { Count: 5 } op ? $" | op +{op[1]} -{op[2]} x{op[3]} /{op[4]}" : "";
@@ -1528,16 +1536,33 @@ public class MainWindow : Form
         AppendOutput("[train] paused — model persists (AutoPersist).");
     }
 
-    private void UpdateGymStats(int cycle, int level, double loss, double acc, double purity, double conf)
+    // UNIFIED progress view: the whole picture at once — an overall summary line plus EVERY lesson (each gym muscle +
+    // personality) with its own level, this-cycle accuracy, and mastered state. Replaces the single conflated "Level"
+    // that made the per-muscle sub-lessons feel disjoint.
+    private void UpdateGymStats(CycleMetrics m)
     {
-        if (InvokeRequired) { Invoke(() => UpdateGymStats(cycle, level, loss, acc, purity, conf)); return; }
+        if (InvokeRequired) { Invoke(() => UpdateGymStats(m)); return; }
         var t = GetControl<TextBox>("AutoStatsText");
-        if (t != null)
-            t.Text =
-                "GYM — procedural skill trainer (mastery-gated, unbounded difficulty)" + Environment.NewLine +
-                $"Cycle: {cycle}   |   Level: {level}" + Environment.NewLine +
-                $"Loss: {loss:F3}   |   Accuracy: {acc:P0}   |   Route purity: {purity:P0}   |   Confidence: {conf:F2}";
+        if (t == null) return;
+
+        var units = m.Units ?? Array.Empty<UnitProgress>();
+        var mastered = units.Count(u => u.Mastered);
+        var lines = new List<string>
+        {
+            "GYM — unified progress (every lesson + personality)",
+            $"Cycle {m.Cycle}   overall acc {m.Accuracy:P0}   route {m.RoutePurity:P0}   conf {m.Confidence:F2}",
+            $"mastered {mastered}/{units.Count} lessons   |   loss {m.Loss:F3}   |   {m.CycleSeconds:F0}s/cycle",
+            new string('─', 44),
+        };
+        // Sort so the eye reads progress: still-learning (lowest accuracy) first, mastered last.
+        foreach (var u in units.OrderBy(u => u.Mastered).ThenBy(u => u.Accuracy).ThenBy(u => u.Name))
+            lines.Add($" {(u.Mastered ? "✓" : "·")} {Shorten(u.Name),-24} L{u.Level,-3} {u.Accuracy,5:P0}");
+        t.Text = string.Join(Environment.NewLine, lines);
     }
+
+    // Trim the unit key to a readable lesson label ("gym-multiply" → "multiply", "focused(...)" stays, "personality").
+    private static string Shorten(string name) =>
+        name.StartsWith("gym-", StringComparison.Ordinal) ? name.Substring(4) : name;
 
     // ── Control endpoint: a tiny localhost HTTP server so headless tools (and Claude) can drive the LIVE in-app
     // model — recall against it, read gym status, pause/resume — without a second process fighting for the GPU.

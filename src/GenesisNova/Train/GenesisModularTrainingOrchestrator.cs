@@ -102,6 +102,7 @@ public sealed class GenesisModularTrainingOrchestrator
             var sampleRng = new Random();
             var sampleSeen = 0;
             double aggQuality = 0, aggConf = 0; int aggN = 0, aggPlatonic = 0;
+            var unitProgress = new List<UnitProgress>(); // UNIFIED per-lesson progress this cycle
             foreach (var unit in units)
             {
                 double uQ = 0, uConf = 0; int uN = 0, uPlat = 0;
@@ -136,7 +137,9 @@ public sealed class GenesisModularTrainingOrchestrator
                         else { var j = sampleRng.Next(sampleSeen); if (j < opt.SampleCount) samples[j] = sample; } // reservoir
                     }
                 }
-                unit.RecordCycle(new CycleGrade(uN > 0 ? uQ / uN : 0.0, uN > 0 ? (double)uPlat / uN : 0.0, uN > 0 ? uConf / uN : 0.0));
+                var uAcc = uN > 0 ? uQ / uN : 0.0;
+                unit.RecordCycle(new CycleGrade(uAcc, uN > 0 ? (double)uPlat / uN : 0.0, uN > 0 ? uConf / uN : 0.0));
+                if (uN > 0) unitProgress.Add(new UnitProgress(unit.Name, unit.Difficulty, uAcc, unit.IsMastered));
                 aggQuality += uQ; aggConf += uConf; aggN += uN; aggPlatonic += uPlat;
             }
             var acc = aggN > 0 ? aggQuality / aggN : 0.0;
@@ -151,7 +154,8 @@ public sealed class GenesisModularTrainingOrchestrator
             IReadOnlyList<long>? opBalance = null;
             try { opBalance = runtime.OpClassBalance; } catch { }
             onCycle?.Invoke(new CycleMetrics(cycle, curriculum.Difficulty, loss, acc, purity, conf, sw.Elapsed.TotalSeconds, samples,
-                TrainedCount: batch.Count, GeneratedCount: generated.Count, OpClassBalance: opBalance, ModuleMetrics: moduleMetrics));
+                TrainedCount: batch.Count, GeneratedCount: generated.Count, OpClassBalance: opBalance, ModuleMetrics: moduleMetrics,
+                Units: unitProgress));
 
             // Periodic AUTOSAVE during training — TrainAsync(savePath:null) persists NOTHING, so a long unattended
             // run otherwise risked losing every cycle on a crash. Time-based so the cadence is stable regardless of

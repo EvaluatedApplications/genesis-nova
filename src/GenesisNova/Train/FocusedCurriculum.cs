@@ -121,6 +121,7 @@ public sealed class FocusUnit : ITrainingCurriculum
     public bool IsFocus { get; set; }
     public bool HasBeenFocused { get; private set; }            // introduced at least once → eligible to rehearse
     public bool Mastered { get; private set; }
+    bool ITrainingCurriculum.IsMastered => Mastered;            // surface mastery for the unified progress view
     public bool TurnExhausted => _turnAttempts >= _focusBudget; // this TURN is spent (per-turn, resets on handoff)
 
     public void BeginTurn() { HasBeenFocused = true; _turnAttempts = 0; } // claim focus: introduce + fresh budget

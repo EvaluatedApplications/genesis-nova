@@ -95,6 +95,12 @@ public sealed class PersonalityCurriculum : ITrainingCurriculum
     public int Difficulty => 1;
     public int MasteryDepth => 1;
 
+    // The persona is retrieval (no difficulty ladder); "mastery" = it reliably talks IN CHARACTER. Track a held-bar
+    // so the unified progress view shows it as mastered once its in-character rate stays high, like any other lesson.
+    private int _inCharacterStreak;
+    private bool _mastered;
+    public bool IsMastered => _mastered;
+
     /// <summary>The FULL deterministic repertoire (every cue → every one of its intent's reply CHUNKS). The gym SEEDS
     /// these as whole-reply chunk associations so <c>TryFieldRespond</c> retrieves a reply as a CHUNK — the gym's
     /// token-decode training never builds the multi-word reply as one concept, so without seeding the talk path finds
@@ -130,5 +136,11 @@ public sealed class PersonalityCurriculum : ITrainingCurriculum
         return probes;
     }
 
-    public void RecordCycle(CycleGrade grade) { } // flat; FocusedCurriculum tracks held-bar mastery
+    public void RecordCycle(CycleGrade grade)
+    {
+        // Held-bar mastery on the in-character rate (route-agnostic): masters once it talks in character for a few
+        // cycles, re-opens if it regresses — so the unified view reports a real, comparable state.
+        if (grade.Accuracy >= 0.8) { if (++_inCharacterStreak >= 3) _mastered = true; }
+        else { _inCharacterStreak = 0; if (grade.Accuracy < 0.65) _mastered = false; }
+    }
 }

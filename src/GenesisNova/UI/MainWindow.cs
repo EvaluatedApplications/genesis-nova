@@ -27,7 +27,7 @@ public class MainWindow : Form
     private double _lastLoss, _lastAcc, _lastRoute, _lastConf;
     private double _gymBar = 0.50;
     private int _gymTrainPerCycle = 256;
-    private int _gymThrottlePct = 200;  // 0..500 — rest this % of the last cycle's time between cycles (0 = full speed)
+    private int _gymThrottlePct = 100;  // 0..500 — rest this % of the last cycle's time between cycles (0 = full speed)
     private HttpListener? _control;
     private string _exampleFolder;
     private TabControl _tabControl = null!;
@@ -161,7 +161,7 @@ public class MainWindow : Form
         flow.Controls.Add(new NumericUpDown { Name = "GymTrainPerCycle", Width = 120, Minimum = 16, Maximum = 256, Increment = 16, Value = 256 });
 
         flow.Controls.Add(new Label { Text = "Throttle (% backoff of last cycle time)", AutoSize = true, Margin = new Padding(0, 12, 0, 2) });
-        var throttleNum = new NumericUpDown { Name = "GymThrottle", Width = 120, Minimum = 0, Maximum = 500, Increment = 25, Value = 200 };
+        var throttleNum = new NumericUpDown { Name = "GymThrottle", Width = 120, Minimum = 0, Maximum = 500, Increment = 25, Value = 100 };
         throttleNum.ValueChanged += (s, e) => _gymThrottlePct = (int)throttleNum.Value; // live — applies next cycle, no restart
         flow.Controls.Add(throttleNum);
 
@@ -172,7 +172,7 @@ public class MainWindow : Form
             flow.Controls.Add(new CheckBox { Name = "GymSkill_" + skill, Text = GymSkillLabel(skill), Checked = true, AutoSize = true, Margin = new Padding(20, 0, 0, 0) });
         flow.Controls.Add(new CheckBox { Name = "CurMemCode", Text = "Memory + Code index", Checked = false, AutoSize = true });
         flow.Controls.Add(new CheckBox { Name = "CurCreators", Text = "Creators (skill ladder: number-word → category → arithmetic)", Checked = false, AutoSize = true });
-        flow.Controls.Add(new CheckBox { Name = "CurPersonality", Text = "Personality (rude chatbot)", Checked = false, AutoSize = true });
+        flow.Controls.Add(new CheckBox { Name = "CurPersonality", Text = "Personality (rude chatbot)", Checked = true, AutoSize = true });
         flow.Controls.Add(new CheckBox { Name = "CurFocused", Text = "Focused + rehearsal (unticked = all tasks every cycle)", Checked = true, AutoSize = true });
         flow.Controls.Add(new Label { Text = "Memory index file (MEMORY.md):", AutoSize = true, Margin = new Padding(0, 8, 0, 2) });
         flow.Controls.Add(new TextBox { Name = "MemPath", Width = 270, Text = DefaultMemoryIndexPath() });

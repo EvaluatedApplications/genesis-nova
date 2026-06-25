@@ -22,14 +22,17 @@ namespace GenesisNova.Train;
 /// </summary>
 public sealed class GrammarCurriculum : ITrainingCurriculum
 {
-    // A fixed mini-world: (possessive phrase) → value. Varied possessors so each warms as its own token.
-    private static readonly (string Subject, string Value)[] World =
+    // VARIED, EPHEMERAL bindings — the curriculum teaches the assert/recall STRUCTURE (warm the structural tokens +
+    // their KEY/VALUE/QUERY roles), NOT specific facts. Possessors and nouns warm as KEYS; the large value pool warms
+    // as VALUES; bindings are RANDOM each example so no "my name"->X fact sticks (a fixed world would plant a strong
+    // relation that fights the user's real runtime fact). The user's own assertions are what carry actual bindings.
+    private static readonly string[] Possessives = { "my", "your", "his", "her", "our", "their", "blorp" }; // blorp = NONCE
+    private static readonly string[] Nouns = { "name", "dog", "car", "job", "city", "color", "food", "book", "song", "friend", "team", "drink", "hobby", "boss" };
+    private static readonly string[] Values =
     {
-        ("my name", "sam"), ("your name", "rex"), ("his name", "leo"), ("her name", "mia"),
-        ("my dog", "fido"), ("your car", "audi"), ("his job", "coder"), ("her city", "lisbon"),
-        ("our team", "rovers"), ("their drink", "cola"), ("my color", "teal"), ("your food", "ramen"),
+        "sam", "rex", "leo", "mia", "fido", "audi", "coder", "lisbon", "rovers", "cola", "teal", "ramen",
+        "alex", "kim", "max", "nova", "pixel", "echo", "blue", "jade", "ace", "milo", "luna", "ziggy",
     };
-
     // ROTATED grammar tokens — varied so none is a constant correlate, and NONCE ones so the ROLE generalises.
     private static readonly string[] Copulas = { "is", "was", "is", "ploo" };           // ploo = NONCE copula
     private static readonly string[] QueryCues = { "what is", "whats", "tell me", "remind me of", "who is" };
@@ -57,16 +60,18 @@ public sealed class GrammarCurriculum : ITrainingCurriculum
     public bool IsMastered => _mastered;
 
     private string Lead() => LeadIns[_rng.Next(LeadIns.Length)];
+    private string Subject() => $"{Possessives[_rng.Next(Possessives.Length)]} {Nouns[_rng.Next(Nouns.Length)]}";
+    private string Val() => Values[_rng.Next(Values.Length)];
 
     public IReadOnlyList<(string Input, string Output)> NextTrainBatch()
     {
         var batch = new List<(string Input, string Output)>(_trainPerCycle);
         for (var i = 0; i < _trainPerCycle; i++)
         {
-            var (subject, value) = World[_rng.Next(World.Length)];
-            if (i % 2 == 0) // ASSERTION — the value is the final token after the (rotating) copula
+            var subject = Subject(); var value = Val(); // RANDOM binding — structure, not a sticky fact
+            if (i % 2 == 0) // ASSERTION — the value is the final token after the (rotating) copula (answer PRESENT)
                 batch.Add(($"{Lead()}{subject} {Copulas[_rng.Next(Copulas.Length)]} {value}", value));
-            else            // RECALL — a (rotating) query cue over the possessive phrase
+            else            // RECALL — a (rotating) query cue over the possessive phrase (answer ABSENT)
                 batch.Add(($"{Lead()}{QueryCues[_rng.Next(QueryCues.Length)]} {subject}", value));
         }
         return batch;
@@ -76,11 +81,9 @@ public sealed class GrammarCurriculum : ITrainingCurriculum
     {
         var probes = new List<TrainingProbe>(_probeCount);
         for (var i = 0; i < _probeCount; i++)
-        {
-            var (subject, value) = World[_rng.Next(World.Length)];
-            // RECALL through a rotating query frame — graded route-agnostic (it's a field retrieval, not a route).
-            probes.Add(new TrainingProbe($"{QueryCues[_rng.Next(QueryCues.Length)]} {subject}", new[] { value }, RequiredDepth: 1, RequirePlatonic: false));
-        }
+            // STRUCTURAL grading: bindings are ephemeral, so accept ANY value-pool token — the lesson is producing a
+            // value-shaped recall through the frame, not memorising a specific fact (the user's assertions carry those).
+            probes.Add(new TrainingProbe($"{QueryCues[_rng.Next(QueryCues.Length)]} {Subject()}", Values, RequiredDepth: 1, RequirePlatonic: false));
         return probes;
     }
 

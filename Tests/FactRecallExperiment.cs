@@ -63,4 +63,28 @@ public sealed class FactRecallExperiment
         }
         finally { try { Directory.Delete(dir, true); } catch { } }
     }
+
+    // Does a REPL-learned fact SURVIVE a reload? It's written as a RELATION into the model's substrate (not a session
+    // variable), so it should be saved in the checkpoint and reloaded. Learn → save → FRESH runtime resumes → recall.
+    [Fact]
+    public async Task ReplLearnedFact_SurvivesSaveAndReload()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "gn-fact-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            GenesisNovaConfig Cfg() => new GenesisNovaConfig(Backend: ComputeBackend.Cpu, HiddenSize: 256, FaceDimensionOverride: 256,
+                AutoPersist: true, AutoResume: true, LocalStateDirectory: dir).WithProductionMechanisms();
+
+            var rt1 = new GenesisEvalAppRuntime(Cfg());
+            await rt1.PredictAsync("my name is stephen", 8);          // learn it in "session 1"
+            await rt1.SaveAsync(rt1.AutoCheckpointPath);              // as an autosave / clean close would
+
+            var rt2 = new GenesisEvalAppRuntime(Cfg());               // "restart" — fresh runtime resumes from disk
+            var name = (await rt2.PredictAsync("what is my name", 8)).Result?.Output?.Trim() ?? "";
+            _out.WriteLine($"  after reload: 'what is my name' → '{name}'");
+            Assert.Contains("stephen", name, StringComparison.OrdinalIgnoreCase); // it PERSISTED across the reload
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
+    }
 }

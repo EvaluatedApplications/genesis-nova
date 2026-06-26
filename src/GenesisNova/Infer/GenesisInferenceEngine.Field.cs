@@ -696,7 +696,14 @@ public sealed partial class GenesisInferenceEngine
     private static bool IsRetrievalMarker(string t) => t is "kind" or "type" or "sort" or "group" or "category" or "example"
         or "classified" or "belongs" or "synonym" or "word" or "means" or "meaning" or "similar" or "same" or "close" or "match" or "near" or "like";
     private static bool IsNumericLike(string t) => double.TryParse(t, NumberStyles.Float, CultureInfo.InvariantCulture, out _);
-    private static bool IsContentWord(string t) => t.Length > 1 && t.All(char.IsLetter) && !Framing.Contains(t);
+    // A content word (not framing/function). De-hardcoded: in learned mode the function-word split is the LEARNED
+    // centrality signal (IsFunctionLike), generalising to any language; the Framing list is only the cold-start default.
+    private bool IsContentWord(string t)
+    {
+        if (t.Length <= 1 || !t.All(char.IsLetter)) return false;
+        if (LearnedCuesOnly && _memory is DialecticalSpace ds) return !ds.IsFunctionLike(t);
+        return !Framing.Contains(t);
+    }
     // FILLER — a token that must never leak out as a subject / answer / cue. The OPEN class of function words
     // (prepositions/conjunctions/articles: of/for/with/the/by/from…) is now LEARNED from the space's own centrality
     // distribution (DialecticalSpace.IsFunctionLike — a filler word's cloud collapses toward the global centroid) rather

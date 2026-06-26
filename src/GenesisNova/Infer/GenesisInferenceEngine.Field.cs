@@ -616,21 +616,55 @@ public sealed partial class GenesisInferenceEngine
         Cognition.GrammarRoleLearner.Role RoleAt(int i) => nn[i];     // PURELY the NN's tag
 
         var hasQuery = false;
+        var queryIdx = new List<int>();
         var content = new List<int>();
         for (var i = 0; i < toks.Count; i++)
         {
             var t = toks[i];
             if (!t.All(char.IsLetter) || t.Length < 2) continue;
             var role = RoleAt(i);
-            if (role == Cognition.GrammarRoleLearner.Role.Query) { hasQuery = true; continue; }
+            if (role == Cognition.GrammarRoleLearner.Role.Query) { hasQuery = true; queryIdx.Add(i); continue; }
             if (role == Cognition.GrammarRoleLearner.Role.Filler) continue; // the NN says filler/determiner/copula
             content.Add(i);                              // a content token (key / value / unsure-but-content)
         }
         if (content.Count == 0) return FrameKind.None;
+
+        // COPULA-POSITION BOUNDING. A SUBJECT can span several tokens ("my favorite color"), and the per-token role head
+        // sometimes mis-tags the phrase's final noun as VALUE — collapsing the span ("my favorite") so the assert key no
+        // longer matches the recall key. The copula (is/was/…, which the NN tags reliably as Filler) is the true
+        // boundary: in an ASSERTION the subject is the content BEFORE it and the value the content AFTER it; in a
+        // QUESTION the subject is the content AFTER it. This still uses ONLY the learned tags (no copula word-list) —
+        // it just trusts the reliable Filler boundary over a fragile per-token KEY/VALUE split for the span. Falls back
+        // to the pure-tag split when there is no copula (e.g. "whats my name", a cue with no copula).
+        bool IsWord(int i) => i >= 0 && i < toks.Count && toks[i].Length >= 2 && toks[i].All(char.IsLetter);
+        string? Span(int from, int step) // contiguous word run from `from` walking by `step`, stopping at a query cue
+        {
+            int b = -1, e = -1;
+            for (var i = from; IsWord(i) && RoleAt(i) != Cognition.GrammarRoleLearner.Role.Query; i += step)
+            { if (b < 0) { b = e = i; } else { b = Math.Min(b, i); e = Math.Max(e, i); } }
+            return b < 0 ? null : string.Join(" ", Enumerable.Range(b, e - b + 1).Select(k => toks[k]));
+        }
+        if (hasQuery)
+        {
+            for (var i = queryIdx[^1] + 1; i < toks.Count; i++)
+                if (RoleAt(i) == Cognition.GrammarRoleLearner.Role.Filler && content.Any(c => c > i))
+                { subject = Span(i + 1, +1); break; } // subject = the phrase AFTER the copula
+            if (subject is not null) return FrameKind.Question;
+        }
+        else
+        {
+            var lastContent = content[^1];
+            for (var i = lastContent - 1; i >= 0; i--)
+                if (RoleAt(i) == Cognition.GrammarRoleLearner.Role.Filler && content.Any(c => c < i))
+                { value = toks[lastContent]; subject = Span(i - 1, -1); break; } // value AFTER, subject BEFORE the copula
+            if (subject is not null && subject != value) return FrameKind.Assertion;
+            subject = value = null; // the copula path didn't settle → try the pure-tag split below
+        }
+
+        // FALLBACK — no copula: split by the NN's KEY/VALUE tags alone.
         var keyIdx = content.Where(i => RoleAt(i) == Cognition.GrammarRoleLearner.Role.Key).ToList();
         var valIdx = content.Where(i => RoleAt(i) == Cognition.GrammarRoleLearner.Role.Value).ToList();
         if (keyIdx.Count == 0 && valIdx.Count == 0) return FrameKind.None; // the NN placed no key/value → no parse
-
         if (hasQuery) // a query cue is present → it's a question; the subject is the KEY (or the lone content)
         {
             var ni = keyIdx.Count > 0 ? keyIdx[^1] : content[^1];

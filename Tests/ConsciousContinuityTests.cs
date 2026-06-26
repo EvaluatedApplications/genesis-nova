@@ -21,7 +21,7 @@ public sealed class ConsciousContinuityTests
     private readonly ITestOutputHelper _out;
     public ConsciousContinuityTests(ITestOutputHelper o) => _out = o;
 
-    [Fact(Skip = SlowTests.MultiWordSubject)] // 3-word "my favorite color" mis-tags between assert/recall; bare/2-word/"the" pass
+    [SlowFact] // bare/"the"/multi-word subjects via the LEARNED role parser (copula-position bounding) — GRU-trained warm-up
     public void Mind_RemembersWhatItIsTold_AndRecallsIt()
     {
         var config = new GenesisNovaConfig(HiddenSize: 256, FaceDimensionOverride: 256);

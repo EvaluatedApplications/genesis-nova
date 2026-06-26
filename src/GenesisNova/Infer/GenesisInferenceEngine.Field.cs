@@ -170,6 +170,18 @@ public sealed partial class GenesisInferenceEngine
         var prepped = input ?? string.Empty;
         foreach (var sym in new[] { "+", "-", "*", "/", ">", "<", "=" })
             prepped = prepped.Replace(sym, $" {sym} ");
+        // NON-SPACED SCRIPTS (#6): isolate each caseless letter (Unicode OtherLetter — CJK/kana/Hangul) so a CJK frame
+        // segments into its morpheme tokens here too, matching the model tokenizer (else the field parse sees one token).
+        if (prepped.Any(c => System.Char.GetUnicodeCategory(c) == System.Globalization.UnicodeCategory.OtherLetter))
+        {
+            var sb = new System.Text.StringBuilder(prepped.Length * 2);
+            foreach (var c in prepped)
+            {
+                if (System.Char.GetUnicodeCategory(c) == System.Globalization.UnicodeCategory.OtherLetter) { sb.Append(' ').Append(c).Append(' '); }
+                else sb.Append(c);
+            }
+            prepped = sb.ToString();
+        }
         return prepped
             .Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .Select(t => t.Trim('?', '!', '.', ',', ';', ':', '(', ')', '[', ']', '"', '\'').ToLowerInvariant())
@@ -698,9 +710,15 @@ public sealed partial class GenesisInferenceEngine
     private static bool IsNumericLike(string t) => double.TryParse(t, NumberStyles.Float, CultureInfo.InvariantCulture, out _);
     // A content word (not framing/function). De-hardcoded: in learned mode the function-word split is the LEARNED
     // centrality signal (IsFunctionLike), generalising to any language; the Framing list is only the cold-start default.
+    // A letter token usable as a word/content unit: all letters, and length >= 2 OR a single CASELESS char (Unicode
+    // OtherLetter — a CJK/kana/Hangul morpheme is a standalone word, not the single-Latin-letter noise the >=2 floor
+    // excludes). This is what lets the per-token logic treat a one-character CJK word as content (#6).
+    private static bool IsLetterToken(string t) => t.Length > 0 && t.All(char.IsLetter)
+        && (t.Length >= 2 || System.Char.GetUnicodeCategory(t[0]) == System.Globalization.UnicodeCategory.OtherLetter);
+
     private bool IsContentWord(string t)
     {
-        if (t.Length <= 1 || !t.All(char.IsLetter)) return false;
+        if (!IsLetterToken(t)) return false;
         if (LearnedCuesOnly && _memory is DialecticalSpace ds) return !ds.IsFunctionLike(t);
         return !Framing.Contains(t);
     }
@@ -769,7 +787,7 @@ public sealed partial class GenesisInferenceEngine
         for (var i = 0; i < toks.Count; i++)
         {
             var t = toks[i];
-            if (!t.All(char.IsLetter) || t.Length < 2) continue;
+            if (!IsLetterToken(t)) continue;
             var role = RoleAt(i);
             if (role == Cognition.GrammarRoleLearner.Role.Query) { hasQuery = true; queryIdx.Add(i); continue; }
             if (role == Cognition.GrammarRoleLearner.Role.Filler) continue; // the NN says filler/determiner/copula
@@ -784,7 +802,7 @@ public sealed partial class GenesisInferenceEngine
         // QUESTION the subject is the content AFTER it. This still uses ONLY the learned tags (no copula word-list) —
         // it just trusts the reliable Filler boundary over a fragile per-token KEY/VALUE split for the span. Falls back
         // to the pure-tag split when there is no copula (e.g. "whats my name", a cue with no copula).
-        bool IsWord(int i) => i >= 0 && i < toks.Count && toks[i].Length >= 2 && toks[i].All(char.IsLetter);
+        bool IsWord(int i) => i >= 0 && i < toks.Count && IsLetterToken(toks[i]);
         string? Span(int from, int step) // contiguous word run from `from` walking by `step`, stopping at a query cue
         {
             int b = -1, e = -1;

@@ -675,10 +675,11 @@ public sealed partial class GenesisInferenceEngine
     // than a hardcoded stoplist: the code is the general framework, the gym's training teaches WHAT counts as filler
     // (see FunctionWordResearch). The learned signal SELF-ABSTAINS in a cold/untrained space, so interrogatives stay a
     // tiny structural floor — a question word is never an answer in ANY space, warm or cold.
-    // #1 de-hardcoded: in learned mode the question-word floor is dropped — interrogatives are caught by the LEARNED
-    // filler signal (they are high-centrality function words) and the role head's QUERY tag; the wh-word list is only
-    // the cold-start floor for the default (hardcoded) path.
-    private bool IsFiller(DialecticalSpace ds, string t) => (!LearnedCuesOnly && IsQuestionCue(t)) || ds.IsFunctionLike(t);
+    // #1 de-hardcoded for ROUTING (QuestionFrame uses the role head's QUERY tag, not this list). IsFiller keeps the
+    // interrogative floor in BOTH modes because it encodes a UNIVERSAL truth, not a routing decision: a question word is
+    // never an ANSWER in any space, warm or cold — so it must never leak out as a subject/answer. (Per-token, so the
+    // role head's sequence-level QUERY tag can't replace it here; the learned filler signal augments it once warm.)
+    private bool IsFiller(DialecticalSpace ds, string t) => IsQuestionCue(t) || ds.IsFunctionLike(t);
 
     private bool HasLearnedQueryRole(IReadOnlyList<string> toks)
     {

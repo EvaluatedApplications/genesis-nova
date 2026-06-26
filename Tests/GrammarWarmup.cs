@@ -82,6 +82,30 @@ internal static class GrammarWarmup
         WarmRoleHead(tok, model, engine, cycles: 80);
     }
 
+    /// <summary>Teach the number-word LEXICON atoms (#5) and the to-word/to-digit/compare intent cues (#3/#4) the same
+    /// fast way as <see cref="WarmOpCues"/> (relations only, no GRU training) — for tests that probe number-words /
+    /// worded arithmetic / predicate with the codec+lists flipped OFF (the learned defaults). Lexicon first so the cue
+    /// learner can type the outputs.</summary>
+    public static void WarmNumberWordsAndCues(GenesisInferenceEngine engine)
+    {
+        string GT(long v) => GenesisNova.Core.NumberWordVocabulary.ToWords(v);
+        for (long v = 0; v <= 99; v++) engine.LearnNumberWord($"{v} in words", GT(v));          // lexicon atoms
+        foreach (var v in new long[] { 100, 113, 147, 250, 1000, 1234 }) engine.LearnNumberWord($"{v} in words", GT(v)); // scales
+        foreach (var v in new long[] { 5, 12, 7, 3, 15, 9, 18 })
+        {
+            engine.LearnIntentCue($"{v} in words", GT(v));               // ToWord cue
+            engine.LearnIntentCue($"write {v} in words", GT(v));
+            engine.LearnIntentCue($"{GT(v)} as a number", v.ToString()); // ToDigit cue
+        }
+        // Compare cue — teach ALL the predicate frame wordings (compared/compare/larger/smaller/bigger/next/with) so
+        // every gym predicate frame resolves, not just "compared".
+        string[] cmpFrames = { "{0} compared to {1}", "how does {0} compare to {1}", "is {0} larger or smaller than {1}",
+                               "which is bigger, {0} or {1}", "put {0} next to {1}", "compare {0} with {1}" };
+        foreach (var (a, b) in new[] { (5, 3), (2, 8), (4, 4), (9, 1), (3, 7), (6, 6), (8, 2), (1, 5) })
+            foreach (var f in cmpFrames)
+                engine.LearnIntentCue(string.Format(f, a, b), a > b ? "greater" : a < b ? "less" : "equal");
+    }
+
     public static void WarmRoleHead(GenesisRuntimeState s, int cycles = 60)
         => WarmRoleHead(s.Tokenizer, s.Model, s.Inference, cycles);
 

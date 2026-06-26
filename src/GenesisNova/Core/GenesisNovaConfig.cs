@@ -64,6 +64,12 @@ public sealed record GenesisNovaConfig(
     // is bypassed ENTIRELY (no "neural vs platonic" head). false (default) keeps the legacy classifier path for
     // existing tests; the desktop app turns it on. This is the subtraction the reckoning pointed at, made real.
     bool ConsciousField = false,
+    // DE-HARDCODED DISPATCH — the engine answers number↔word from the LEARNED lexicon (not the NumberWordVocabulary
+    // codec) and routes compare / to-word / to-digit / question / retrieval by LEARNED cues (not the IsCompareCue /
+    // IsToWordCue / IsToDigitCue / IsQuestionCue / IsRetrievalMarker word-lists). false (default) keeps the codec+lists
+    // for existing/zero-shot tests; the production app turns it on so the model uses what it LEARNED (warm-start: the
+    // gym bootstraps the lexicon/cues once this flips the codec off). See nova-learned-number-words / -op-cues.
+    bool DeHardcodedDispatch = false,
     // GENERATIVE field routes (PLATONIC_MIND.md). FieldTicks = the genesis tick cascade (numeric + meaning) runs a
     // query as a frontier reduced over ticks, manufacturing intermediate elements. MeaningOps = generative ops in the
     // large/word face (compose two meanings, analogy by relation-vector). Default false (byte-identical); the app
@@ -93,6 +99,7 @@ public sealed record GenesisNovaConfig(
         UseDialecticalCore = true,    // the ground-up dialectical substrate (required by the conscious field)
         ConsciousField = true,        // think by field-relaxation; bypass the route/plan/op classifier
         KeepCoreControl = true,       // substrate-confidence control + discriminative-anchor seam + abstain
+        DeHardcodedDispatch = true,   // number↔word + compare/format/question/retrieval cues are LEARNED, not hardcoded
         LivingSelf = true,            // the meaning-space self conditions ambiguous reasoning
         FunctionGradientEnabled = true, // Rung 2 — descend the function gradient alongside Rung 1 disruption
         EdgeRoutingEnabled = true,    // full retrieval ladder available (default, pinned here for clarity)

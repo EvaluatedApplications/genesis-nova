@@ -145,6 +145,7 @@ public sealed partial class GenesisInferenceEngine
         // value-grader accepts either for non-surface-strict skills; ArithToWord is surface-strict → must be the word).
         if (merged.Any(IsToWordCue))
         {
+            if (LearnedNumberWordsOnly) return false; // EXPERIMENT: codec OFF → abstain so the learned/decoder path is what answers
             var word = NumberWordVocabulary.ToWords((long)Math.Round(value)); // generative linguistic codec
             return EmitField(word, "field-compute-word", request, out result);
         }
@@ -240,10 +241,18 @@ public sealed partial class GenesisInferenceEngine
         return true;
     }
 
+    // EXPERIMENT toggle (de-hardcoding #5): when true the engine's number-word ROUTES abstain — no hardcoded
+    // NumberWordVocabulary codec — so number↔word must come from what the MODEL learned (its decoder / face geometry).
+    // Lets a diagnostic MEASURE the learned number-word capability without the codec shortcut (the evidence for whether
+    // a learned composition is viable). Default false: codec on (the trainer/grader still use the codec as GROUND TRUTH,
+    // which is reference data, not a model heuristic — only the ENGINE's inference shortcut is what this gates).
+    public bool LearnedNumberWordsOnly { get; set; }
+
     // ── NUMBER-WORD: single value ↔ word via the codec ("5 in words" → five ; "five as a number" → 5). ───────────
     private bool TryFieldNumberWord(IReadOnlyList<string> toks, GenerationRequest request, out GenerationResult result)
     {
         result = default!;
+        if (LearnedNumberWordsOnly) return false; // codec OFF → the learned path (decoder/faces) must answer, or abstain
         // digit → word
         if (toks.Any(IsToWordCue))
         {

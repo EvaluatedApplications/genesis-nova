@@ -1,4 +1,6 @@
+using System.Linq;
 using GenesisNova.Cognition;
+using GenesisNova.Cognition.Platonic;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -65,5 +67,23 @@ public sealed class NumberWordLexiconTests
         Assert.False(lex.TryToWords(100, out _));            // "hundred" never learned -> abstain (honest), not a guess
         Assert.True(lex.TryParse("forty seven".Split(' '), out var v) && v == 47);
         Assert.False(lex.TryParse("glorp".Split(' '), out _)); // no number-word atom present at all
+    }
+
+    [Fact]
+    public void Lexicon_Survives_Space_Snapshot_RoundTrip()
+    {
+        var a = new DialecticalSpace(256, seed: 7);
+        string[] ones = { "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+                          "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen" };
+        for (var i = 0; i < ones.Length; i++) a.NumberWords.LearnAtom(ones[i], i);
+        a.NumberWords.LearnAtom("forty", 40); a.NumberWords.LearnAtom("hundred", 100);
+        var n = a.NumberWords.AtomCount;
+
+        var b = new DialecticalSpace(256, seed: 7);
+        b.ImportSnapshot(a.ExportSnapshot()); // checkpoint round-trip
+
+        Assert.Equal(n, b.NumberWords.AtomCount);                                         // atoms persisted
+        Assert.True(b.NumberWords.TryParse("forty seven".Split(' '), out var v) && v == 47); // and still compose
+        Assert.True(b.NumberWords.TryToWords(147, out var w) && w == "one hundred forty seven");
     }
 }

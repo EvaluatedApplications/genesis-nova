@@ -52,4 +52,10 @@ public sealed record PlatonicMemorySnapshot(
     // FAITHFUL DialecticalSpace elements (orbital + kind + counters, incl. atoms). When present, the dialectical core
     // restores from these for an EXACT round-trip; absent (legacy checkpoints) it falls back to Nodes. Optional →
     // backward-compatible.
-    DialecticalElementSnapshot[]? Elements = null);
+    DialecticalElementSnapshot[]? Elements = null,
+    // The LEARNED number-word lexicon atoms (de-hardcoding #5) — word↔value, so the de-hardcoded number-words survive
+    // reload instead of re-bootstrapping from the gym. Optional → backward-compatible with pre-lexicon checkpoints.
+    NumberWordAtomSnapshot[]? NumberWords = null);
+
+/// <summary>One learned number-word atom (word↔value) for the checkpoint.</summary>
+public sealed record NumberWordAtomSnapshot(string Word, long Value);

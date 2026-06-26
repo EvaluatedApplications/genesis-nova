@@ -877,7 +877,8 @@ public sealed class DialecticalSpace : IPlatonicSpace
         var rels = _relations.Values.Select(r => new PlatonicRelationSnapshot(
             r.Left, r.Right, r.Thesis, r.LastObserved, r.Synthesis, r.ObservationCount, r.UseCount, r.SuccessCount, r.FailureCount, r.LastUsedStep)).ToArray();
         var chunks = _chunks.SelectMany(t => t.Value.Select(c => new PlatonicChunkSnapshot(t.Key, c.Key, c.Value))).ToArray();
-        return new PlatonicMemorySnapshot(_dim, Array.Empty<PlatonicNodeSnapshot>(), rels, chunks, _operationTokens.ToArray(), elements);
+        var numberWords = NumberWords.Export().Select(a => new NumberWordAtomSnapshot(a.Word, a.Value)).ToArray();
+        return new PlatonicMemorySnapshot(_dim, Array.Empty<PlatonicNodeSnapshot>(), rels, chunks, _operationTokens.ToArray(), elements, numberWords);
     }
 
     public void ImportSnapshot(PlatonicMemorySnapshot snapshot)
@@ -925,6 +926,8 @@ public sealed class DialecticalSpace : IPlatonicSpace
             for (var i = 0; i < c.Count; i++) MineChunk(c.Tag, c.Chunk);
         foreach (var t in snapshot.OperationTokens ?? Array.Empty<string>())
             RegisterOperationToken(t);
+        if (snapshot.NumberWords is { Length: > 0 } nw)
+            NumberWords.Import(nw.Select(a => (a.Word, a.Value)));
         _lattice.MarkEmbeddingsDirty(); // imported orbitals were written directly → force a rebuild from live faces
     }
 }

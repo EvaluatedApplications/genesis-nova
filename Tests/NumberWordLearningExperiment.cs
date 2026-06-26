@@ -89,4 +89,40 @@ public sealed class NumberWordLearningExperiment
         }
         finally { try { Directory.Delete(dir, true); } catch { } }
     }
+
+    // The PRODUCTION feed: the gym's NumberWordCurriculum must populate the lexicon (the existing NumberWord skill can't
+    // — its Cruft injects "one"). Train via the orchestrator, then with the codec OFF the LEARNED lexicon must answer.
+    [SlowFact]
+    public async Task GymFeed_PopulatesLexicon_ViaNumberWordCurriculum()
+    {
+        var backend = Environment.GetEnvironmentVariable("GYM_GPU") == "1" ? ComputeBackend.Gpu : ComputeBackend.Cpu;
+        var dir = Path.Combine(Path.GetTempPath(), "gn-nwc-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var config = new GenesisNovaConfig(Backend: backend, HiddenSize: 256, FaceDimensionOverride: 256,
+                AutoPersist: false, AutoResume: false, LocalStateDirectory: dir).WithProductionMechanisms();
+            var rt = new GenesisEvalAppRuntime(config);
+            // CODEC OFF from the start: with the codec on, the correctness gate filters out number-words (already
+            // correct) so the lexicon never sees them. Off, number-words are WRONG (lexicon empty) -> kept -> trained ->
+            // LearnNumberWord fills the lexicon -> they become correct. This is the realistic post-FLIP production order.
+            rt.State.Inference.LearnedNumberWordsOnly = true;
+            ITrainingCurriculum curriculum = new NumberWordCurriculum(trainPerCycle: 64, seed: 7);
+            var opt = new GenesisModularTrainingOrchestrator.Options { MasteryBar = 0.9, WorkDir = dir, AutosaveSeconds = 0, TrainOnFailureOnly = true, ThrottlePercent = () => 0 };
+            var seconds = double.TryParse(Environment.GetEnvironmentVariable("NW_SECONDS"), out var ss) ? ss : 180.0;
+            using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(seconds)))
+                try { await new GenesisModularTrainingOrchestrator().RunAsync(rt, curriculum, opt, _ => { }, cts.Token); } catch (OperationCanceledException) { }
+
+            var atoms = rt.State.Inference.LearnedNumberWordAtomCount;
+            _out.WriteLine($"gym-fed lexicon atoms = {atoms}");
+            async Task<string> P(string s) { var r = (await rt.PredictAsync(s, 12)).Result; var o = r?.Output?.Trim() ?? ""; _out.WriteLine($"  '{s}' -> '{o}'"); return o; }
+            var seven = await P("7 in words");
+            var fortySeven = await P("47 in words");
+
+            Assert.True(atoms >= 20, $"gym must teach the lexicon its atoms; got {atoms}");
+            Assert.Equal("seven", seven);
+            Assert.Equal("forty seven", fortySeven);
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
+    }
 }

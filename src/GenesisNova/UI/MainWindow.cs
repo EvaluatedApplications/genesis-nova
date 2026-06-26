@@ -1442,6 +1442,10 @@ public class MainWindow : Form
             // LearnArithmeticCue; proven the learned path then carries sum/difference/product/quotient. See OpCueCurriculum.
             children.Add(new OpCueCurriculum(trainPerCycle: _gymTrainPerCycle));
             AppendOutput("[train] op-cues: worded arithmetic synonyms (learns sum/difference/product/quotient → op word, no hardcoded list)");
+            // NUMBER-WORDS: clean digit↔word pairs so the learned number-word LEXICON (de-hardcoding #5) gets its atoms,
+            // composing the rest by universal place value (replaces the hardcoded NumberWordVocabulary codec).
+            children.Add(new NumberWordCurriculum(trainPerCycle: _gymTrainPerCycle));
+            AppendOutput("[train] number-words: clean digit↔word (learns the lexicon atoms → no hardcoded codec)");
         }
         var personalityOn = GetControl<CheckBox>("CurPersonality")?.Checked ?? false;
         PersonalityCurriculum? persona = null;

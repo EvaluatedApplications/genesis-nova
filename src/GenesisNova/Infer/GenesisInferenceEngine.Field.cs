@@ -70,21 +70,36 @@ public sealed partial class GenesisInferenceEngine
             else
                 query = inV; // the trailing "fn N is" with no answer = the operand to predict
         }
-        if (demos.Count < 2 || query is null) return false;
+        // Need >= 3 demos: a 2-parameter rule (slope + intercept) is FIT from two and VERIFIED on the rest, so a
+        // spurious 2-point line can't pass — that verification is what makes this induction rather than guessing.
+        if (demos.Count < 3 || query is null) return false;
 
-        // Additive rule: constant difference (out − in) across all demos → apply +k.
-        var addK = FieldStep(demos[0].Out, GliderOp.Subtract, demos[0].In);
-        if (!double.IsNaN(addK) && demos.All(d => Math.Abs(FieldStep(d.Out, GliderOp.Subtract, d.In) - addK) < 1e-6))
-            return EmitField(FieldFormat(FieldStep(query.Value, GliderOp.Add, addK)), "field-induce", request, out result);
-
-        // Multiplicative rule: constant ratio (out ÷ in) across all demos → apply ×k.
-        if (demos.All(d => Math.Abs(d.In) > 1e-9))
-        {
-            var mulK = FieldStep(demos[0].Out, GliderOp.Divide, demos[0].In);
-            if (!double.IsNaN(mulK) && demos.All(d => Math.Abs(FieldStep(d.Out, GliderOp.Divide, d.In) - mulK) < 1e-6))
-                return EmitField(FieldFormat(FieldStep(query.Value, GliderOp.Multiply, mulK)), "field-induce", request, out result);
-        }
+        // GENERAL in-context induction: the rule is LINEAR in one of the substrate's homomorphic FACES — the POLY face
+        // (→ AFFINE  out = a·in + b) or the LOG face (→ POWER  out = C·in^a). FIT the line from two demos, VERIFY it on
+        // the rest, apply it to the query through the homomorphism. The rule CLASS comes from the faces, NOT enumerated
+        // +k/×k branches, so this generalises to ax+b / x^a / √x — with +k (a=1) and ×k (b=0) as special cases.
+        if (TryFitLine(demos.Select(d => (d.In, d.Out)).ToList(), out var a, out var b))  // AFFINE in the poly face
+            return EmitField(FieldFormat(FieldStep(FieldStep(query.Value, GliderOp.Multiply, a), GliderOp.Add, b)), "field-induce", request, out result);
+        if (demos.All(d => d.In > 0 && d.Out > 0)                                          // POWER in the log face (no 0/neg)
+            && TryFitLine(demos.Select(d => (Math.Log(d.In), Math.Log(d.Out))).ToList(), out var la, out var lb))
+            return EmitField(FieldFormat(Math.Exp(lb) * Math.Pow(query.Value, la)), "field-induce", request, out result);
         return false;
+    }
+
+    // Fit Y = a·X + b from the first two DISTINCT-X points, then VERIFY every point lies on that line. A 2-point line is
+    // never rejected, so we require >= 3 points and a clean fit — that's what separates a real linear rule from a guess.
+    private static bool TryFitLine(IReadOnlyList<(double X, double Y)> pts, out double a, out double b)
+    {
+        a = b = 0;
+        if (pts.Count < 3) return false;
+        var j = -1;
+        for (var k = 1; k < pts.Count; k++) if (Math.Abs(pts[k].X - pts[0].X) > 1e-9) { j = k; break; }
+        if (j < 0) return false; // all inputs equal — no transform is defined
+        a = (pts[j].Y - pts[0].Y) / (pts[j].X - pts[0].X);
+        b = pts[0].Y - a * pts[0].X;
+        if (double.IsNaN(a) || double.IsNaN(b) || double.IsInfinity(a) || double.IsInfinity(b)) return false;
+        double slope = a, intercept = b; // out params can't be captured in the verification lambda
+        return pts.All(p => Math.Abs(slope * p.X + intercept - p.Y) < 1e-6);
     }
 
     // ── PREDICATE: two numeric operands + a comparison cue → compare-by-sign (greater/less/equal). ────────────────

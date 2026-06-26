@@ -110,7 +110,7 @@ public sealed class ConsciousFieldGymTests
         {
             ("1 + 1", "2"), ("9 - 2", "7"), ("3 x 4", "12"), ("2 + 5 + 3", "10"), ("3 x 4 + 2", "14"),
             ("7 compared to 4", "greater"), ("what is 3 plus 4", "7"), ("5 in words", "five"),
-            ("3 + 4 in words", "seven"), ("fn 2 is 4 fn 3 is 6 fn 5 is", "10"),
+            ("3 + 4 in words", "seven"), ("fn 2 is 4 fn 3 is 6 fn 4 is 8 fn 5 is", "10"),
         };
         foreach (var (prompt, expected) in items)
         {

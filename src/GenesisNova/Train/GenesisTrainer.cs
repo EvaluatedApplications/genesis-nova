@@ -1364,6 +1364,8 @@ public sealed class GenesisTrainer
         // LEARN the GRAMMAR roles (copula/query/key/value) from this example's assert/recall structure — no word-lists,
         // no word-order (GrammarRoleLearner). Text-only frames; no-op for arithmetic/operator examples.
         _inferencePolicy.ObserveGrammar(example.Input, example.Output);
+        // LEARN the number-word atoms (de-hardcoding #5) from a digit→words example — no-op otherwise.
+        _inferencePolicy.LearnNumberWord(example.Input, example.Output);
         if (allowTransformDiscovery)
             UpdateTransformDiscovery(example);
 

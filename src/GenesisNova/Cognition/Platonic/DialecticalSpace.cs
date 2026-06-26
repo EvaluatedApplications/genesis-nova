@@ -29,6 +29,11 @@ public sealed class DialecticalSpace : IPlatonicSpace
     private readonly Dictionary<string, Dictionary<string, int>> _chunks = new(StringComparer.Ordinal);
     private readonly FunctionElementRegistry _functions;
 
+    /// <summary>The LEARNED number-word lexicon (de-hardcoding #5). Lives on the SPACE (not the engine) so it is SHARED
+    /// between the training engine and the inference engine and persists with the substrate snapshot. A word→value
+    /// annotation, NOT a κ relation edge — numbers-never-edge is respected.</summary>
+    public GenesisNova.Cognition.NumberWordLexicon NumberWords { get; } = new();
+
     // SPATIAL INDEX (ported discipline from PlatonicSpaceMemory). The new core was built on full O(N) linear scans
     // with a FullFace recompute per concept — fine while tiny, but every retrieval/perception/Reason call is O(N),
     // so a growing gym drifts toward O(N^2). The VP-tree (semantic face KNN) gives O(log N) candidate gathering.

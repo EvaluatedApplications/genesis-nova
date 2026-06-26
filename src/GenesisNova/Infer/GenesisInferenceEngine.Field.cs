@@ -145,8 +145,10 @@ public sealed partial class GenesisInferenceEngine
         // value-grader accepts either for non-surface-strict skills; ArithToWord is surface-strict → must be the word).
         if (merged.Any(IsToWordCue))
         {
-            if (LearnedNumberWordsOnly) return false; // EXPERIMENT: codec OFF → abstain so the learned/decoder path is what answers
-            var word = NumberWordVocabulary.ToWords((long)Math.Round(value)); // generative linguistic codec
+            var rounded = (long)Math.Round(value);
+            if (LearnedNumberWordsOnly) // de-hardcoding #5: spell the computed value via the LEARNED lexicon, not the codec
+                return NumberWords is { } lex && lex.TryToWords(rounded, out var lw) && EmitField(lw, "field-compute-word", request, out result);
+            var word = NumberWordVocabulary.ToWords(rounded); // generative linguistic codec
             return EmitField(word, "field-compute-word", request, out result);
         }
         return EmitField(FieldFormat(value), "field-compute", request, out result);
@@ -252,20 +254,24 @@ public sealed partial class GenesisInferenceEngine
     private bool TryFieldNumberWord(IReadOnlyList<string> toks, GenerationRequest request, out GenerationResult result)
     {
         result = default!;
-        if (LearnedNumberWordsOnly) return false; // codec OFF → the learned path (decoder/faces) must answer, or abstain
-        // digit → word
+        var learned = LearnedNumberWordsOnly; // de-hardcoding #5: number↔word via the LEARNED lexicon, not the codec
+        // digit → word ("5 in words" → five)
         if (toks.Any(IsToWordCue))
         {
             var digits = toks.Where(t => long.TryParse(t, out _)).ToList();
             if (digits.Count == 1)
             {
-                var word = NumberWordVocabulary.ToWords(long.Parse(digits[0], CultureInfo.InvariantCulture));
-                return EmitField(word, "field-numberword", request, out result);
+                var v = long.Parse(digits[0], CultureInfo.InvariantCulture);
+                if (learned)
+                    return NumberWords is { } lex && lex.TryToWords(v, out var lw) && EmitField(lw, "field-numberword", request, out result);
+                return EmitField(NumberWordVocabulary.ToWords(v), "field-numberword", request, out result);
             }
         }
-        // word → digit
+        // word → digit ("five as a number" → 5)
         if (toks.Any(IsToDigitCue))
         {
+            if (learned)
+                return NumberWords is { } lex && lex.TryParse(toks, out var lv) && EmitField(lv.ToString(CultureInfo.InvariantCulture), "field-numberword", request, out result);
             var wordRun = toks.Where(IsNumberWord).ToList();
             if (wordRun.Count >= 1 && TryWordsToNumber(wordRun, out var v))
                 return EmitField(v.ToString(CultureInfo.InvariantCulture), "field-numberword", request, out result);
@@ -740,6 +746,31 @@ public sealed partial class GenesisInferenceEngine
     // the trainer via ObserveGrammar; consulted by the field parser via GrammarRole. Warmed by the gym's grammar
     // curriculum; abstains (Unknown) until warm, the same warm-start stance as the filler signal.
     private readonly Cognition.GrammarRoleLearner _grammar = new();
+
+    // The LEARNED number-word lexicon (de-hardcoding #5) lives on the SHARED SPACE (DialecticalSpace.NumberWords) so the
+    // training engine and the inference engine see the SAME learned atoms (the engine instances differ; the space is
+    // shared). word↔value atoms, composed by universal place value; replaces the codec when LearnedNumberWordsOnly is on.
+    private Cognition.NumberWordLexicon? NumberWords => _memory is DialecticalSpace d ? d.NumberWords : null;
+
+    /// <summary>DIAGNOSTIC: how many number-word atoms the lexicon has learned (for the experiment).</summary>
+    public int LearnedNumberWordAtomCount => NumberWords?.AtomCount ?? 0;
+    public IReadOnlyList<(string Word, long Value)> LearnedNumberWordAtoms() => NumberWords?.Export() ?? System.Array.Empty<(string, long)>();
+
+    /// <summary>LEARN a number-word atom/composition from one digit→words example ("5 in words"→"five",
+    /// "147 in words"→"one hundred forty seven"): a single source VALUE in the input + an all-letters WORD output. The
+    /// lexicon learns the atom directly, or solves compositionally for one new scale word against known atoms. Training-
+    /// time only; word→digit examples ("five as a number"→5) carry no isolable cue, so we learn from the clean
+    /// digit→word direction (the lexicon is then bidirectional). Mirrors LearnArithmeticCue/ObserveGrammar.</summary>
+    public void LearnNumberWord(string input, string output)
+    {
+        if (NumberWords is not { } lex || string.IsNullOrWhiteSpace(input) || string.IsNullOrWhiteSpace(output)) return;
+        var inv = CultureInfo.InvariantCulture;
+        var nums = TokenizeField(input).Where(t => long.TryParse(t, NumberStyles.Integer, inv, out _)).ToList();
+        if (nums.Count != 1) return;                               // exactly one source value (the digit being spelled)
+        var outToks = TokenizeField(output);
+        if (outToks.Count == 0 || outToks.Any(t => !t.All(char.IsLetter))) return; // output must be number-WORDS
+        lex.LearnFromDigitWords(long.Parse(nums[0], inv), outToks);
+    }
 
     /// <summary>Observe one training example's ASSERT/RECALL structure so the grammar roles are learned. Text-only:
     /// arithmetic/operator frames have their own routes and would only add noise to the role tallies. Called from the

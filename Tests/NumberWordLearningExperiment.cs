@@ -36,15 +36,20 @@ public sealed class NumberWordLearningExperiment
                 AutoPersist: false, AutoResume: false, LocalStateDirectory: dir).WithProductionMechanisms();
             var rt = new GenesisEvalAppRuntime(config);
 
-            // Train number<->word (both directions) with a couple of skills for GRU feature richness. The gym/grader use
-            // the codec as GROUND TRUTH (allowed); only the ENGINE's inference codec is what we measure-without.
-            var children = new[] { GymSkill.NumberWord, GymSkill.Add, GymSkill.Synonym }
-                .Select(s => (ITrainingCurriculum)new GymTrainer(1, 7, new[] { s }) { MasteryBar = 0.9, TrainPerCycle = 48 }).ToList();
-            var curriculum = new FocusedCurriculum(children, masteryBar: 0.9, focusBudget: 3);
-            var opt = new GenesisModularTrainingOrchestrator.Options { MasteryBar = 0.9, WorkDir = dir, AutosaveSeconds = 0, TrainOnFailureOnly = true, ThrottlePercent = () => 0 };
-            var seconds = double.TryParse(Environment.GetEnvironmentVariable("NW_SECONDS"), out var ss) ? ss : 200.0;
-            using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(seconds)))
-                try { await new GenesisModularTrainingOrchestrator().RunAsync(rt, curriculum, opt, _ => { }, cts.Token); } catch (OperationCanceledException) { }
+            // Feed CLEAN digit->word observations straight through the engine's learner (LearnNumberWord writes to the
+            // shared space lexicon). This is the learnable direction: the source VALUE is unambiguous (a digit) and the
+            // output is the number-word. (The gym's word->digit frames can't be learned cleanly — the Cruft lead-in
+            // "quick one," injects the number-word "one" — so that's a gym-data concern, separate from the mechanism.)
+            // The codec generates the GROUND-TRUTH training words (allowed — reference data); the ENGINE then answers
+            // from the LEARNED lexicon, never the codec.
+            string GT(long v) => NumberWordVocabulary.ToWords(v);
+            for (long v = 0; v <= 99; v++) rt.State.Inference.LearnNumberWord($"{v} in words", GT(v));        // atoms 0-99
+            foreach (var v in new long[] { 100, 200, 300, 113, 147, 250, 999 }) rt.State.Inference.LearnNumberWord($"{v} in words", GT(v)); // learns "hundred" compositionally
+            foreach (var v in new long[] { 1000, 2000, 1234, 5678 }) rt.State.Inference.LearnNumberWord($"{v} in words", GT(v));            // learns "thousand"
+
+            // How many number-word atoms did the lexicon LEARN?
+            var atoms = rt.State.Inference.LearnedNumberWordAtoms();
+            _out.WriteLine($"LEXICON learned {atoms.Count} atoms: {string.Join(", ", atoms.OrderBy(a => a.Value).Take(34).Select(a => $"{a.Word}={a.Value}"))}");
 
             // CODEC OFF — number<->word now must come from what the MODEL learned.
             rt.State.Inference.LearnedNumberWordsOnly = true;

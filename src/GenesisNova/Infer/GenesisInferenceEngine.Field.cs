@@ -91,7 +91,7 @@ public sealed partial class GenesisInferenceEngine
     private bool TryFieldPredicate(IReadOnlyList<string> toks, GenerationRequest request, out GenerationResult result)
     {
         result = default!;
-        if (!toks.Any(IsCompareCue)) return false;
+        if (!toks.Any(CompareCue)) return false;
         var nums = toks.Where(t => double.TryParse(t, NumberStyles.Float, CultureInfo.InvariantCulture, out _)).ToList();
         if (nums.Count != 2) return false;
         var glider = new PlatonicGlider("predicate",
@@ -143,7 +143,7 @@ public sealed partial class GenesisInferenceEngine
 
         // Output FORM emerges from the prompt: a "in words" cue asks for the word, otherwise the number (the
         // value-grader accepts either for non-surface-strict skills; ArithToWord is surface-strict → must be the word).
-        if (merged.Any(IsToWordCue))
+        if (merged.Any(ToWordCue))
         {
             var rounded = (long)Math.Round(value);
             if (LearnedNumberWordsOnly) // de-hardcoding #5: spell the computed value via the LEARNED lexicon, not the codec
@@ -234,7 +234,7 @@ public sealed partial class GenesisInferenceEngine
     {
         op = default;
         var ops = ds.GetNeighbors(token, PlatonicNeighborhoodType.Relational, maxNeighbors: 12, minConfidence: 0.0)
-            .Where(n => n.Concept.StartsWith("∘", StringComparison.Ordinal))
+            .Where(n => OpAnchors.Any(a => a.Anchor == n.Concept))   // ONLY op anchors (not the intent ∘-anchors below)
             .Select(n => (Op: OpAnchors.First(a => a.Anchor == n.Concept).Op, n.Confidence))
             .OrderByDescending(x => x.Confidence).ToList();
         if (ops.Count == 0) return false;
@@ -242,6 +242,59 @@ public sealed partial class GenesisInferenceEngine
         op = ops[0].Op;
         return true;
     }
+
+    // ── LEARNED INTENT CUES — de-hardcoding the IsCompareCue / IsToWordCue / IsToDigitCue word-lists (items #3, #4).
+    //    SAME mechanism as the op-cues: classify the example's INTENT from its STRUCTURE (number of operands + output
+    //    type, via the learned number-word lexicon — NOT the cue words), relate the cue token(s) to an internal intent
+    //    "∘" anchor; resolve at inference, ABSTAIN on competing (framing words spread across intents). Gated by
+    //    LearnedCuesOnly (default OFF = the hardcoded lists, byte-identical) until validated, then flipped.
+    public bool LearnedCuesOnly { get; set; }
+    private enum FieldIntent { None, Compare, ToWord, ToDigit }
+    private static readonly (string Anchor, FieldIntent Intent)[] IntentAnchors =
+        { ("∘cmp", FieldIntent.Compare), ("∘tow", FieldIntent.ToWord), ("∘tod", FieldIntent.ToDigit) };
+
+    /// <summary>LEARN an intent cue from one example's STRUCTURE: one digit→number-word = ToWord ("5 in words"→five);
+    /// number-word→one digit = ToDigit ("five as a number"→5); two operands→a relational (non-number) word = Compare
+    /// ("5 compared to 3"→greater). Relates the example's cue tokens (skipping operands AND number-words) to the intent
+    /// anchor. Mirrors LearnArithmeticCue; training-time only; needs the number-word lexicon to type the output.</summary>
+    public void LearnIntentCue(string input, string output)
+    {
+        if (_memory is not DialecticalSpace ds || NumberWords is not { } lex || string.IsNullOrWhiteSpace(input) || string.IsNullOrWhiteSpace(output)) return;
+        var inv = CultureInfo.InvariantCulture;
+        var merged = SignMerge(TokenizeField(input));
+        var nums = merged.Count(t => double.TryParse(t, NumberStyles.Float, inv, out _));
+        var outToks = TokenizeField(output);
+        var outIsDigit = outToks.Count == 1 && double.TryParse(outToks[0], NumberStyles.Float, inv, out _);
+        var outAllLetters = outToks.Count > 0 && outToks.All(t => t.All(char.IsLetter));
+        var outIsNumberWord = outAllLetters && lex.TryParse(outToks, out _) && outToks.Any(lex.KnowsAtom);
+        var inHasNumberWord = merged.Any(lex.KnowsAtom);
+        string? anchor =
+            (nums == 1 && outIsNumberWord) ? "∘tow" :
+            (outIsDigit && nums == 0 && inHasNumberWord) ? "∘tod" :
+            (nums == 2 && outAllLetters && !outIsNumberWord) ? "∘cmp" :
+            null;
+        if (anchor is null) return;
+        foreach (var t in merged)
+            if (!IsNumericLike(t) && !lex.KnowsAtom(t))
+                ds.FineEditFromExample(new[] { t }, new[] { anchor }, isNegativeExample: false);
+    }
+
+    private FieldIntent ResolveLearnedIntent(string token)
+    {
+        if (_memory is not DialecticalSpace ds) return FieldIntent.None;
+        var hits = ds.GetNeighbors(token, PlatonicNeighborhoodType.Relational, maxNeighbors: 12, minConfidence: 0.0)
+            .Where(n => IntentAnchors.Any(a => a.Anchor == n.Concept))
+            .Select(n => (Intent: IntentAnchors.First(a => a.Anchor == n.Concept).Intent, n.Confidence))
+            .OrderByDescending(x => x.Confidence).ToList();
+        if (hits.Count == 0) return FieldIntent.None;
+        if (hits.Any(x => x.Intent != hits[0].Intent && x.Confidence >= hits[0].Confidence - 1e-6)) return FieldIntent.None;
+        return hits[0].Intent;
+    }
+
+    // The cue predicates: LEARNED intents when LearnedCuesOnly, else the hardcoded lists (byte-identical default).
+    private bool ToWordCue(string t) => LearnedCuesOnly ? ResolveLearnedIntent(t) == FieldIntent.ToWord : IsToWordCue(t);
+    private bool ToDigitCue(string t) => LearnedCuesOnly ? ResolveLearnedIntent(t) == FieldIntent.ToDigit : IsToDigitCue(t);
+    private bool CompareCue(string t) => LearnedCuesOnly ? ResolveLearnedIntent(t) == FieldIntent.Compare : IsCompareCue(t);
 
     // EXPERIMENT toggle (de-hardcoding #5): when true the engine's number-word ROUTES abstain — no hardcoded
     // NumberWordVocabulary codec — so number↔word must come from what the MODEL learned (its decoder / face geometry).
@@ -256,7 +309,7 @@ public sealed partial class GenesisInferenceEngine
         result = default!;
         var learned = LearnedNumberWordsOnly; // de-hardcoding #5: number↔word via the LEARNED lexicon, not the codec
         // digit → word ("5 in words" → five)
-        if (toks.Any(IsToWordCue))
+        if (toks.Any(ToWordCue))
         {
             var digits = toks.Where(t => long.TryParse(t, out _)).ToList();
             if (digits.Count == 1)
@@ -268,7 +321,7 @@ public sealed partial class GenesisInferenceEngine
             }
         }
         // word → digit ("five as a number" → 5)
-        if (toks.Any(IsToDigitCue))
+        if (toks.Any(ToDigitCue))
         {
             if (learned)
                 return NumberWords is { } lex && lex.TryParse(toks, out var lv) && EmitField(lv.ToString(CultureInfo.InvariantCulture), "field-numberword", request, out result);

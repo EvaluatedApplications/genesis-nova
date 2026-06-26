@@ -1366,6 +1366,9 @@ public sealed class GenesisTrainer
         _inferencePolicy.ObserveGrammar(example.Input, example.Output);
         // LEARN the number-word atoms (de-hardcoding #5) from a digit→words example — no-op otherwise.
         _inferencePolicy.LearnNumberWord(example.Input, example.Output);
+        // LEARN the intent cues (de-hardcoding #3/#4: compare / to-word / to-digit) from the example's structure — after
+        // LearnNumberWord so the lexicon can type the output. No-op for frames that don't match an intent shape.
+        _inferencePolicy.LearnIntentCue(example.Input, example.Output);
         if (allowTransformDiscovery)
             UpdateTransformDiscovery(example);
 

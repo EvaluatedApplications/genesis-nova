@@ -1,7 +1,12 @@
 using System;
+using System.IO;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 using GenesisNova.Core;
 using GenesisNova.Infer;
 using GenesisNova.Runtime;
+using GenesisNova.Train;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -46,5 +51,42 @@ public sealed class IntentCueLearningTest
         Assert.Equal("8", P("eight as a numeral"));
         Assert.Contains("greater", P("8 compared to 3"));     // Compare cue learned (route fires; output word is the glider's)
         Assert.Contains("less", P("2 compared to 9"));
+    }
+
+    // #2: the retrieval marker (kind/type/synonym/...) becomes a LEARNED ∘ret cue, learned from examples whose ANSWER is
+    // a CATEGORY HUB (structural — a concept many things point to; genesis Law S), NOT a word-list. Train Category (forms
+    // hubs + learns the cue) + Grammar/Synonym (warm the role head + the learned function-word signal so the shared
+    // copula "is" is EXCLUDED from ∘ret). Then a markerless category frame is detected as retrieval; a fact is not.
+    [SlowFact]
+    public async Task LearnedRetrievalCue_DetectsCategory_NotFact()
+    {
+        var backend = Environment.GetEnvironmentVariable("GYM_GPU") == "1" ? ComputeBackend.Gpu : ComputeBackend.Cpu;
+        var dir = Path.Combine(Path.GetTempPath(), "gn-ret-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var config = new GenesisNovaConfig(Backend: backend, HiddenSize: 256, FaceDimensionOverride: 256,
+                AutoPersist: false, AutoResume: false, LocalStateDirectory: dir).WithProductionMechanisms();
+            var rt = new GenesisEvalAppRuntime(config);
+            var children = new[] { GymSkill.Category, GymSkill.Synonym }
+                .Select(s => (ITrainingCurriculum)new GymTrainer(1, 7, new[] { s }) { MasteryBar = 0.9, TrainPerCycle = 48 })
+                .Append(new GrammarCurriculum(trainPerCycle: 64)).ToList();
+            var curriculum = new FocusedCurriculum(children, masteryBar: 0.9, focusBudget: 3);
+            var opt = new GenesisModularTrainingOrchestrator.Options { MasteryBar = 0.9, WorkDir = dir, AutosaveSeconds = 0, TrainOnFailureOnly = true, ThrottlePercent = () => 0 };
+            var seconds = double.TryParse(Environment.GetEnvironmentVariable("RET_SECONDS"), out var ss) ? ss : 220.0;
+            using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(seconds)))
+                try { await new GenesisModularTrainingOrchestrator().RunAsync(rt, curriculum, opt, _ => { }, cts.Token); } catch (OperationCanceledException) { }
+
+            rt.State.Inference.LearnedCuesOnly = true; // de-hardcoded: no IsRetrievalMarker / IsQuestionCue lists
+            bool Q(string s) { var r = rt.State.Inference.IsQueryOrRetrievalForTests(s); _out.WriteLine($"  query/retrieval? '{s}' -> {r}"); return r; }
+
+            // markerless category frame (no wh-word) — caught only by the LEARNED ∘ret cue, not the role head's QUERY:
+            Assert.True(Q("apple is a kind of"));      // "kind" -> ∘ret (learned from category-HUB answers)
+            // THE SAFETY PROPERTY: a personal FACT must NOT be gated as retrieval (the shared copula "is", tagged Filler
+            // by the role head, is excluded from ∘ret — else every "X is Y" fact would be mis-read as a category query):
+            Assert.False(Q("my name is stephen"));
+            _out.WriteLine($"  (informational, coverage-dependent) 'rose is a sort of' -> {Q("rose is a sort of")}");
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
     }
 }

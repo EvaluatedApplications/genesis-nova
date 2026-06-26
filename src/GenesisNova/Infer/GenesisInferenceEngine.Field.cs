@@ -249,9 +249,13 @@ public sealed partial class GenesisInferenceEngine
     //    "∘" anchor; resolve at inference, ABSTAIN on competing (framing words spread across intents). Gated by
     //    LearnedCuesOnly (default OFF = the hardcoded lists, byte-identical) until validated, then flipped.
     public bool LearnedCuesOnly { get; set; }
-    private enum FieldIntent { None, Compare, ToWord, ToDigit }
+    private enum FieldIntent { None, Compare, ToWord, ToDigit, Retrieve }
     private static readonly (string Anchor, FieldIntent Intent)[] IntentAnchors =
-        { ("∘cmp", FieldIntent.Compare), ("∘tow", FieldIntent.ToWord), ("∘tod", FieldIntent.ToDigit) };
+        { ("∘cmp", FieldIntent.Compare), ("∘tow", FieldIntent.ToWord), ("∘tod", FieldIntent.ToDigit), ("∘ret", FieldIntent.Retrieve) };
+    // #2 de-hardcoded: a CATEGORY is recognised STRUCTURALLY (genesis Law S, reuse-as-target) — a concept many things
+    // point to (high relation degree) — not by the kind/type/synonym word-list. An example whose answer is such a hub is
+    // a category/synonym RETRIEVAL; its framing cue ("kind"/"synonym") is related to ∘ret and abstains elsewhere.
+    private const int CategoryHubDegree = 3;
 
     /// <summary>LEARN an intent cue from one example's STRUCTURE: one digit→number-word = ToWord ("5 in words"→five);
     /// number-word→one digit = ToDigit ("five as a number"→5); two operands→a relational (non-number) word = Compare
@@ -272,10 +276,17 @@ public sealed partial class GenesisInferenceEngine
             (nums == 1 && outIsNumberWord) ? "∘tow" :
             (outIsDigit && nums == 0 && inHasNumberWord) ? "∘tod" :
             (nums == 2 && outAllLetters && !outIsNumberWord) ? "∘cmp" :
+            // RETRIEVAL: no operands, the answer is a single content word that is a CATEGORY HUB (many concepts point to
+            // it). The category-ness is the SPACE's own structure (GetRelationDegree), never a kind/type/synonym list.
+            (nums == 0 && outToks.Count == 1 && outAllLetters && !outIsNumberWord && ds.GetRelationDegree(outToks[0]) >= CategoryHubDegree) ? "∘ret" :
             null;
         if (anchor is null) return;
         foreach (var t in merged)
-            if (!IsNumericLike(t) && !lex.KnowsAtom(t))
+            if (!IsNumericLike(t) && !lex.KnowsAtom(t)
+                // For ∘ret, exclude the LEARNED function words (copula/articles: is/a/of) — else the shared copula "is"
+                // would map every "X is Y" FACT to retrieval. The category-specific marker ("kind"/"synonym") is NOT
+                // function-like, so it survives. This is the learned filler signal, not a stop-list (warm-start).
+                && (anchor != "∘ret" || !ds.IsFunctionLike(t)))
                 ds.FineEditFromExample(new[] { t }, new[] { anchor }, isNegativeExample: false);
     }
 
@@ -481,7 +492,7 @@ public sealed partial class GenesisInferenceEngine
     private bool TryFieldComposeMeaning(IReadOnlyList<string> toks, GenerationRequest request, out GenerationResult result)
     {
         result = default!;
-        if (QuestionFrame(toks) || toks.Any(IsRetrievalMarker)) return false;
+        if (QuestionFrame(toks) || RetrievalFrame(toks)) return false;
         var ds = (DialecticalSpace)_memory;
         var content = toks.Where(t => IsContentWord(t) && !IsFiller(ds, t) && !IsNumericLike(t) && ds.ContainsConcept(t))
                           .Distinct(StringComparer.Ordinal).ToList();
@@ -502,7 +513,7 @@ public sealed partial class GenesisInferenceEngine
     private bool TryFieldMeaningTick(IReadOnlyList<string> toks, GenerationRequest request, out GenerationResult result)
     {
         result = default!;
-        if (QuestionFrame(toks) || toks.Any(IsRetrievalMarker)) return false;
+        if (QuestionFrame(toks) || RetrievalFrame(toks)) return false;
         var ds = (DialecticalSpace)_memory;
         var frontier = toks.Where(t => IsContentWord(t) && !IsFiller(ds, t) && !IsNumericLike(t) && ds.ContainsConcept(t))
                           .Distinct(StringComparer.Ordinal).ToList();
@@ -627,7 +638,7 @@ public sealed partial class GenesisInferenceEngine
         result = default!;
         if (toks.Count < 3) return false;
         if ((request.Input ?? string.Empty).Contains('?')) return false;
-        if (QuestionFrame(toks) || toks.Any(IsRetrievalMarker)) return false; // a question / retrieval frame, not a statement
+        if (QuestionFrame(toks) || RetrievalFrame(toks)) return false; // a question / retrieval frame, not a statement
 
         var ds = (DialecticalSpace)_memory;
         // The subject KEY + asserted VALUE come ONLY from the LEARNED grammar roles (the NN structure recogniser),
@@ -677,6 +688,27 @@ public sealed partial class GenesisInferenceEngine
     // #1: a question frame — the LEARNED role head's QUERY tag when LearnedCuesOnly, else the hardcoded wh-word list.
     private bool QuestionFrame(IReadOnlyList<string> toks)
         => LearnedCuesOnly ? HasLearnedQueryRole(toks) : toks.Any(IsQuestionCue);
+    // #2: a retrieval/category frame — the LEARNED ∘ret cue (learned from category-HUB answers) when LearnedCuesOnly,
+    // else the hardcoded marker list. At RESOLVE time exclude the learned function words too: the shared copula "is" may
+    // have been related to ∘ret EARLY (before the function-word signal warmed), so the warm signal is the safety net
+    // that keeps a plain "X is Y" FACT from being mis-read as retrieval — only the non-filler marker counts.
+    private bool RetrievalFrame(IReadOnlyList<string> toks)
+    {
+        if (!LearnedCuesOnly) return toks.Any(IsRetrievalMarker);
+        if (_memory is not DialecticalSpace ds) return false;
+        var nn = NnRoles(toks); // role head tags the copula "is" as Filler (it is directly trained on it) → exclude it
+        for (var i = 0; i < toks.Count; i++)
+        {
+            var t = toks[i];
+            if (ds.IsFunctionLike(t)) continue;                                                   // learned filler (centrality)
+            if (nn is not null && i < nn.Length && nn[i] == Cognition.GrammarRoleLearner.Role.Filler) continue; // role-head filler
+            if (ResolveLearnedIntent(t) == FieldIntent.Retrieve) return true;
+        }
+        return false;
+    }
+
+    /// <summary>DIAGNOSTIC (tests): does the active path treat this input as a query/retrieval frame (not a statement)?</summary>
+    public bool IsQueryOrRetrievalForTests(string input) { var t = TokenizeField(input); return QuestionFrame(t) || RetrievalFrame(t); }
 
 
     private enum FrameKind { None, Assertion, Question }
@@ -690,7 +722,7 @@ public sealed partial class GenesisInferenceEngine
         subject = value = null;
         // Only personal-fact frames: abstain on arithmetic/operator frames AND the gym's RETRIEVAL frames (synonym/
         // category/etc.) so the grammar parse never hijacks a skill query — those keep their normal retrieval route.
-        if (toks.Count < 2 || toks.Any(IsNumericLike) || toks.Any(ds.IsOperationToken) || toks.Any(IsRetrievalMarker)) return FrameKind.None;
+        if (toks.Count < 2 || toks.Any(IsNumericLike) || toks.Any(ds.IsOperationToken) || RetrievalFrame(toks)) return FrameKind.None;
         var nn = NnRoles(toks);
         if (nn is null) return FrameKind.None;                        // NN untrained / not aligned → no parse (honest)
         Cognition.GrammarRoleLearner.Role RoleAt(int i) => nn[i];     // PURELY the NN's tag
@@ -849,7 +881,7 @@ public sealed partial class GenesisInferenceEngine
         // category/synonym question like "apple is a kind of fruit" would otherwise feed the structural token "is"
         // spurious answer-absent counts and misclassify it). IsRetrievalMarker gates the gym's question frames here —
         // a training-frame filter, not parse logic.
-        if (toks.Count == 0 || toks.Any(IsNumericLike) || toks.Any(ds.IsOperationToken) || toks.Any(IsRetrievalMarker)) return;
+        if (toks.Count == 0 || toks.Any(IsNumericLike) || toks.Any(ds.IsOperationToken) || RetrievalFrame(toks)) return;
         _grammar.Observe(toks, output.Trim());
     }
 
@@ -881,7 +913,7 @@ public sealed partial class GenesisInferenceEngine
     {
         if (_memory is not DialecticalSpace ds) return null;
         var toks = TokenizeField(input);
-        if (toks.Count == 0 || toks.Any(IsNumericLike) || toks.Any(ds.IsOperationToken) || toks.Any(IsRetrievalMarker)) return null;
+        if (toks.Count == 0 || toks.Any(IsNumericLike) || toks.Any(ds.IsOperationToken) || RetrievalFrame(toks)) return null;
         var labels = new int[toks.Count];
         var any = false;
         for (var i = 0; i < toks.Count; i++)

@@ -102,6 +102,19 @@ public sealed class WhitespaceGenesisTokenizer : IGenesisTokenizer
                 continue;
             }
 
+            // NON-SPACED SCRIPTS (#6): a caseless letter (Unicode OtherLetter — CJK ideographs, kana, Hangul, …) is an
+            // individually-meaningful unit written WITHOUT inter-character word spacing, so it is its OWN token (like a
+            // digit), instead of accumulating into a single giant token. Universal (a Unicode property, not a language
+            // list); Latin/Cyrillic/Greek letters are CASED (Lu/Ll) and still accumulate into whole words. A multi-char
+            // CJK word then becomes a multi-token SPAN, which the copula-position span logic already handles.
+            if (System.Char.GetUnicodeCategory(ch) == System.Globalization.UnicodeCategory.OtherLetter)
+            {
+                FlushBuffer();
+                tokens.Add((CharToken(ch), sawSpace));
+                sawSpace = false;
+                continue;
+            }
+
             if (char.IsLetterOrDigit(ch))
             {
                 if (buffer.Length == 0)

@@ -481,7 +481,7 @@ public sealed partial class GenesisInferenceEngine
     private bool TryFieldComposeMeaning(IReadOnlyList<string> toks, GenerationRequest request, out GenerationResult result)
     {
         result = default!;
-        if (toks.Any(IsQuestionCue) || toks.Any(IsRetrievalMarker)) return false;
+        if (QuestionFrame(toks) || toks.Any(IsRetrievalMarker)) return false;
         var ds = (DialecticalSpace)_memory;
         var content = toks.Where(t => IsContentWord(t) && !IsFiller(ds, t) && !IsNumericLike(t) && ds.ContainsConcept(t))
                           .Distinct(StringComparer.Ordinal).ToList();
@@ -502,7 +502,7 @@ public sealed partial class GenesisInferenceEngine
     private bool TryFieldMeaningTick(IReadOnlyList<string> toks, GenerationRequest request, out GenerationResult result)
     {
         result = default!;
-        if (toks.Any(IsQuestionCue) || toks.Any(IsRetrievalMarker)) return false;
+        if (QuestionFrame(toks) || toks.Any(IsRetrievalMarker)) return false;
         var ds = (DialecticalSpace)_memory;
         var frontier = toks.Where(t => IsContentWord(t) && !IsFiller(ds, t) && !IsNumericLike(t) && ds.ContainsConcept(t))
                           .Distinct(StringComparer.Ordinal).ToList();
@@ -627,7 +627,7 @@ public sealed partial class GenesisInferenceEngine
         result = default!;
         if (toks.Count < 3) return false;
         if ((request.Input ?? string.Empty).Contains('?')) return false;
-        if (toks.Any(IsQuestionCue) || toks.Any(IsRetrievalMarker)) return false; // a question / retrieval frame, not a statement
+        if (QuestionFrame(toks) || toks.Any(IsRetrievalMarker)) return false; // a question / retrieval frame, not a statement
 
         var ds = (DialecticalSpace)_memory;
         // The subject KEY + asserted VALUE come ONLY from the LEARNED grammar roles (the NN structure recogniser),
@@ -664,7 +664,19 @@ public sealed partial class GenesisInferenceEngine
     // than a hardcoded stoplist: the code is the general framework, the gym's training teaches WHAT counts as filler
     // (see FunctionWordResearch). The learned signal SELF-ABSTAINS in a cold/untrained space, so interrogatives stay a
     // tiny structural floor — a question word is never an answer in ANY space, warm or cold.
-    private static bool IsFiller(DialecticalSpace ds, string t) => IsQuestionCue(t) || ds.IsFunctionLike(t);
+    // #1 de-hardcoded: in learned mode the question-word floor is dropped — interrogatives are caught by the LEARNED
+    // filler signal (they are high-centrality function words) and the role head's QUERY tag; the wh-word list is only
+    // the cold-start floor for the default (hardcoded) path.
+    private bool IsFiller(DialecticalSpace ds, string t) => (!LearnedCuesOnly && IsQuestionCue(t)) || ds.IsFunctionLike(t);
+
+    private bool HasLearnedQueryRole(IReadOnlyList<string> toks)
+    {
+        var nn = NnRoles(toks);
+        return nn is not null && System.Array.Exists(nn, r => r == Cognition.GrammarRoleLearner.Role.Query);
+    }
+    // #1: a question frame — the LEARNED role head's QUERY tag when LearnedCuesOnly, else the hardcoded wh-word list.
+    private bool QuestionFrame(IReadOnlyList<string> toks)
+        => LearnedCuesOnly ? HasLearnedQueryRole(toks) : toks.Any(IsQuestionCue);
 
 
     private enum FrameKind { None, Assertion, Question }

@@ -94,6 +94,15 @@ public sealed partial class GenesisInferenceEngine
         if (!toks.Any(CompareCue)) return false;
         var nums = toks.Where(t => double.TryParse(t, NumberStyles.Float, CultureInfo.InvariantCulture, out _)).ToList();
         if (nums.Count != 2) return false;
+        // #3 TWIN de-hardcoded: the comparison OUTCOME is universal (sign of a−b); the WORD is LEARNED (no greater/less/
+        // equal literals). Abstain until the comparison vocabulary has been taught.
+        if (LearnedCuesOnly && _memory is DialecticalSpace cds)
+        {
+            var a = double.Parse(nums[0], NumberStyles.Float, CultureInfo.InvariantCulture);
+            var b = double.Parse(nums[1], NumberStyles.Float, CultureInfo.InvariantCulture);
+            var anchor = a > b ? "∘gt" : a < b ? "∘lt" : "∘eq";
+            return ResolveOutcomeWord(cds, anchor, out var lw) && EmitField(lw, "field-predicate", request, out result);
+        }
         var glider = new PlatonicGlider("predicate",
             new Branch(new Compare(CompareOp.Greater, new Operand(0), new Operand(1)),
                 new Literal("greater"),
@@ -288,6 +297,25 @@ public sealed partial class GenesisInferenceEngine
                 // function-like, so it survives. This is the learned filler signal, not a stop-list (warm-start).
                 && (anchor != "∘ret" || !ds.IsFunctionLike(t)))
                 ds.FineEditFromExample(new[] { t }, new[] { anchor }, isNegativeExample: false);
+
+        // #3 TWIN — learn the comparison OUTPUT vocabulary (greater/less/equal). The OUTCOME is universal arithmetic
+        // (sign of operand0 − operand1); the WORD for it is LEARNED by relating the output to the sign's outcome anchor.
+        if (anchor == "∘cmp")
+        {
+            var ops = merged.Where(t => double.TryParse(t, NumberStyles.Float, inv, out _)).Select(t => double.Parse(t, NumberStyles.Float, inv)).ToList();
+            if (ops.Count == 2 && outToks.Count == 1)
+                ds.FineEditFromExample(new[] { outToks[0] }, new[] { ops[0] > ops[1] ? "∘gt" : ops[0] < ops[1] ? "∘lt" : "∘eq" }, isNegativeExample: false);
+        }
+    }
+
+    // Reverse-lookup the LEARNED word for a comparison outcome anchor (∘gt/∘lt/∘eq) — the highest-confidence non-anchor
+    // neighbour. ABSTAINS (false) until the comparison vocabulary has been taught.
+    private static bool ResolveOutcomeWord(DialecticalSpace ds, string anchor, out string word)
+    {
+        word = ds.GetNeighbors(anchor, PlatonicNeighborhoodType.Relational, maxNeighbors: 8, minConfidence: 0.0)
+            .Where(n => !n.Concept.StartsWith("∘", StringComparison.Ordinal))
+            .OrderByDescending(n => n.Confidence).Select(n => n.Concept).FirstOrDefault() ?? string.Empty;
+        return word.Length > 0;
     }
 
     private FieldIntent ResolveLearnedIntent(string token)

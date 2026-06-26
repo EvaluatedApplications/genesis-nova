@@ -22,8 +22,8 @@ public sealed class BareSubjectDiagnostic
         var tok = new WhitespaceGenesisTokenizer();
         var space = new DialecticalSpace(config.FaceDimension, seed: 7);
         var model = new GenesisNeuralModel(config);
+        GrammarWarmup.WarmRoleHeadWithGym(tok, model, space, config);
         var mind = new GenesisInferenceEngine(tok, model, space, null) { ConsciousField = true };
-        GrammarWarmup.WarmRoleHead(tok, model, mind);
 
         void Roles(string s)
         {
@@ -34,7 +34,10 @@ public sealed class BareSubjectDiagnostic
 
         Roles("alice is doctor");
         Roles("what is alice");
-        Roles("my name is stephen");
+        Roles("my favorite color is indigo");
+        Roles("what is my favorite color");
+        Say("my favorite color is indigo");
+        Say("what is my favorite color");
         Say("alice is doctor");
         Say("bob is teacher");
         Say("what is alice");

@@ -48,6 +48,16 @@ internal static class SlowTests
         + "(head-only GrammarWarmup covers possessive subjects — see FactRecallExperiment; DurableMechanismTests passes "
         + "bare subjects via full gym training).";
 
+    /// <summary>3-word subject span ("my favorite color"): the LEARNED role head mis-tags the final noun of the ASSERT
+    /// as VALUE (subject span collapses to "my favorite") while the RECALL tags all three SUBJECT, so the stored key
+    /// and the query key mismatch and recall abstains. Bare / 2-word / "the" subjects DO pass with the GRU-trained
+    /// GrammarWarmup.WarmRoleHeadWithGym (LivingLearningExperiment, LivingScaleExperiment). Robust multi-token (3+)
+    /// subject tagging is the remaining gap — likely needs the copula POSITION to bound the subject, a design call.</summary>
+    public const string MultiWordSubject =
+        "3-word subject span ('my favorite color') mis-tags the final noun VALUE in the assert (subject becomes 'my "
+        + "favorite') but SUBJECT in the recall, so the keys mismatch. Bare/2-word/'the' subjects pass "
+        + "(GrammarWarmup.WarmRoleHeadWithGym); robust 3+-token subject tagging is pending.";
+
     public static bool Enabled
     {
         get

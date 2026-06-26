@@ -33,6 +33,11 @@ public sealed class GrammarCurriculum : ITrainingCurriculum
     // that would pollute the user's real "my name"->stephen. This is what decouples "teach grammar" from "plant facts".
     private static readonly string[] Nouns =
         { "zibble", "quax", "florp", "glim", "wozit", "tarn", "vmoo", "skree", "drelb", "fnug", "gorm", "tweel", "plost", "brindle" };
+    // NONCE adjectives so a SUBJECT can be a 3-word span ("my favorite color"): the role head learns the SUBJECT is the
+    // whole contiguous noun phrase before the copula, not just the determiner+noun. Without these it tagged only 2-word
+    // subjects and a 3-word phrase ("my favorite color") parsed to the wrong span -> retrieved the wrong fact.
+    private static readonly string[] Adjectives =
+        { "snorpy", "blimmy", "trabid", "quogish", "drelby", "fnordic", "wozzy", "glimmal", "tarnic", "vexil" };
     // MANY varied values — VALUE is the hardest role to generalise because (unlike the noun, which appears in BOTH
     // assert and recall frames) a value appears ONLY in asserts, so it gets ~half the exposure. A large, varied pool
     // forces the head to learn "the post-copula content is the VALUE" by POSITION rather than memorising a few tokens,
@@ -90,12 +95,14 @@ public sealed class GrammarCurriculum : ITrainingCurriculum
     private string Subject()
     {
         var noun = Nouns[_rng.Next(Nouns.Length)];
-        return _rng.Next(4) switch
+        var adj = Adjectives[_rng.Next(Adjectives.Length)];
+        return _rng.Next(6) switch
         {
-            0 => $"{Possessives[_rng.Next(Possessives.Length)]} {noun}", // "my zibble" — possessive (distinguishes my/your)
-            1 => $"the {noun}",                                          // "the password"
-            2 => $"a {noun}",                                            // "a zibble"
-            _ => noun,                                                   // "alice" — bare subject, no determiner
+            0 or 1 => $"{Possessives[_rng.Next(Possessives.Length)]} {noun}",            // "my zibble" — possessive (distinguishes my/your)
+            2 => $"the {noun}",                                                          // "the password"
+            3 => noun,                                                                   // "alice" — bare subject, no determiner
+            // ~1/3 are 3-word spans so the head reliably tags the WHOLE noun phrase (a single nonce-adj example was flaky)
+            _ => $"{Possessives[_rng.Next(Possessives.Length)]} {adj} {noun}",           // "my favorite color" — 3-word subject span
         };
     }
     private string Val() => Values[_rng.Next(Values.Length)];

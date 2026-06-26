@@ -1,4 +1,6 @@
+using GenesisNova.Cognition;
 using GenesisNova.Core;
+using GenesisNova.Data;
 using GenesisNova.Infer;
 using GenesisNova.Model;
 using GenesisNova.Runtime;
@@ -47,6 +49,37 @@ internal static class GrammarWarmup
         for (var c = 0; c < cycles; c++)
             foreach (var (input, output) in opcue.NextTrainBatch())
                 engine.LearnArithmeticCue(input, output);
+    }
+
+    /// <summary>Warm the role head AFTER training the GRU on real gym skills, so its per-token features are
+    /// DISCRIMINATIVE — the role head reads those features, and on a near-random GRU it generalises only to POSSESSIVE
+    /// subjects ("my name is X"); with a trained GRU it tags BARE/"the" subjects ("alice is doctor") too. This is what
+    /// production does and what DurableMechanismTests proves. Heavier than the head-only warm (it trains the GRU via
+    /// TrainStep, which also writes the gym/grammar facts into the space — tolerable, same as Durable), so callers stay
+    /// [SlowFact]. Interleaves gym (features) + seeded grammar (role labels) each cycle.</summary>
+    public static void WarmRoleHeadWithGym(IGenesisTokenizer tok, GenesisNeuralModel model, IPlatonicSpace space,
+        GenesisNovaConfig config, int gymCycles = 12)
+    {
+        // Train the GRU on a RICH vocabulary (arithmetic + synonym/category/number WORDS) so its per-token features are
+        // discriminative enough for the role head to tag arbitrary BARE subjects ("alice") — the real-word diversity is
+        // what a pure-arithmetic warm lacks. CRUCIALLY this is HEAD-ONLY (model.TrainExample, NOT the trainer's
+        // TrainStep), so ObservePlatonicSpace never runs and NO relation edge (synonym/category fact) is written — the
+        // richness is the token diversity, not stored facts, so a scale-recall test sees ONLY its own facts (no hubs).
+        var gym = new GymTrainer(startLevel: 1, seed: 12345, skills: new[]
+            { GymSkill.Add, GymSkill.Subtract, GymSkill.Multiply, GymSkill.Synonym, GymSkill.Category, GymSkill.NumberWord });
+        for (var c = 0; c < gymCycles; c++)
+            foreach (var (i, o) in gym.NextTrainBatch())
+            {
+                var inTok = tok.Encode(i);
+                var tgt = tok.Encode(o, addEos: true); // encode BEFORE EnsureVocabularySize (a new token id must not overrun the decoder)
+                model.EnsureVocabularySize(tok.VocabularySize);
+                model.TrainExample(inTok, tgt, tok.BosTokenId);
+                model.CloneParametersToBreakGraph();
+            }
+        // Then warm the role head on grammar — also head-only, so still no space writes. Extra cycles so multi-word
+        // (3-token) subject spans tag consistently between assert and recall.
+        var engine = new GenesisInferenceEngine(tok, model, space, null) { ConsciousField = true };
+        WarmRoleHead(tok, model, engine, cycles: 80);
     }
 
     public static void WarmRoleHead(GenesisRuntimeState s, int cycles = 60)

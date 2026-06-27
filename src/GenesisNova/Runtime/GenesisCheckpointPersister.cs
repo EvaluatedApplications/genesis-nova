@@ -1,3 +1,4 @@
+using System.Linq;
 using System.Text.Json;
 using GenesisNova.Core;
 using GenesisNova.Persistence;
@@ -36,6 +37,9 @@ internal sealed class GenesisCheckpointPersister
         var snapshotConfig = CreateCheckpointConfig();
         var autoPath = GenesisLocalStateStore.ResolveCheckpointPath(_runtimeConfig);
         var trainerLearningStateJson = TryExportTrainerLearningState();
+        var grammarRoles = _state.Inference.ExportGrammarRoles()
+            .Select(r => new GrammarRoleSnapshot(r.Token, r.Present, r.Absent, r.AsAnswer, r.AsCopula))
+            .ToArray();
         var wrote = false;
         var wroteLatest = false;
 
@@ -49,7 +53,8 @@ internal sealed class GenesisCheckpointPersister
                 platonicSpace: _state.Memory.ExportSnapshot(),
                 conversation: _state.Conversation.ExportSnapshot(),
                 autonomousTraining: _historyStore.Export(),
-                trainerLearningStateJson: trainerLearningStateJson);
+                trainerLearningStateJson: trainerLearningStateJson,
+                grammarRoles: grammarRoles);
             wrote = true;
             wroteLatest = string.Equals(explicitPath, autoPath, StringComparison.OrdinalIgnoreCase);
         }

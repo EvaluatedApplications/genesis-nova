@@ -147,6 +147,78 @@ public sealed class DialecticalSpace : IPlatonicSpace
 
     private static bool HasWhitespace(string s) { foreach (var c in s) if (char.IsWhiteSpace(c)) return true; return false; }
 
+    // ── MERGE (PLATONIC_THEORY G5 — "a Relation is itself an element"; Chomsky's binary recursive composition; the plan
+    //    in [[nova-merge-substrate-plan]]). THE ATOM OF STRUCTURE: bind two elements a, b under a LABEL into a NEW element
+    //    m — kind Relation, positioned at the BLEND of their meanings, holding both as ▷ Components. m is itself a
+    //    first-class element, so it can be an endpoint of the NEXT Merge → recursion + hierarchy from one operation (the
+    //    role head and the copula-pivot were flat special cases of this). Endpoints may be atoms OR prior Merge outputs.
+    //    The label TYPES the edge via the existing ∘-anchor pattern (reserved, never retrieved as an answer).
+    public string Merge(string a, string b, string label)
+    {
+        var ea = GetOrCreateConcept(a);   // a/b may be atoms, words, or prior Merge symbols (then this returns them)
+        var eb = GetOrCreateConcept(b);
+        var sym = MergeSymbol(ea.Symbol, eb.Symbol, label);
+        // POSITION = the centroid of the two meanings (the same template GetRelationElements uses), stored as the merged
+        // element's ORBITAL so m carries a composed MEANING, not just a structural link. Read back via CloudOf later.
+        var ca = CloudOf(ea); var cb = CloudOf(eb);
+        var m = _concepts.GetOrCreate(sym, ElementKind.Relation, () => FaceCodec.Token(sym, _dim), new[] { ea.Id, eb.Id });
+        _lattice.RegisterNode(sym);
+        if (!string.IsNullOrWhiteSpace(label)) ObserveContradiction(sym, "∘" + Normalize(label), 0.0); // TYPE the bind (agreement)
+        // POSITION written LAST: a Merge's meaning is the BLEND of its parts (Laws C/S — "position derived from its
+        // parts"), authoritative over the token-cloud that GetOrCreate/ObserveContradiction's RecomputeCloud would set.
+        var dst = m.SemanticFace;
+        for (var i = 0; i < _semLen && i < dst.Length && i < ca.Length && i < cb.Length; i++) dst[i] = 0.5 * (ca[i] + cb[i]);
+        return sym;
+    }
+
+    /// <summary>Deterministic, content-addressed symbol for a Merge — the SAME (a, label, b) is the SAME element
+    /// (idempotent), and nesting composes because a/b may themselves be merge symbols. Reserved bracket form (kept out of
+    /// retrieval like the other structural symbols).</summary>
+    private static string MergeSymbol(string a, string b, string label)
+        => "⟨" + a + "·" + (string.IsNullOrWhiteSpace(label) ? "" : Normalize(label) + "·") + b + "⟩";
+
+    /// <summary>DIAGNOSTIC: the raw element behind a symbol (for Merge / structure tests). Null if absent or archived.</summary>
+    public Element? GetElement(string symbol)
+        => _concepts.TryGet(Normalize(symbol), out var e) && !e.Archived ? e : null;
+
+    // ── FACT MEMORY via MERGE (M1, [[nova-merge-substrate-plan]]). A fact is a Merge typed "is" — the KEY bound to the
+    //    VALUE. It is made findable from the key (the key→fact edge); the fact→value link IS the Merge's components, so
+    //    recall is structural tree-traversal (key → fact → the non-key component), NOT the RetrievalFrame/∘ret gate that
+    //    kept mis-firing. The copula-pivot collapses into this single labelled Merge; key/value may be Merge subtrees.
+    private const string FactLabel = "is";
+
+    public string LearnFact(string key, string value)
+    {
+        var fact = Merge(key, value, FactLabel);            // ⟨key·is·value⟩ — the typed bind, positioned at the blend
+        var k = Normalize(key);
+        // BELIEF REVISION (G2 / free-energy): a fresh assertion makes `value` the key's CURRENT belief — weaken the key's
+        // prior fact edges so recall returns the new truth, not a stale one (G6: weakened toward dormancy, not destroyed).
+        foreach (var n in GetNeighbors(k, PlatonicNeighborhoodType.Relational, 16, 0.0).ToList())
+            if (n.Concept.StartsWith("⟨", StringComparison.Ordinal) && !n.Concept.Equals(fact, StringComparison.Ordinal))
+                DisruptAssociation(k, n.Concept);
+        ObserveContradiction(k, fact, 0.0);                 // index the fact by its KEY (agreement → strong edge)
+        return fact;
+    }
+
+    public bool TryRecallFact(string key, out string value)
+    {
+        value = string.Empty;
+        var k = Normalize(key);
+        if (!_concepts.TryGet(k, out var ke) || ke.Archived) return false;
+        // FOLLOW the strongest fact edge from the key to its fact element (a ⟨…⟩ Merge), then read the VALUE component
+        // (the part that is not the key) — recall = walking the Merge structure.
+        var fact = GetNeighbors(k, PlatonicNeighborhoodType.Relational, 16, 0.0)
+            .Where(n => n.Concept.StartsWith("⟨", StringComparison.Ordinal))
+            .OrderByDescending(n => n.Confidence).Select(n => n.Concept).FirstOrDefault();
+        if (fact is null || !_concepts.TryGet(fact, out var fe) || fe.Components.Length != 2) return false;
+        foreach (var cid in fe.Components)
+        {
+            var ce = _concepts.ById(cid);
+            if (ce.Id != ke.Id && !ce.Archived) { value = ce.Symbol; return true; } // the non-key component is the value
+        }
+        return false;
+    }
+
     /// <summary>Active CHAR/component atoms — bounded by the alphabet (Law S scaling witness).</summary>
     public int AtomCount => _concepts.All.Count(e => !e.Archived && e.Kind == ElementKind.Atom);
     /// <summary>Active composite hubs (words/text) — these grow with vocabulary; the atoms under them are reused.</summary>
@@ -595,7 +667,7 @@ public sealed class DialecticalSpace : IPlatonicSpace
     // anchors that learned cue→op relations point at) — observed/related by the mind, never retrieved as an answer.
     private static bool IsReservedConcept(string s)
         => s.StartsWith("face:", StringComparison.Ordinal) || s.StartsWith("∴", StringComparison.Ordinal)
-        || s.StartsWith("∘", StringComparison.Ordinal);
+        || s.StartsWith("∘", StringComparison.Ordinal) || s.StartsWith("⟨", StringComparison.Ordinal); // ⟨ = a Merge element
     private double[] CloudOf(Element e)
     {
         var face = FullFace(e.Symbol, e); // semantic region already normalized by FullFace
@@ -628,47 +700,74 @@ public sealed class DialecticalSpace : IPlatonicSpace
     //    once training spreads function words across many contexts. GYM SKILLS ARE WARM-START — the field abilities that
     //    consult this only ever run in a trained space, so the distribution exists. In a cold/tiny or low-variance space
     //    the signal SELF-ABSTAINS (returns false → nothing is filtered), so it can never over-filter while bootstrapping.
-    private double[]? _fnCentroid;
-    private double _fnMean, _fnStd;
+    private double _fnMean, _fnStd; // distribution of NEIGHBOUR-COHERENCE over sufficiently-connected concepts
     private int _fnStamp = -1;
+    private bool _fnReady;
     private const int FnMinWarm = 48;     // below this the body's distribution isn't real yet — don't filter anything
-    private const double FnSigma = 0.5;   // filler = a centrality OUTLIER above the body's own mean (scale-adaptive)
-    private const double FnFloor = 0.45;  // absolute guard so a low-variance space can't flag specific content as filler
+    private const int FnMinDegree = 6;    // need ≥ this many neighbours to read diversity reliably
+    private const double FnSigma = 0.75;  // function = a LOW-coherence OUTLIER below the body's mean (scale-adaptive)
+    private const double FnCohCeil = 0.80;// absolute guard: a function word's neighbours are GENUINELY diverse
+
+    // NEIGHBOURHOOD CLUSTERING (the (b) signal, measured on the GRAPH not the clouds): of a concept's neighbours, what
+    // fraction of PAIRS are themselves connected? A CONTENT word / category hub's neighbours are RELATED (same cluster →
+    // connected to each other → HIGH clustering); a FUNCTION word bridges otherwise-UNRELATED words (its neighbours come
+    // from many clusters and are NOT connected to each other → LOW clustering). This is immune to the cloud entanglement
+    // that inverted the cloud-coherence metric (every content word shares a glue component). Low clustering + enough
+    // neighbours ⇒ function-like. Bounded cost: sample up to 24 neighbours (≤276 pair lookups).
+    private double NeighbourCoherence(string concept)
+    {
+        if (!_adjacency.TryGetValue(Normalize(concept), out var nbrs) || nbrs.Count < 2) return 1.0;
+        var list = nbrs.Count <= 24 ? new List<string>(nbrs) : nbrs.Take(24).ToList();
+        int links = 0, pairs = 0;
+        for (var i = 0; i < list.Count; i++)
+            for (var j = i + 1; j < list.Count; j++)
+            {
+                pairs++;
+                if (_adjacency.TryGetValue(list[i], out var ni) && ni.Contains(list[j])) links++;
+            }
+        return pairs == 0 ? 1.0 : (double)links / pairs; // ∈ [0,1]: 1 = neighbours all interconnected, → 0 = a bridge
+    }
 
     private void EnsureFunctionStats()
     {
         var count = _concepts.ActiveCount;
-        if (_fnCentroid != null && Math.Abs(count - _fnStamp) < Math.Max(16, count / 16)) return; // amortize the O(N) rebuild
-        var centroid = new double[_semLen];
-        var cens = new List<double[]>();
-        foreach (var e in _concepts.All) // mean of every living concept's UNIT cloud = the global centroid
+        if (_fnReady && Math.Abs(count - _fnStamp) < Math.Max(16, count / 16)) return; // amortize the O(N·deg) rebuild
+        double sum = 0, sumSq = 0; var n = 0;
+        foreach (var e in _concepts.All)
         {
             if (e.Archived || e.Kind == ElementKind.Atom || FaceCodec.IsNumeric(e.Symbol)) continue;
-            var v = CloudOf(e); // already unit in the semantic region (FullFace normalizes it)
-            for (var i = 0; i < _semLen; i++) centroid[i] += v[i];
-            cens.Add(v);
+            if (GetRelationDegree(e.Symbol) < FnMinDegree) continue; // only words with enough neighbours to judge diversity
+            var coh = NeighbourCoherence(e.Symbol);
+            sum += coh; sumSq += coh * coh; n++;
         }
-        NormalizeVec(centroid);
-        double sum = 0, sumSq = 0; // the body's centrality distribution (cosine of each cloud to the centroid)
-        foreach (var v in cens) { var c = Dot(v, centroid); sum += c; sumSq += c * c; }
-        var nn = Math.Max(1, cens.Count);
+        var nn = Math.Max(1, n);
         _fnMean = sum / nn;
         _fnStd = Math.Sqrt(Math.Max(0.0, sumSq / nn - _fnMean * _fnMean));
-        _fnCentroid = centroid; _fnStamp = count;
+        _fnStamp = count; _fnReady = n > 0;
     }
 
-    /// <summary>Has this concept's meaning-cloud collapsed toward the global centroid — i.e. is it FILLER (a
-    /// function/framing word that co-occurs with everything) rather than content? Learned from the live distribution,
-    /// NOT a hardcoded list. Self-abstains (false) in a cold/low-variance space where the signal isn't real yet.</summary>
+    /// <summary>Is this concept a FILLER / function word — does it co-occur with MANY MUTUALLY-UNRELATED words (low
+    /// neighbour-coherence), as opposed to a content word (even a category hub) whose neighbours are related? Learned
+    /// from the live distribution, NOT a hardcoded list. Self-abstains (false) cold / with too few neighbours.</summary>
     public bool IsFunctionLike(string concept)
     {
         if (_concepts.ActiveCount < FnMinWarm) return false;
+        var key = Normalize(concept);
+        if (GetRelationDegree(key) < FnMinDegree) return false; // needs enough neighbours for a real diversity reading
         EnsureFunctionStats();
-        if (_fnCentroid == null || _fnStd < 1e-6) return false;
-        var v = SemanticVectorOf(concept);
-        if (v == null) return false;
-        var cen = Dot(v, _fnCentroid);
-        return cen >= _fnMean + FnSigma * _fnStd && cen >= FnFloor;
+        if (!_fnReady || _fnStd < 1e-6) return false;
+        var coh = NeighbourCoherence(key);
+        return coh <= _fnMean - FnSigma * _fnStd && coh <= FnCohCeil; // a LOW-coherence (diverse-neighbour) outlier
+    }
+
+    /// <summary>DIAGNOSTIC: the NEIGHBOUR-COHERENCE of a concept (1=aligned/content, →0=diverse/function) and the active
+    /// thresholds — so a curriculum/test can SEE why IsFunctionLike fires. Tuple reused: Centrality=coherence,
+    /// Threshold=the σ-cut (function if coherence ≤ it), Floor=the coherence ceiling, MinWarm=degree of the concept.</summary>
+    public (double Centrality, double Mean, double Std, double Threshold, double Floor, int Active, int MinWarm) FunctionStats(string concept)
+    {
+        EnsureFunctionStats();
+        var key = Normalize(concept);
+        return (NeighbourCoherence(key), _fnMean, _fnStd, _fnMean - FnSigma * _fnStd, FnCohCeil, _concepts.ActiveCount, GetRelationDegree(key));
     }
 
     // ─────────────────────────────────────────────────────────────────────────────── Recognition hierarchy (M3)

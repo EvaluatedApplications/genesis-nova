@@ -1,3 +1,4 @@
+using System.Linq;
 using System.Text.Json;
 using GenesisNova.Core;
 using GenesisNova.Infer;
@@ -47,7 +48,8 @@ public sealed class GenesisRuntimeState
         GenesisNeuralModel model,
         PlatonicMemorySnapshot? platonicSpaceSnapshot = null,
         GenesisConversationSnapshot? conversationSnapshot = null,
-        string? trainerLearningStateJson = null)
+        string? trainerLearningStateJson = null,
+        GrammarRoleSnapshot[]? grammarRoles = null)
     {
         ConfigureCpuThreadPool(config);
         Config = config;
@@ -71,6 +73,10 @@ public sealed class GenesisRuntimeState
             foldPathDiscovery: Trainer.FoldPathDiscovery);
         NovaConfig.FromLegacy(config).ApplyTo(Model, Memory, Inference, Trainer); // ONE place for every mechanism toggle
         Trainer.SetInferencePolicy(Inference);
+        // Restore the learned grammar tallies into the freshly-built engine — the role head's TRAINING-LABEL source.
+        // Without this the head reloads with empty supervision and desyncs (grammar regresses, loss sticks).
+        if (grammarRoles is { Length: > 0 })
+            Inference.ImportGrammarRoles(grammarRoles.Select(r => (r.Token, r.Present, r.Absent, r.AsAnswer, r.AsCopula)));
     }
 
     private void ImportTrainerLearningState(string? trainerLearningStateJson)

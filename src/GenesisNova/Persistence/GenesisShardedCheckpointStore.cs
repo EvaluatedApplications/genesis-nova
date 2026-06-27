@@ -165,6 +165,34 @@ public static class GenesisShardedCheckpointStore
         if (Directory.Exists(srcSub)) CopyDir(srcSub, dstModelDir + ".platonic");
     }
 
+    /// <summary>PROMOTE a local checkpoint to a STARTER location (e.g. the repo's <c>models/genesis-nova</c>) so it can
+    /// be committed and SEED fresh starts. Copies the local pointer + model + substrate, mirroring the destination.
+    /// Both args are POINTER paths (the <c>.json</c> marker); the model/substrate dirs derive from them.</summary>
+    public static void PromoteToStarter(string localPointerPath, string starterPointerPath)
+    {
+        if (!File.Exists(localPointerPath)) throw new FileNotFoundException("no local checkpoint to promote", localPointerPath);
+        Directory.CreateDirectory(Path.GetDirectoryName(starterPointerPath)!);
+        CopyModel(ModelDir(localPointerPath), ModelDir(starterPointerPath)); // model + .platonic, mirror dst
+        File.Copy(localPointerPath, starterPointerPath, overwrite: true);    // pointer LAST (the commit marker)
+    }
+
+    /// <summary>SEED a fresh local checkpoint from a committed STARTER (the reverse of <see cref="PromoteToStarter"/>):
+    /// if NO local checkpoint exists yet and the starter is present + CONSISTENT, copy the starter's model + substrate +
+    /// pointer into the local location so a clone / fresh machine begins from the shared warmed model instead of an
+    /// empty brain. NO-OP once a local checkpoint exists (the local fork then evolves on its own) or if the starter is
+    /// absent / torn. Returns true iff it seeded. Both args are POINTER paths.</summary>
+    public static bool SeedFromStarter(string starterPointerPath, string localPointerPath)
+    {
+        if (File.Exists(localPointerPath)) return false;                   // local fork already exists — never overwrite
+        if (!File.Exists(starterPointerPath)) return false;               // no starter committed
+        if (!ModelExists(ModelDir(starterPointerPath))) return false;     // pointer without a model dir
+        if (!IsConsistent(starterPointerPath)) return false;              // don't seed a torn starter
+        Directory.CreateDirectory(Path.GetDirectoryName(localPointerPath)!);
+        CopyModel(ModelDir(starterPointerPath), ModelDir(localPointerPath)); // model + .platonic
+        File.Copy(starterPointerPath, localPointerPath, overwrite: true);    // pointer LAST (the commit marker)
+        return true;
+    }
+
     // ── Section helpers ───────────────────────────────────────────────────────────────────────────────────
     private sealed record Section(string Kind, long Length, int Rows, int Cols, List<string> Shards);
     // Generation = a per-SAVE id stamped on BOTH the model and substrate manifests AND the pointer marker, so a load

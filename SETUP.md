@@ -1,12 +1,13 @@
 # Genesis-Nova — setup guide
 
-**Genesis-Nova is the source of truth for everything in this repo.** The engine in `src/GenesisNova` is the
-*general* substrate (a small GRU controller over a structured platonic space — see `README.md` for the spec and
-`CLAUDE.md` for the working agreement). Everything else builds on it and must not fork it:
+**Genesis-Nova is the source of truth for everything in this repo.** The engine in `src/` (project
+`GenesisNova.csproj`) is the *general* substrate (a small GRU controller over a structured platonic space — see
+`README.md` for the spec and `CLAUDE.md` for the working agreement). It is a `net8.0-windows` WinForms desktop app
+that hosts the live model + training gym. Everything else builds on it and must not fork it:
 
-- `src/GenesisNova/` — **the engine** (GENERAL; no app-specific hardcoding). The single source of truth.
+- `src/` (`GenesisNova.csproj`) — **the engine** (GENERAL; no app-specific hardcoding). The single source of truth.
 - `Tests/` — the behaviour + emergence suite (in `GenesisNova.slnx`).
-- `bench/RaceBench/` — equal-param benchmark vs a transformer (references the engine; not in the .slnx).
+- `bench/RaceBench/` — equal-param benchmark vs a transformer (references the engine; also in the .slnx).
 - `claude/` — **applied** tooling on top of the engine (NOT in the .slnx, so it never affects the test suite):
   - `GenesisInspect/` — read-only diagnostic CLI: what a trained model *is* and how it answers (the only CLI).
 - `.claude-nova/` — **runtime state only** (a model checkpoint + logs, ~400 MB). Generated, gitignored,
@@ -56,7 +57,7 @@ CLI process. See `[[nova-gym]]` for the gym.
 $gi = "claude\GenesisInspect\bin\Release\net8.0-windows\GenesisInspect.exe"
 & $gi report --cpu                                  # DEFAULT: the model in .claude-nova/
 & $gi query "find diagnostic cli" --cpu             # output + decision path + platonic activation
-& $gi report --cpu --state-dir "$env:LOCALAPPDATA\GenesisNova\models"   # the autonomous trainer instead
+& $gi report --cpu --state-dir "$env:LOCALAPPDATA\GenesisNova\gym"   # the live desktop-app gym checkpoint instead
 ```
 
 GenesisInspect never writes — it loads the same runtime inference uses, so what it shows is what the model does.
@@ -64,6 +65,5 @@ GenesisInspect never writes — it loads the same runtime inference uses, so wha
 ## Where to read next
 
 - `README.md` — the engine spec. `CLAUDE.md` — the working agreement (substrate, golden training paths, memory rules).
-- `PLATONIC_NUCLEUS.md` — substrate capabilities (the dual-face data model). `PROJECT_GLIDER.md` — the composer (gliders/shapes).
-- `SPACE_AWARE_GRU.md` — the space-aware (perceive→decide→modify→verify) design.
+- `PLATONIC_NUCLEUS.md` — substrate capabilities (the dual-face data model).
 - `claude/README.md` — the applied tools in depth. `claude/SELF_IMPROVE.md` — the compounding self-improvement loop.

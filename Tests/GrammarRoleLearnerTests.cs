@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using GenesisNova.Cognition;
 using Xunit;
 using Xunit.Abstractions;
@@ -56,5 +57,31 @@ public sealed class GrammarRoleLearnerTests
         Assert.Equal(Role.Value, R("audi"));
         // A never-seen token abstains (warm-start honesty):
         Assert.Equal(Role.Unknown, R("zzzz"));
+    }
+
+    // PERSISTENCE FIDELITY: the learned tallies must survive Export→Import EXACTLY — including AsCopula, the only
+    // counter that tells a copula (→NONE) apart from a subject seen in recall frames. The old 4-tuple dropped it, so a
+    // reloaded model mislabelled the copula as SUBJECT (label 1 not 0) → the role head's supervision desynced and the
+    // training loss stuck. This proves the 5-tuple round-trip keeps the copula a copula across a reload.
+    [Fact]
+    public void Export_Import_PreservesCopula_AcrossReload()
+    {
+        var src = new GrammarRoleLearner();
+        // "is" appears in BOTH an assertion ("my name is sam") and a recall ("what is my name") — so present+absent are
+        // both > 0. ONLY AsCopula (it sits right before the value in the assertion) keeps it labelled NONE not SUBJECT.
+        for (var i = 0; i < 10; i++)
+        {
+            src.Observe(new[] { "my", "name", "is", "sam" }, "sam"); // ASSERT: 'is' is value-adjacent → AsCopula++
+            src.Observe(new[] { "what", "is", "my", "name" }, "sam"); // RECALL: 'is' present in an answer-absent frame
+        }
+        Assert.Equal(0, src.LabelFor("is")); // NONE — copula (the AsCopula rule fires)
+
+        // Round-trip through the persistence snapshot (what the checkpoint now carries).
+        var dst = new GrammarRoleLearner();
+        dst.Import(src.Export());
+
+        Assert.Equal(0, dst.LabelFor("is")); // STILL a copula after reload — the fix. (4-tuple would give 1 = SUBJECT.)
+        // And the whole tally set is identical (every counter, every token).
+        Assert.Equal(src.Export().OrderBy(r => r.Token), dst.Export().OrderBy(r => r.Token));
     }
 }

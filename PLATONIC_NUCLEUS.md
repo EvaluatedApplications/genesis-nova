@@ -3,11 +3,19 @@
 > Every element is a single vector, but its dimensions are not equal. Some are a **frozen nucleus** — the element's
 > exact, immutable *identity*. The rest are a **free electron cloud** — where *meaning* lives and moves. The nucleus
 > is the fixed structure everything else pivots off of: an element can drift, cluster, and relate in the free
-> dimensions all it likes, and its identity never moves, because the frozen dimensions are restored after every step.
+> dimensions all it likes, and its identity never moves — in the current substrate it is re-derived from the symbol
+> rather than stored, so it cannot drift (the legacy fallback restored the frozen dimensions after every step).
 >
-> This is the genesis dual-face (`research/03-SYMMETRY-BRIDGE` Corr. 7): the **arithmetic face = the proton/nucleus**
-> (crisp, conserved, exact), the **semantic face = the electron orbital** (distributed, probabilistic, mobile).
+> This is the genesis dual-face (`research/03-SYMMETRY-BRIDGE` Corr. 7): the **arithmetic face is *like* the
+> proton/nucleus** (crisp, conserved, exact), the **semantic face is *like* the electron orbital** (distributed,
+> probabilistic, mobile).
 > Companions: `PLATONIC_THEORY.md` (the formal model), `PLATONIC_CONSCIOUSNESS.md`, `PLATONIC_RECKONING.md`.
+
+> **On the physics language (read this first).** "Nucleus", "orbital", "proton/electron", "conservation" are an
+> **inspiration — a generative metaphor**, not a claim that the system models physics. A platonic space is a space
+> of *ideas*; we are free to choose its rules as long as they satisfy the axioms (G1–G6, `PLATONIC_THEORY.md`). The
+> literal content is mundane and checkable: some vector dimensions are an exact, never-mutated *identity* region;
+> the rest are a learnable *meaning* region. Read the physics words as a vivid name for that split, nothing more.
 
 ---
 
@@ -72,7 +80,18 @@ flowchart LR
 ## 2. What is frozen depends on what the element *is*
 
 The frozen (identity) region differs by element kind. A number's identity is its *value*; a word's identity is the
-*word itself* (its char-composed form). Everything outside the nucleus is free to move.
+*word itself* (its char-composed form).
+
+> **How the current substrate realizes this (`Cognition/Platonic/*`, default `UseDialecticalCore=true`).** Identity
+> is not snapped-back after edits — it is **never stored at all**. An element keeps only its learnable orbital (the
+> word face `[202,dim)`) plus its structural part-of edges; the whole identity nucleus (arithmetic + char faces) is
+> **recomputed from the symbol via the codec on demand** (`FaceCodec.AssemblePositiveFace`,
+> `Element.cs:25–29`), so it *cannot* drift. The single mutable region is the word face `[202,dim)`
+> (`FaceCodec.SemanticStart = FaceLayout.WordFaceStart`, `FaceCodec.cs:18–19`) — for **both** numbers and words. So
+> below, treat the char face `[42,202)` and the numeric face `[0,42)` as part of the *codec-derived identity*; only
+> the word/sentence face `[202,dim)` actually moves. (The diagrams keep the original per-kind split for intuition;
+> the legacy `PlatonicSpaceMemory` fallback did snap identity back after each step via `RestoreFrozenIdentity` —
+> the current default avoids drift by never storing identity.)
 
 ```mermaid
 flowchart TB
@@ -135,15 +154,17 @@ ambiguous meaning.
 
 ### Why the cloud can move without ever corrupting identity
 
-Every relational update touches only the free dimensions; the nucleus is **snapped back exact** afterward, and the
-complement (`¬e = −e`, G4) is re-enforced. So learning is *all* in the cloud:
+Every relational update touches only the free (word-face) dimensions; the nucleus never moves, and the complement
+(`¬e = −e`, G4) is re-enforced. In the current default substrate the nucleus is never *stored*, so it cannot drift
+(it is re-derived from the symbol via the codec); the legacy fallback snapped it back exact after each step
+(`RestoreFrozenIdentity`). Either way, learning is *all* in the cloud:
 
 ```mermaid
 sequenceDiagram
   participant E as element
   participant Obs as observe(a, b, κ)
-  Obs->>E: move the FREE cloud toward (agree) / away (contradict) the neighbour
-  Obs->>E: RestoreFrozenIdentity → snap the NUCLEUS back to exact
+  Obs->>E: move the FREE word-face orbital toward (agree) / away (contradict) the neighbour
+  Obs->>E: identity stays exact (codec-derived — never stored; legacy fallback snapped it back)
   Obs->>E: enforce ¬e = −e (G4 conservation)
   Note over E: only meaning moved — value & the word itself are untouched
 ```
@@ -154,7 +175,8 @@ sequenceDiagram
 
 - **Identity is permanent and free of charge.** Because identity lives in frozen dims, an element can be pushed
   anywhere in the cloud and still decode to exactly itself — its value, or the word it is. No amount of relational
-  learning can corrupt what a thing *is*. (`RestoreFrozenIdentity` after every move.)
+  learning can corrupt what a thing *is*. (Current default: identity is codec-derived and never stored, so it
+  can't drift; the legacy fallback restored it after every move via `RestoreFrozenIdentity`.)
 - **The nucleus is a fixed coordinate frame.** Relations don't float in a vacuum — they pivot off the stable
   nuclei. You always know *what* two elements are; learning only settles *how they relate*.
 - **Exact computation rides the frozen nucleus.** Arithmetic is read straight off the numeric nucleus
@@ -165,6 +187,6 @@ sequenceDiagram
   couldn't do that; a cloud can.
 - **The whole thing is a composition ladder.** digits → number, characters → word, words → sentence — each face
   holds the composite of the level below, and growth is *reuse* of the shared parts beneath it.
-- **The two ends mirror each other.** Crisp quantity at the low end (the proton), diffuse meaning at the high end
-  (the electron orbital), bound by conservation. Quantity is exact and singular; meaning is rich and plural. The
-  layout puts each where it belongs.
+- **The two ends mirror each other.** Crisp quantity at the low end (the metaphorical "proton"), diffuse meaning at
+  the high end (the metaphorical "orbital"), bound by the G4 conservation rule. Quantity is exact and singular;
+  meaning is rich and plural. The layout puts each where it belongs.

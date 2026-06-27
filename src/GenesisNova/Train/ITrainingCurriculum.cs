@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using GenesisNova.Runtime;
 
 namespace GenesisNova.Train;
 
@@ -24,6 +25,12 @@ public interface ITrainingCurriculum
 
     /// <summary>Feedback from the cycle's grade — the curriculum advances difficulty / updates rehearsal here.</summary>
     void RecordCycle(CycleGrade grade);
+
+    /// <summary>Optional SELF-ASSESSMENT against the live runtime/space, for FOUNDATION curricula whose success is a
+    /// PROPERTY OF THE SPACE (e.g. "the function-word signal separates glue from content") — NOT a model output a
+    /// surface probe can grade. When this returns a value, the orchestrator uses it as this unit's cycle accuracy and
+    /// SKIPS PredictAsync probe-grading (a readiness probe, not a surface probe). Default null = grade by NextProbes.</summary>
+    double? SelfAssess(GenesisEvalAppRuntime runtime) => null;
 
     /// <summary>Op-token route-trigger verbs to register on the runtime (excluded from relation-edge formation,
     /// e.g. find/contains/calls). Registered once when the orchestrator attaches. Default: none.</summary>

@@ -6,7 +6,7 @@ what is genuine platonic intelligence vs overfitting-to-tests, and the keep-core
 **`PLATONIC_MIND.md`** (the founding vision; hold its narrative lightly per the reckoning), `PLATONIC_THEORY.md`
 (formal substrate model), `PLATONIC_NUCLEUS.md` (the dual-face data model), `PLATONIC_CONSCIOUSNESS.md` (the self /
 vital loop — mechanisms real, "consciousness" aspirational), `PLATONIC_PRIOR_ART.md` (disclosure); plus `README.md`
-(spec), `PROJECT_GLIDER.md` (composer), `claude/README.md` (the agent CLI tools + memory).
+(spec), `claude/README.md` (the agent CLI tools + memory).
 
 **The direction (PLATONIC_RECKONING.md, 2026-06):** the substrate's generalizing core is real (the numeric
 homomorphism, the distributional word face, composition-by-reuse, relaxation, learned transforms). The orchestration

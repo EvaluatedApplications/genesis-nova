@@ -25,7 +25,8 @@ public static class GenesisCheckpointStore
         PlatonicMemorySnapshot? platonicSpace = null,
         GenesisConversationSnapshot? conversation = null,
         GenesisAutonomousTrainingSnapshot? autonomousTraining = null,
-        string? trainerLearningStateJson = null)
+        string? trainerLearningStateJson = null,
+        GrammarRoleSnapshot[]? grammarRoles = null)
     {
         var snapshot = model.Export();
         var payload = new GenesisCheckpoint(
@@ -65,6 +66,8 @@ public static class GenesisCheckpointStore
             // Persist the per-token ROLE head so the trained grammar parser (name memory) survives a reload.
             RoleWeights: snapshot.RoleWeights is not null ? MatrixSnapshot.From(snapshot.RoleWeights) : null,
             RoleBias: snapshot.RoleBias,
+            // Persist the learned grammar tallies (the role head's label source) so they survive a reload.
+            GrammarRoles: grammarRoles,
             Version: GenesisCheckpoint.CurrentVersion);
 
         // BINARY SHARDED storage (see MODEL_STORAGE.md): the NN goes to a sharded model directory, the substrate
@@ -115,14 +118,14 @@ public static class GenesisCheckpointStore
         return (loaded.Config, loaded.Tokenizer, loaded.Model, platonic, loaded.Conversation, loaded.AutonomousTraining);
     }
 
-    public static (GenesisNovaConfig Config, WhitespaceGenesisTokenizer Tokenizer, GenesisNeuralModel Model, PlatonicMemorySnapshot? PlatonicSpace, GenesisConversationSnapshot? Conversation, GenesisAutonomousTrainingSnapshot? AutonomousTraining, string? TrainerLearningStateJson) LoadForRuntime(
+    public static (GenesisNovaConfig Config, WhitespaceGenesisTokenizer Tokenizer, GenesisNeuralModel Model, PlatonicMemorySnapshot? PlatonicSpace, GenesisConversationSnapshot? Conversation, GenesisAutonomousTrainingSnapshot? AutonomousTraining, string? TrainerLearningStateJson, GrammarRoleSnapshot[]? GrammarRoles) LoadForRuntime(
         string path,
         GenesisNovaConfig runtimeConfig)
     {
         var loadPath = ResolveConsistentPath(path, runtimeConfig);
         var (payload, platonic) = ResolveStored(loadPath);
         var loaded = CreateRuntimePayload(payload, runtimeConfig);
-        return (loaded.Config, loaded.Tokenizer, loaded.Model, platonic, loaded.Conversation, loaded.AutonomousTraining, loaded.TrainerLearningStateJson);
+        return (loaded.Config, loaded.Tokenizer, loaded.Model, platonic, loaded.Conversation, loaded.AutonomousTraining, loaded.TrainerLearningStateJson, loaded.GrammarRoles);
     }
 
     /// <summary>Guard against a TORN save (a crash between writing the model dir, the substrate dir, and the pointer):
@@ -279,7 +282,7 @@ public static class GenesisCheckpointStore
         }
     }
 
-    private static (GenesisNovaConfig Config, WhitespaceGenesisTokenizer Tokenizer, GenesisNeuralModel Model, PlatonicMemorySnapshot? PlatonicSpace, GenesisConversationSnapshot? Conversation, GenesisAutonomousTrainingSnapshot? AutonomousTraining, string? TrainerLearningStateJson) CreateRuntimePayload(
+    private static (GenesisNovaConfig Config, WhitespaceGenesisTokenizer Tokenizer, GenesisNeuralModel Model, PlatonicMemorySnapshot? PlatonicSpace, GenesisConversationSnapshot? Conversation, GenesisAutonomousTrainingSnapshot? AutonomousTraining, string? TrainerLearningStateJson, GrammarRoleSnapshot[]? GrammarRoles) CreateRuntimePayload(
         GenesisCheckpoint payload,
         GenesisNovaConfig runtimeConfig)
     {
@@ -340,7 +343,7 @@ public static class GenesisCheckpointStore
 
         model.Import(snapshot);
 
-        return (effectiveConfig, tokenizer, model, payload.PlatonicSpace, payload.Conversation, payload.AutonomousTraining, payload.TrainerLearningStateJson);
+        return (effectiveConfig, tokenizer, model, payload.PlatonicSpace, payload.Conversation, payload.AutonomousTraining, payload.TrainerLearningStateJson, payload.GrammarRoles);
     }
 
     private static ModelSnapshot ExpandSnapshot(ModelSnapshot snapshot, int hiddenSize)

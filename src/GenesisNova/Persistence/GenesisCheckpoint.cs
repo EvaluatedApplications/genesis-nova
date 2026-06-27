@@ -48,10 +48,18 @@ public sealed record GenesisCheckpoint(
     // (lazily reinit on load). Persisted so the trained generalising parser (name memory) survives a reload.
     MatrixSnapshot? RoleWeights = null,
     double[]? RoleBias = null,
+    // LEARNED GRAMMAR tallies (GrammarRoleLearner) — engine-resident state that is the role head's TRAINING-LABEL
+    // source. Null on older checkpoints (the learner re-warms from training on load). Persisted so the role head's
+    // supervision survives a reload instead of resetting to empty (which desyncs the head and sticks the loss).
+    GrammarRoleSnapshot[]? GrammarRoles = null,
     int Version = 0)
 {
-    public const int CurrentVersion = 5;
+    public const int CurrentVersion = 6;
 }
+
+/// <summary>One learned grammar tally row. AsCopula is carried (it discriminates a copula from a recall-frame subject)
+/// — see GrammarRoleLearner.Export.</summary>
+public sealed record GrammarRoleSnapshot(string Token, int Present, int Absent, int AsAnswer, int AsCopula);
 
 public sealed record MatrixSnapshot(int Rows, int Cols, double[] Values)
 {

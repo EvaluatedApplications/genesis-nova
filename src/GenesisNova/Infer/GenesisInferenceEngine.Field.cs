@@ -45,6 +45,7 @@ public sealed partial class GenesisInferenceEngine
             (MeaningOpsEnabled && TryFieldComposeMeaning(toks, request, out r)) ||
             (TalkEnabled && TryFieldRespondDirect(request, out r)) ||  // a known persona cue SPEAKS before grammar tries to learn it
             TryFieldLearn(toks, request, out r) ||
+            TryFieldRecall(toks, request, out r) ||
             TryFieldRelax(toks, request, out r) ||
             (TalkEnabled && TryFieldRespondGeneralize(request, out r)))
             return r;
@@ -703,17 +704,23 @@ public sealed partial class GenesisInferenceEngine
         if (RoleParse(toks, ds, out var subject, out var obj) != FrameKind.Assertion) return false;
         if (subject is null || obj is null || subject == obj) return false;
         if (IsNumericLike(subject) || IsNumericLike(obj)) return false; // numbers never form relation edges
-        // BELIEF REVISION — staying coherent and CURRENT (genesis G2 non-contradiction; the free-energy principle:
-        // update the model when reality contradicts it). A fresh assertion makes `obj` the subject's CURRENT belief, so
-        // the mind WEAKENS the subject's prior (now-contradicted) beliefs and does not keep answering a stale truth.
-        // The world changed; a living mind changes with it. G6: weakened toward dormancy, never destroyed — history
-        // persists and re-asserting the old fact brings it back. (Conversational only — the gym never learns here.)
-        foreach (var n in ds.GetNeighbors(subject, PlatonicNeighborhoodType.Relational, maxNeighbors: 8, minConfidence: 0.0).ToList())
-            if (!n.Concept.Equals(obj, StringComparison.OrdinalIgnoreCase) && !IsNumericLike(n.Concept))
-                ds.DisruptAssociation(subject, n.Concept);
-        ds.FineEditFromExample(new[] { subject }, new[] { obj }, isNegativeExample: false);
+        // STORE the fact as a MERGE typed "is" (M1, [[nova-merge-substrate-plan]]): ⟨subject·is·obj⟩, key→fact indexed,
+        // belief revision handled inside LearnFact (G2 / free-energy — a fresh assertion supersedes the stale truth, G6
+        // weakens not destroys). The copula-pivot is now the surface parse that FEEDS one labelled Merge.
+        ds.LearnFact(subject, obj);
         PerceiveIntoSelfField(ds, subject); PerceiveIntoSelfField(ds, obj); // the mind becomes what it learns
         return EmitField(obj, "field-learn", request, out result); // acknowledge what it now holds
+    }
+
+    // M1 RECALL via MERGE ([[nova-merge-substrate-plan]]): a QUESTION frame ("what is my name") — extract the KEY (the
+    // copula-pivot Question parse) and TRAVERSE the Merge structure to its value (key → fact → the non-key component).
+    // No RetrievalFrame/∘ret gate, no filler-warming race — recall is structural.
+    private bool TryFieldRecall(IReadOnlyList<string> toks, GenerationRequest request, out GenerationResult result)
+    {
+        result = default!;
+        if (_memory is not DialecticalSpace ds) return false;
+        if (RoleParse(toks, ds, out var key, out _) != FrameKind.Question || key is null) return false;
+        return ds.TryRecallFact(key, out var value) && EmitField(value, "merge-recall", request, out result);
     }
 
     private static readonly System.Collections.Generic.HashSet<string> Framing =
@@ -749,28 +756,21 @@ public sealed partial class GenesisInferenceEngine
     // role head's sequence-level QUERY tag can't replace it here; the learned filler signal augments it once warm.)
     private bool IsFiller(DialecticalSpace ds, string t) => IsQuestionCue(t) || ds.IsFunctionLike(t);
 
-    private bool HasLearnedQueryRole(IReadOnlyList<string> toks)
-    {
-        var nn = NnRoles(toks);
-        return nn is not null && System.Array.Exists(nn, r => r == Cognition.GrammarRoleLearner.Role.Query);
-    }
-    // #1: a question frame — the LEARNED role head's QUERY tag when LearnedCuesOnly, else the hardcoded wh-word list.
-    private bool QuestionFrame(IReadOnlyList<string> toks)
-        => LearnedCuesOnly ? HasLearnedQueryRole(toks) : toks.Any(IsQuestionCue);
-    // #2: a retrieval/category frame — the LEARNED ∘ret cue (learned from category-HUB answers) when LearnedCuesOnly,
-    // else the hardcoded marker list. At RESOLVE time exclude the learned function words too: the shared copula "is" may
-    // have been related to ∘ret EARLY (before the function-word signal warmed), so the warm signal is the safety net
-    // that keeps a plain "X is Y" FACT from being mis-read as retrieval — only the non-filler marker counts.
+    // #1: a question frame — the universal INTERROGATIVE FLOOR (a structural cross-language constant, not the gym
+    // taxonomy). The 4-role NN's QUERY tag is GONE: it overfit and would not generalise (nova-grammar-role-regression).
+    private bool QuestionFrame(IReadOnlyList<string> toks) => toks.Any(IsQuestionCue);
+    // #2: a retrieval/category frame — a token resolves to the LEARNED ∘ret cue (learned from category-HUB answers), not
+    // a word-list (in cold/legacy mode the hardcoded marker list). Function words are excluded via the LEARNED centrality
+    // signal (IsFunctionLike) so the shared copula "is" is never the marker. NO role head — the de-hardcode-#2 grammar-hub
+    // mis-fire is dissolved by the copula-pivot rethink (the role head + its hub-polluting grammar curriculum are gone).
     private bool RetrievalFrame(IReadOnlyList<string> toks)
     {
         if (!LearnedCuesOnly) return toks.Any(IsRetrievalMarker);
         if (_memory is not DialecticalSpace ds) return false;
-        var nn = NnRoles(toks); // role head tags the copula "is" as Filler (it is directly trained on it) → exclude it
         for (var i = 0; i < toks.Count; i++)
         {
             var t = toks[i];
-            if (ds.IsFunctionLike(t)) continue;                                                   // learned filler (centrality)
-            if (nn is not null && i < nn.Length && nn[i] == Cognition.GrammarRoleLearner.Role.Filler) continue; // role-head filler
+            if (ds.IsFunctionLike(t)) continue;                       // learned filler (centrality) — never the marker
             if (ResolveLearnedIntent(t) == FieldIntent.Retrieve) return true;
         }
         return false;
@@ -782,124 +782,65 @@ public sealed partial class GenesisInferenceEngine
 
     private enum FrameKind { None, Assertion, Question }
 
-    // WORD-ORDER-FREE parse from the LEARNED NN ROLES ONLY (the structure recogniser): identify the subject KEY and
-    // asserted VALUE by the NN's per-token roles — no copula/question/possessive list, no centrality fallback, no
-    // position rule. Returns None when the NN hasn't learned to parse this (untrained/unsure) — then the mind simply
-    // doesn't act on it. The parser IS the NN; if it generalises, that is the LEARNED model, with nothing else helping.
+    // FIRST-PRINCIPLES fact parse (the 4-role NN classifier was OVERFIT to "X is Y" and would not generalise — it learns
+    // ~one role at a time; see nova-grammar-role-regression). Fact memory is ASSOCIATIVE STORAGE — the substrate's own
+    // relation (key→value) — parsed by the COPULA PIVOT, not a learned role taxonomy. A token is CONTENT vs a FUNCTION
+    // word by the LEARNED CENTRALITY signal (IsContentWord → DialecticalSpace.IsFunctionLike, the reliable 218/0 one;
+    // the Framing list is only the cold-start default); the copula is the function word with content on BOTH sides; the
+    // only "list" is the universal interrogative floor. The split is POSITIONAL, so it generalises to ANY unseen key/value
+    // tokens — no role head anywhere. Word-order: subject BEFORE the copula, value AFTER (the predicative construction).
     private FrameKind RoleParse(IReadOnlyList<string> toks, DialecticalSpace ds, out string? subject, out string? value)
     {
         subject = value = null;
         // Only personal-fact frames: abstain on arithmetic/operator frames AND the gym's RETRIEVAL frames (synonym/
         // category/etc.) so the grammar parse never hijacks a skill query — those keep their normal retrieval route.
         if (toks.Count < 2 || toks.Any(IsNumericLike) || toks.Any(ds.IsOperationToken) || RetrievalFrame(toks)) return FrameKind.None;
-        var nn = NnRoles(toks);
-        if (nn is null) return FrameKind.None;                        // NN untrained / not aligned → no parse (honest)
-        Cognition.GrammarRoleLearner.Role RoleAt(int i) => nn[i];     // PURELY the NN's tag
 
-        var hasQuery = false;
-        var queryIdx = new List<int>();
+        // M2 ([[nova-merge-substrate-plan]]): the KEY is a recursive MERGE TREE over its token SPAN — every token (incl.
+        // possessives/determiners) is bound in, so "my name" ≠ "your name" (the coreference the flat content-key lost)
+        // and the subject can be ANY length. The copula is the function-word pivot (content on both sides). The VALUE
+        // stays a readable content string (it is EMITTED). Question = the span after the copula; assertion = before it.
+        bool Content(int i) => IsContentWord(toks[i]) && !IsQuestionCue(toks[i]);
         var content = new List<int>();
-        for (var i = 0; i < toks.Count; i++)
-        {
-            var t = toks[i];
-            if (!IsLetterToken(t)) continue;
-            var role = RoleAt(i);
-            if (role == Cognition.GrammarRoleLearner.Role.Query) { hasQuery = true; queryIdx.Add(i); continue; }
-            if (role == Cognition.GrammarRoleLearner.Role.Filler) continue; // the NN says filler/determiner/copula
-            content.Add(i);                              // a content token (key / value / unsure-but-content)
-        }
+        for (var i = 0; i < toks.Count; i++) if (Content(i)) content.Add(i);
         if (content.Count == 0) return FrameKind.None;
 
-        // COPULA-POSITION BOUNDING. A SUBJECT can span several tokens ("my favorite color"), and the per-token role head
-        // sometimes mis-tags the phrase's final noun as VALUE — collapsing the span ("my favorite") so the assert key no
-        // longer matches the recall key. The copula (is/was/…, which the NN tags reliably as Filler) is the true
-        // boundary: in an ASSERTION the subject is the content BEFORE it and the value the content AFTER it; in a
-        // QUESTION the subject is the content AFTER it. This still uses ONLY the learned tags (no copula word-list) —
-        // it just trusts the reliable Filler boundary over a fragile per-token KEY/VALUE split for the span. Falls back
-        // to the pure-tag split when there is no copula (e.g. "whats my name", a cue with no copula).
-        bool IsWord(int i) => i >= 0 && i < toks.Count && IsLetterToken(toks[i]);
-        string? Span(int from, int step) // contiguous word run from `from` walking by `step`, stopping at a query cue
+        if (toks.Any(IsQuestionCue))
         {
-            int b = -1, e = -1;
-            for (var i = from; IsWord(i) && RoleAt(i) != Cognition.GrammarRoleLearner.Role.Query; i += step)
-            { if (b < 0) { b = e = i; } else { b = Math.Min(b, i); e = Math.Max(e, i); } }
-            return b < 0 ? null : string.Join(" ", Enumerable.Range(b, e - b + 1).Select(k => toks[k]));
-        }
-        if (hasQuery)
-        {
-            for (var i = queryIdx[^1] + 1; i < toks.Count; i++)
-                if (RoleAt(i) == Cognition.GrammarRoleLearner.Role.Filler && content.Any(c => c > i))
-                { subject = Span(i + 1, +1); break; } // subject = the phrase AFTER the copula
-            if (subject is not null) return FrameKind.Question;
-        }
-        else
-        {
-            var lastContent = content[^1];
-            for (var i = lastContent - 1; i >= 0; i--)
-                if (RoleAt(i) == Cognition.GrammarRoleLearner.Role.Filler && content.Any(c => c < i))
-                { value = toks[lastContent]; subject = Span(i - 1, -1); break; } // value AFTER, subject BEFORE the copula
-            if (subject is not null && subject != value) return FrameKind.Assertion;
-            subject = value = null; // the copula path didn't settle → try the pure-tag split below
-        }
-
-        // FALLBACK — no copula: split by the NN's KEY/VALUE tags alone.
-        var keyIdx = content.Where(i => RoleAt(i) == Cognition.GrammarRoleLearner.Role.Key).ToList();
-        var valIdx = content.Where(i => RoleAt(i) == Cognition.GrammarRoleLearner.Role.Value).ToList();
-        if (keyIdx.Count == 0 && valIdx.Count == 0) return FrameKind.None; // the NN placed no key/value → no parse
-        if (hasQuery) // a query cue is present → it's a question; the subject is the KEY (or the lone content)
-        {
-            var ni = keyIdx.Count > 0 ? keyIdx[^1] : content[^1];
-            subject = BuildSubjectPhrase(toks, ni, nn);
+            var q = Enumerable.Range(0, toks.Count).First(i => IsQuestionCue(toks[i]));
+            var copula = -1;
+            for (var i = q + 1; i < toks.Count; i++)
+                if (IsLetterToken(toks[i]) && !IsContentWord(toks[i]) && content.Any(c => c > i)) { copula = i; break; }
+            subject = SpanKey(ds, toks, copula >= 0 ? copula + 1 : q + 1, toks.Count); // the queried KEY span as a Merge tree
             return subject is not null ? FrameKind.Question : FrameKind.None;
         }
-        // ASSERTION: the VALUE is the asserted thing; the KEY is the subject. Either may be inferred when the other is
-        // known and there are exactly two content tokens (a new value like "zorptron" the NN/alignment hasn't placed).
-        int? vi = valIdx.Count > 0 ? valIdx[^1] : (content.Count == 2 && keyIdx.Count == 1 ? content.First(i => i != keyIdx[0]) : (int?)null);
-        int? ki = keyIdx.Count > 0 ? keyIdx[^1] : (content.Count == 2 && valIdx.Count == 1 ? content.First(i => i != valIdx[0]) : (int?)null);
-        if (vi is null || ki is null || vi == ki) return FrameKind.None;
-        value = toks[vi.Value];
-        subject = BuildSubjectPhrase(toks, ki.Value, nn);
-        return subject is not null && subject != value ? FrameKind.Assertion : FrameKind.None;
+
+        var last = content[^1];
+        for (var i = last - 1; i >= 0; i--)
+            if (IsLetterToken(toks[i]) && !IsContentWord(toks[i]) && content.Any(c => c < i)) // the copula pivot
+            {
+                subject = SpanKey(ds, toks, 0, i);                                  // KEY = Merge tree over [start..copula)
+                value = string.Join(" ", content.Where(c => c > i).Select(c => toks[c])); // VALUE = readable content after
+                break;
+            }
+        if (subject is { Length: > 0 } && !string.IsNullOrEmpty(value) && subject != value) return FrameKind.Assertion;
+        subject = value = null;
+        return FrameKind.None;
     }
 
-    // The NN STRUCTURE RECOGNISER's per-token roles, aligned to the field tokens. Grammar frames are number-free so the
-    // model tokenization matches TokenizeField; returns null if the head is untrained or the tokenizations don't align,
-    // and Unknown for a token the NN isn't confident about (→ centrality fallback). Maps the head's class ids to the
-    // role enum (0=NONE→Filler, 1=SUBJECT→Key, 2=VALUE→Value, 3=QUERY→Query — the same map as DeriveRoleLabels).
-    private const double NnRoleMinConfidence = 0.5;
-    private Cognition.GrammarRoleLearner.Role[]? NnRoles(IReadOnlyList<string> toks)
+    // Build the KEY for a token span as a left-branching MERGE TREE (M2, [[nova-merge-substrate-plan]]): nested ⟨⟩
+    // relation-elements over the span's letter tokens (possessives/determiners INCLUDED so "my name" ≠ "your name";
+    // query cues excluded), so the whole phrase is ONE structured, recursive key of arbitrary length. Merge is
+    // content-addressed/idempotent, so the assert and the recall build the SAME key → traversal matches.
+    private static string? SpanKey(DialecticalSpace ds, IReadOnlyList<string> toks, int from, int to)
     {
-        if (toks.Count == 0) return null;
-        var ids = _tokenizer.Encode(string.Join(" ", toks)).ToArray();
-        if (ids.Length != toks.Count) return null;
-        var pred = _model.PredictRoles(ids);
-        if (pred.Length != toks.Count) return null;
-        var roles = new Cognition.GrammarRoleLearner.Role[toks.Count];
-        for (var i = 0; i < toks.Count; i++)
-            roles[i] = pred[i].Confidence >= NnRoleMinConfidence
-                ? pred[i].Role switch
-                {
-                    0 => Cognition.GrammarRoleLearner.Role.Filler,
-                    1 => Cognition.GrammarRoleLearner.Role.Key,
-                    2 => Cognition.GrammarRoleLearner.Role.Value,
-                    3 => Cognition.GrammarRoleLearner.Role.Query,
-                    _ => Cognition.GrammarRoleLearner.Role.Unknown,
-                }
-                : Cognition.GrammarRoleLearner.Role.Unknown;
-        return roles;
-    }
-
-    // The subject PHRASE = the maximal CONTIGUOUS SUBJECT(Key) span (per the NN's tags) containing the noun. The
-    // determiner ("my"/"your") is itself tagged SUBJECT by the NN (it co-occurs in both assert and recall inputs), so
-    // the span naturally keeps the possessor — "my name" stays distinct from "your name", learned, no possessive list.
-    private string? BuildSubjectPhrase(IReadOnlyList<string> toks, int nounIndex, Cognition.GrammarRoleLearner.Role[] nn)
-    {
-        if (nounIndex < 0 || nounIndex >= toks.Count) return null;
-        var begin = nounIndex;
-        var end = nounIndex;
-        while (begin - 1 >= 0 && nn[begin - 1] == Cognition.GrammarRoleLearner.Role.Key) begin--;
-        while (end + 1 < toks.Count && nn[end + 1] == Cognition.GrammarRoleLearner.Role.Key) end++;
-        return string.Join(" ", Enumerable.Range(begin, end - begin + 1).Select(i => toks[i]));
+        var span = new List<string>();
+        for (var i = from; i < to && i < toks.Count; i++)
+            if (IsLetterToken(toks[i]) && !IsQuestionCue(toks[i])) span.Add(toks[i]);
+        if (span.Count == 0) return null;
+        var acc = span[0];
+        for (var i = 1; i < span.Count; i++) acc = ds.Merge(acc, span[i], "np");
+        return acc;
     }
 
     // The mind's recent FOCUS — the content it has been attending to, threaded across thoughts (the continuous I).
@@ -912,6 +853,13 @@ public sealed partial class GenesisInferenceEngine
     // the trainer via ObserveGrammar; consulted by the field parser via GrammarRole. Warmed by the gym's grammar
     // curriculum; abstains (Unknown) until warm, the same warm-start stance as the filler signal.
     private readonly Cognition.GrammarRoleLearner _grammar = new();
+
+    /// <summary>PERSISTENCE: export/import the learned grammar tallies. These are engine-resident (not in the GRU
+    /// weights, not in the space), so without this the role-head's TRAINING-LABEL SOURCE resets to empty on every
+    /// reload — the head's weights survive but its supervision desyncs, regressing grammar and sticking the loss.
+    /// Raw tuples (no Persistence dependency from the Infer layer); the checkpoint layer maps them to a snapshot.</summary>
+    public IReadOnlyList<(string Token, int Present, int Absent, int AsAnswer, int AsCopula)> ExportGrammarRoles() => _grammar.Export();
+    public void ImportGrammarRoles(IEnumerable<(string Token, int Present, int Absent, int AsAnswer, int AsCopula)> rows) => _grammar.Import(rows);
 
     // The LEARNED number-word lexicon (de-hardcoding #5) lives on the SHARED SPACE (DialecticalSpace.NumberWords) so the
     // training engine and the inference engine see the SAME learned atoms (the engine instances differ; the space is
@@ -946,10 +894,8 @@ public sealed partial class GenesisInferenceEngine
         if (string.IsNullOrWhiteSpace(input) || string.IsNullOrWhiteSpace(output)) return;
         if (_memory is not DialecticalSpace ds) return;
         var toks = TokenizeField(input);
-        // Only clean ASSERT/RECALL fact frames: skip arithmetic/operator frames AND the gym's RETRIEVAL frames (a
-        // category/synonym question like "apple is a kind of fruit" would otherwise feed the structural token "is"
-        // spurious answer-absent counts and misclassify it). IsRetrievalMarker gates the gym's question frames here —
-        // a training-frame filter, not parse logic.
+        // Only clean ASSERT/RECALL fact frames: skip arithmetic/operator frames AND the gym's RETRIEVAL questions (see
+        // RetrievalFrame — a stated-value fact is never a retrieval query, so grammar facts are no longer mis-skipped).
         if (toks.Count == 0 || toks.Any(IsNumericLike) || toks.Any(ds.IsOperationToken) || RetrievalFrame(toks)) return;
         _grammar.Observe(toks, output.Trim());
     }

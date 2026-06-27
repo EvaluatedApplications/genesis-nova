@@ -17,8 +17,8 @@ Each iteration is small, measured, and recorded to file memory so gains compound
 ## The cycle (run every iteration)
 
 1. **Recall + measure.** Read `MEMORY.md` directly to surface relevant memories (+ their `[[ ]]` see-also
-   links); read them. `GenesisInspect report|probe` to measure current capability. Ground the iteration in
-   evidence, not assumption.
+   links); read them. `GenesisInspect report|probe` (or `gymprobe <level>` for the gym's per-skill curriculum
+   reading) to measure current capability. Ground the iteration in evidence, not assumption.
 2. **Target.** Pick ONE weakness on ONE axis — prefer the highest-leverage *measured* failure.
 3. **Hypothesize.** One concrete change + the metric that will show whether it worked.
 4. **Change.** Implement minimally; build green; no broad speculative rewrites (one consolidated build).

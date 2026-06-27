@@ -11,11 +11,17 @@ A checkpoint mixes three things; we split them along the **shared / local** seam
 
 | Tier | Contents | Lives in | Git |
 |---|---|---|---|
-| **Shared model** — the starter everyone forks | vocab, embeddings, output/route/edit heads, **GRU gates**, learned spacing/casing, **+ the platonic substrate** | `models/genesis-nova/` (repo) | committed |
-| **Local working state** — per user | the user's evolving fork as they train, curriculum/mastery (`TrainerLearningState`), autonomous history, conversation, metrics/queue/logs | `.claude-nova/` | gitignored |
+| **Shared model** — the starter everyone forks | vocab, embeddings, output/route/edit heads, **GRU gates**, learned spacing/casing, **+ the platonic substrate** | `models/genesis-nova/` (+ pointer `models/genesis-nova.json`, substrate `models/genesis-nova.platonic/`) | committed |
+| **Local working state** — per user | the user's evolving fork as the in-app **gym** trains it, curriculum/mastery, metrics/logs | `%LocalAppData%/GenesisNova/gym/` | not committed |
 
-The committed starter is a **read-only baseline**. On first run the daemon copies it into the local working
-fork and trains *that*; the repo model only changes when someone **promotes** a fork and opens a PR.
+The committed starter is a **read-only baseline**. On first run the app **seeds** it into the local gym working
+dir (`GenesisShardedCheckpointStore.SeedFromStarter`, called from `MainWindow`) and trains *that*; the repo model
+only changes when someone **promotes** a fork (`PromoteToStarter`) and opens a PR.
+
+> The committed starter is **three parts**, all tracked (see `.gitignore`): the pointer `models/genesis-nova.json`,
+> the model dir `models/genesis-nova/`, and the substrate dir `models/genesis-nova.platonic/`. A clone with no local
+> gym checkpoint seeds from these; once a local checkpoint exists, the gym fork evolves on its own and is never
+> overwritten.
 
 ---
 
@@ -70,9 +76,10 @@ Older checkpoints are the single JSON file `genesis-nova.autosave.checkpoint.jso
 companion), `Version ≤ 3`.
 
 - **Migrate on first load.** If the sharded model dir is absent but the legacy JSON exists, load it with the
-  legacy reader, re-save in the sharded binary format, then **clean up** the legacy files (move them to
-  `.claude-nova/.legacy-backup/` — out of the active directory so there's **no confusion about what's relevant**,
-  but recoverable). One-time, idempotent.
+  legacy reader, re-save in the sharded binary format, then **clean up** the legacy files (move them to a
+  `.legacy-backup/` subdir of the state dir — out of the active directory so there's **no confusion about what's
+  relevant**, but recoverable). One-time, idempotent. (`GenesisCheckpointStore.MigrateLegacyToSharded`,
+  `ResolveStored`.)
 - **Delayed hard delete.** The legacy-JSON reader + migration path is marked `// LEGACY: delete after <release>`
   to be removed once migration is proven in the wild.
 - Your current 2048 / face-512 model migrates cleanly (dims, vocab, GRU, substrate all carry over).
@@ -81,23 +88,32 @@ companion), `Version ≤ 3`.
 
 ## 5. Fork & contribute flow
 
-1. `git clone` → `models/genesis-nova/` is your starter.
-2. Daemon first run: copy starter → `.claude-nova/fork/`; train the fork locally (your custom regimes, data,
-   training-set generators). The committed starter is untouched.
-3. **Promote**: export your fork to a fresh `models/genesis-nova/` (new manifest + changed shards), open a PR.
+1. `git clone` → `models/genesis-nova{.json,/,.platonic/}` is your starter.
+2. **Seed on app start**: if there's no local gym checkpoint yet, the app copies the committed starter →
+   `%LocalAppData%/GenesisNova/gym/` (`SeedFromStarter`, from `MainWindow`); the in-app **gym** then trains *that*
+   fork locally. The committed starter is untouched; once a local checkpoint exists, seeding is a no-op.
+3. **Promote**: `GenesisShardedCheckpointStore.PromoteToStarter` copies your local fork (pointer + model +
+   substrate, mirroring the destination) into a fresh `models/genesis-nova{.json,/,.platonic/}` (new manifest +
+   changed shards), which you commit and open a PR for.
 4. **CI verifies** before merge — held-out generalisation, equal-budget "is it actually better?" (RaceBench),
    regime/retention suites. Manifest lineage + content hashes track provenance.
 
 So "start from my work, train your own, PR a better one" falls straight out of the layout.
+
+> Status: `SeedFromStarter` is wired (`MainWindow`, runs on startup). `PromoteToStarter` exists and is
+> test-covered (`Tests/StarterSeedPromoteTests.cs`) but is **not yet exposed as a UI/CLI action** — promotion is a
+> deliberate, manual step. The old `ClaudeMemory` daemon `serve`/`promote` flow this section once described is
+> **retired**; continuous training is hosted in the in-app gym.
 
 ---
 
 ## 6. Roadmap
 
 1. **Binary sharded store + manifest + migration + cleanup** — behind the existing Save/Load surface (this doc's
-   core; daemon keeps working throughout). ← *implemented first*
-2. Repo `models/` layout + manifest lineage/hash + copy-to-fork-on-first-run + `promote`/`export` command.
-3. PR-with-tests CI verification gate.
+   core). ← *done*
+2. Repo `models/` layout + seed-from-starter-on-first-run + `promote`/`export`. ← *seed + promote landed*
+   (`SeedFromStarter`/`PromoteToStarter`); manifest lineage/hash field and a promote UI/CLI action still pending.
+3. PR-with-tests CI verification gate. ← *pending*
 4. Training-set generator packages (`ITrainingSetGenerator` — the "ability library").
 5. P2P platonic-element coordination (reuses `ExportSnapshot`/`ImportSnapshot` + reliability/UCB +
    content-addressed shards).
@@ -107,14 +123,16 @@ So "start from my work, train your own, PR a better one" falls straight out of t
 ## 7. On-disk reference
 
 ```
-models/genesis-nova/                 # SHARED (committed)
-  manifest.json                      #   sections → shard hashes, dims, lineage, tests-passed
-  shards/<sha256>.gnv                #   32 MiB content-addressed double shards
+models/genesis-nova.json             # SHARED (committed) — the pointer marker (commit of a save)
+models/genesis-nova/                 #   the model dir
+  manifest.json                      #     sections → shard hashes, dims, generation
+  shards/<sha256>.gnv                #     32 MiB content-addressed double shards
 models/genesis-nova.platonic/        #   substrate (separate → resettable), same shard layout
 
-.claude-nova/                        # LOCAL (gitignored)
-  genesis-nova.autosave.checkpoint/        # the local fork (sharded, same format)
+%LocalAppData%/GenesisNova/gym/      # LOCAL (not committed) — the in-app gym working dir
+  genesis-nova.autosave.checkpoint.json      # local pointer
+  genesis-nova.autosave.checkpoint/          # the local fork (sharded, same format)
   genesis-nova.autosave.checkpoint.platonic/
-  training-state / metrics / queue / logs  # local runtime + curriculum
-  .legacy-backup/                          # migrated-away legacy JSON (safe to delete)
+  gym-<skill>-level.txt / personality-level.txt   # per-muscle curriculum levels
+  .legacy-backup/                            # migrated-away legacy JSON (safe to delete)
 ```

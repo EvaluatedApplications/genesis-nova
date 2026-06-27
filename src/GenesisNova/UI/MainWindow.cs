@@ -19,6 +19,7 @@ public class MainWindow : Form
 
     private readonly GenesisEvalAppRuntime _runtime;
     private readonly string _gymStateDir;
+    private readonly bool _seededFromStarter; // true if this fresh start was seeded from the committed repo starter
     private CancellationTokenSource? _autonomousTrainingCts;
     private CancellationTokenSource? _gymCts;
     private GymTrainer? _gym;
@@ -45,6 +46,23 @@ public class MainWindow : Form
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "GenesisNova",
             "gym");
+
+        // FRESH-START SEED: if this machine has no gym checkpoint yet, copy the committed repo STARTER
+        // (models/genesis-nova — a warmed shared baseline) into the gym state dir, so a clone / fresh start begins from
+        // that model instead of an empty brain. Runs BEFORE the runtime (AutoResume reads the seeded pointer). No-op once
+        // a local checkpoint exists — the local fork then evolves independently and is never overwritten. See MODEL_STORAGE.md.
+        try
+        {
+            var repoRoot = GuessRepoRoot();
+            if (!string.IsNullOrEmpty(repoRoot))
+            {
+                var starter = Path.Combine(repoRoot, "models", "genesis-nova.json");
+                var local = Path.Combine(_gymStateDir, "genesis-nova.autosave.checkpoint.json");
+                _seededFromStarter = GenesisNova.Persistence.GenesisShardedCheckpointStore.SeedFromStarter(starter, local);
+            }
+        }
+        catch { /* seeding is best-effort — a missing/torn starter just means a fresh empty brain */ }
+
         // Production gym standard: 2048 GRU controller + decoupled 512 substrate face-dim, fixed (no autoscale).
         // The ARCHITECTURE (conscious field, dialectical core, keep-core, the meaning-space self, function gradient)
         // is defined ONCE in GenesisNovaConfig.WithProductionMechanisms() — shared with the RaceBench benchmark so the
@@ -76,6 +94,8 @@ public class MainWindow : Form
             ShowInTaskbar = true;
             Activate();
             BringToFront();
+            if (_seededFromStarter)
+                AppendOutput("[seed] fresh start — seeded the gym from the committed repo starter (models/genesis-nova)");
             StartGym(); // host the gym in-app: on startup, run what the daemon used to do
             StartControlServer(); // headless control endpoint so tools/Claude can drive the live model
         };
@@ -165,16 +185,27 @@ public class MainWindow : Form
         throttleNum.ValueChanged += (s, e) => _gymThrottlePct = (int)throttleNum.Value; // live — applies next cycle, no restart
         flow.Controls.Add(throttleNum);
 
-        flow.Controls.Add(new Label { Text = "Curricula (enable / disable):", AutoSize = true, Margin = new Padding(0, 18, 0, 2), Font = new Font("Segoe UI", 10, FontStyle.Bold) });
-        flow.Controls.Add(new CheckBox { Name = "CurGym", Text = "Gym — procedural skills", Checked = true, AutoSize = true });
-        // One checkbox per gym MUSCLE — tick a subset to FOCUS training on those skills (all ticked = the full mix).
+        // CURRICULA — FLAT + standardized. Every trainable task is a PEER checkbox: no tiers, no nesting, no groups.
+        // Read TOP-TO-BOTTOM = the order to train — PREREQUISITE (prebake) → FUNDAMENTALS → GYM skills → applied.
+        // Only the PREBAKE is auto-checked: it's the prerequisite that warms the learned function-word signal the
+        // Merge parse / fact memory / retrieval all read (see [[nova-merge-substrate-plan]]). Tick more as each is ready.
+        flow.Controls.Add(new Label { Text = "Curricula — run top → bottom (only the prebake is checked; train it first):", AutoSize = true, Margin = new Padding(0, 18, 0, 4), Font = new Font("Segoe UI", 10, FontStyle.Bold) });
+
+        // Uniform peer checkbox — same indent for every task; only the run-first prerequisite starts checked.
+        static CheckBox Cur(string name, string text, bool runFirst = false) =>
+            new() { Name = name, Text = text, Checked = runFirst, AutoSize = true, Margin = new Padding(20, 1, 0, 1) };
+
+        flow.Controls.Add(Cur("CurPrebakeLanguage", "Prebake — language schemas (function words → SVO → questions → nesting → multi-sentence)", runFirst: true));
+        flow.Controls.Add(Cur("CurOpCues", "Op-cue words — sum / difference / product / quotient → operator"));
+        flow.Controls.Add(Cur("CurNumberWords", "Number words — digit ↔ word lexicon"));
         foreach (var skill in Enum.GetValues<GenesisNova.Train.GymSkill>())
-            flow.Controls.Add(new CheckBox { Name = "GymSkill_" + skill, Text = GymSkillLabel(skill), Checked = true, AutoSize = true, Margin = new Padding(20, 0, 0, 0) });
-        flow.Controls.Add(new CheckBox { Name = "CurMemCode", Text = "Memory + Code index", Checked = false, AutoSize = true });
-        flow.Controls.Add(new CheckBox { Name = "CurCreators", Text = "Creators (skill ladder: number-word → category → arithmetic)", Checked = false, AutoSize = true });
-        flow.Controls.Add(new CheckBox { Name = "CurPersonality", Text = "Personality (rude chatbot)", Checked = true, AutoSize = true });
-        flow.Controls.Add(new CheckBox { Name = "CurGrammar", Text = "Grammar (NN learns assert/recall roles -> name memory)", Checked = true, AutoSize = true });
-        flow.Controls.Add(new CheckBox { Name = "CurFocused", Text = "Focused + rehearsal (unticked = all tasks every cycle)", Checked = true, AutoSize = true });
+            flow.Controls.Add(Cur("GymSkill_" + skill, "Gym — " + GymSkillLabel(skill)));
+        flow.Controls.Add(Cur("CurMemCode", "Memory + Code index"));
+        flow.Controls.Add(Cur("CurCreators", "Creators — skill ladder"));
+        flow.Controls.Add(Cur("CurPersonality", "Personality — rude chatbot (seeded reply chunks)"));
+
+        flow.Controls.Add(new Label { Text = "Scheduler:", AutoSize = true, Margin = new Padding(0, 10, 0, 0), ForeColor = Color.DimGray });
+        flow.Controls.Add(new CheckBox { Name = "CurFocused", Text = "Focused + rehearsal (unticked = all tasks every cycle)", Checked = true, AutoSize = true, Margin = new Padding(20, 0, 0, 0) });
         flow.Controls.Add(new Label { Text = "Memory index file (MEMORY.md):", AutoSize = true, Margin = new Padding(0, 8, 0, 2) });
         flow.Controls.Add(new TextBox { Name = "MemPath", Width = 270, Text = DefaultMemoryIndexPath() });
         flow.Controls.Add(new Label { Text = "Code root directory:", AutoSize = true, Margin = new Padding(0, 6, 0, 2) });
@@ -1393,31 +1424,35 @@ public class MainWindow : Form
         Directory.CreateDirectory(_gymStateDir);
         var children = new List<ITrainingCurriculum>();
         var gymChildren = new List<GymTrainer>(); // ONE per enabled muscle — each its OWN mastery gate + level
+        // PREBAKE — the run-first LANGUAGE curriculum: warms the substrate with the SCHEMAS of English (function words →
+        // SVO → questions → nesting → multi-sentence), the prerequisite that gates the Merge parse / fact memory /
+        // retrieval. Training DATA (real words + nonce salt), not a dispatch list — the structure is learned distributionally.
+        if (GetControl<CheckBox>("CurPrebakeLanguage")?.Checked ?? false)
+        {
+            children.Add(new PrebakeLanguageCurriculum(trainPerCycle: _gymTrainPerCycle));
+            AppendOutput("[train] PREBAKE: language schemas (L1 function-words → L5 multi-sentence; warms the learned structural signal)");
+        }
         if (GetControl<CheckBox>("CurCreators")?.Checked ?? false)
         {
             children.AddRange(CreatorUnit.SkillLadder(trainCount: _gymTrainPerCycle));   // each creator = one focusable trainer
             AppendOutput($"[train] creators skill ladder: {string.Join(", ", ExampleCreatorRegistry.All.Select(c => c.Name))}");
         }
-        if (GetControl<CheckBox>("CurGym")?.Checked ?? true)
+        // GYM MUSCLES — each TICKED procedural skill (flat peers; no master toggle). EACH becomes its OWN curriculum
+        // unit → its OWN mastery gate + independent level (the orchestrator grades + gates each unit separately;
+        // Focused drives one to mastery then the next, Composite trains all but still levels each). Own level file each.
+        var enabledSkills = Enum.GetValues<GenesisNova.Train.GymSkill>()
+            .Where(s => GetControl<CheckBox>("GymSkill_" + s)?.Checked ?? false).ToList();
+        foreach (var skill in enabledSkills)
         {
-            // Which MUSCLES to train — the per-skill checkboxes. None ticked falls back to the full mix.
-            var allSkills = Enum.GetValues<GenesisNova.Train.GymSkill>();
-            var enabledSkills = allSkills.Where(s => GetControl<CheckBox>("GymSkill_" + s)?.Checked ?? true).ToList();
-            if (enabledSkills.Count == 0) enabledSkills = allSkills.ToList();
-            // EACH muscle becomes its OWN curriculum unit → its OWN mastery gate + independent level (the
-            // orchestrator grades + gates each unit separately; Focused drives one to mastery then the next,
-            // Composite trains all but still levels each on its own). Each keeps its own level file.
-            foreach (var skill in enabledSkills)
-            {
-                var lvlPath = Path.Combine(_gymStateDir, "gym-" + skill.ToString().ToLowerInvariant() + "-level.txt");
-                var startLevel = 1;
-                try { if (File.Exists(lvlPath) && int.TryParse(File.ReadAllText(lvlPath).Trim(), out var lv) && lv >= 1) startLevel = lv; } catch { }
-                var child = new GymTrainer(startLevel, skills: new[] { skill }) { MasteryBar = _gymBar, TrainPerCycle = _gymTrainPerCycle };
-                children.Add(child);
-                gymChildren.Add(child);
-            }
-            AppendOutput($"[train] gym muscles ({enabledSkills.Count}, each its own gate): {string.Join(", ", enabledSkills)}");
+            var lvlPath = Path.Combine(_gymStateDir, "gym-" + skill.ToString().ToLowerInvariant() + "-level.txt");
+            var startLevel = 1;
+            try { if (File.Exists(lvlPath) && int.TryParse(File.ReadAllText(lvlPath).Trim(), out var lv) && lv >= 1) startLevel = lv; } catch { }
+            var child = new GymTrainer(startLevel, skills: new[] { skill }) { MasteryBar = _gymBar, TrainPerCycle = _gymTrainPerCycle };
+            children.Add(child);
+            gymChildren.Add(child);
         }
+        if (enabledSkills.Count > 0)
+            AppendOutput($"[train] gym muscles ({enabledSkills.Count}, each its own gate): {string.Join(", ", enabledSkills)}");
         if (GetControl<CheckBox>("CurMemCode")?.Checked ?? false)
         {
             var mem = GetControl<TextBox>("MemPath")?.Text?.Trim() ?? string.Empty;
@@ -1430,20 +1465,18 @@ public class MainWindow : Form
             }
             catch (Exception ex) { AppendOutput($"[train] memory+code load failed: {ex.Message}"); }
         }
-        if (GetControl<CheckBox>("CurGrammar")?.Checked ?? false)
+        // FUNDAMENTALS — learned dispatch signals the gym muscles rely on, each warmed by its OWN curriculum (no
+        // hardcoded list). OP-CUES: "the product of x and y" resolves × by a LEARNED cue→op relation (the engine has no
+        // TryOpCue); clean worded frames feed LearnArithmeticCue → sum/difference/product/quotient. See OpCueCurriculum.
+        if (GetControl<CheckBox>("CurOpCues")?.Checked ?? false)
         {
-            // GRAMMAR: warms the structural tokens (copula/question/possessive) across varied frames so their ROLES
-            // are learned distributionally instead of hardcoded — the foundation for de-hardcoded name memory. A
-            // bounded muscle (it can master), so it rides along with the gym and persona. See [[nova-learned-grammar-roles]].
-            children.Add(new GrammarCurriculum(trainPerCycle: _gymTrainPerCycle));
-            AppendOutput("[train] grammar: assert/recall frame (learns copula/question/possessive roles → name memory)");
-            // OP-CUES: the same de-hardcoding for arithmetic WORDS — "the product of x and y" resolves multiply by a
-            // LEARNED cue→op relation, not a baked-in synonym list (the engine has no TryOpCue). Clean worded frames feed
-            // LearnArithmeticCue; proven the learned path then carries sum/difference/product/quotient. See OpCueCurriculum.
             children.Add(new OpCueCurriculum(trainPerCycle: _gymTrainPerCycle));
             AppendOutput("[train] op-cues: worded arithmetic synonyms (learns sum/difference/product/quotient → op word, no hardcoded list)");
-            // NUMBER-WORDS: clean digit↔word pairs so the learned number-word LEXICON (de-hardcoding #5) gets its atoms,
-            // composing the rest by universal place value (replaces the hardcoded NumberWordVocabulary codec).
+        }
+        // NUMBER-WORDS: clean digit↔word pairs plant the learned number-word LEXICON atoms (de-hardcoding #5), the rest
+        // composing by universal place value (replaces the hardcoded NumberWordVocabulary codec).
+        if (GetControl<CheckBox>("CurNumberWords")?.Checked ?? false)
+        {
             children.Add(new NumberWordCurriculum(trainPerCycle: _gymTrainPerCycle));
             AppendOutput("[train] number-words: clean digit↔word (learns the lexicon atoms → no hardcoded codec)");
         }
@@ -1474,6 +1507,25 @@ public class MainWindow : Form
         {
             try { _runtime.SetConversationalMode(false); } catch { } // non-chat training stays byte-identical
         }
+        // PREREQUISITE-FIRST ORDER: the prebake + fundamentals warm the LEARNED mechanisms the gym muscles then rely on
+        // — the function-word signal (prebake), the op-cue→op relations, the number-word lexicon. Float them to the
+        // FRONT so dependent muscles never train against an un-warmed signal/cue/lexicon. FocusedCurriculum introduces
+        // never-seen units in LIST order (see NextWeakest), so this prefix IS that order.
+        static int BootstrapRank(ITrainingCurriculum c) => c switch
+        {
+            PrebakeLanguageCurriculum => 0, // prerequisite — warms the language schemas everything parses through
+            OpCueCurriculum => 1,                // worded arithmetic synonyms → op
+            NumberWordCurriculum => 2,           // digit↔word lexicon atoms
+            _ => 3,                              // the gym muscles + anything else, in their existing order
+        };
+        children = children.OrderBy(BootstrapRank).ToList(); // OrderBy is STABLE: the prerequisite/fundamentals float to front in rank order; the rest keep their relative order
+
+        // FOUNDATION ORDER. Personality is SEEDED above at startup — established before cycle 1, the earliest possible
+        // (retrieval chunks, NOT gradient-trained: decode-training breaks chunk retrieval, see [[nova-talk-by-chunk]]).
+        // Then the trained foundation leads with the prebake (the function-word signal everything parses through), then
+        // the op-cue and number-word bootstraps, then the gym skills that depend on all of the above.
+        AppendOutput("[train] order: personality SEEDED first (identity) → prebake function-words → op-cues → number-words → gym skills");
+
         if (children.Count == 0)
         {
             // Personality alone has nothing to gradient-TRAIN (it's retrieval) — it's seeded + chat-ready, but a probe

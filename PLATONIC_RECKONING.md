@@ -4,6 +4,13 @@
 > from structure, or does it only work because we built a detector / template / classifier shaped to the tests?**
 > This document supersedes the over-claimed parts of `PLATONIC_MIND.md` and `PLATONIC_CONSCIOUSNESS.md`: keep their
 > *mechanisms*, hold their *narrative* lightly. It is the practical anchor for what to keep and what to shed.
+>
+> *Framing.* A platonic space is a **space of ideas**; we may make its rules freely **so long as they obey the
+> axioms** (G1–G6, defined in `PLATONIC_THEORY.md` — observer, non-contradiction, conservation, irreversibility:
+> logical/mathematical, not physical). Words like *field*, *relaxation*, *attractor*, *free-energy*, *alive*,
+> *consciousness* are **generative metaphors that motivate the design** — not claims that the system models physics
+> or is conscious. The test is always the engineering one: *does it generalize from structure?* — never the
+> metaphor's literal truth.
 
 ---
 
@@ -23,9 +30,13 @@ Also landed (efficiency, not in the original reckoning but needed for scale): th
 back into `DialecticalSpace`, which had regressed to O(N) scans — O(log N) candidate-gathering with live-face
 rescoring, proven 100% equivalent to the scan and ~9× faster at 440 nodes. See `[[nova-dialectical-lattice]]`.
 
-**Still NOT done — the deeper subtraction:** removing the PLAN head + 9 shapes, the structural label resolvers, and
-rewriting training to self-supervised prediction. That is the next step (§6–§8 below), to be done with the user in
-the loop — not blind. Everything below is the standing plan; §8's "fix in place" is the part now landed.
+**Still NOT done — the deeper subtraction (re-verified 2026-06):** removing the PLAN head + 9 shapes, the structural
+label resolvers, and rewriting training to self-supervised prediction. Confirmed still pending in code — the throw
+items below all still exist: `PlatonicShapeRegistry` + the PLAN head, `ResolvePlanLabel` (`Train/GenesisLabelResolver.cs`),
+and `Cognition/Platonic/FieldCognition.cs` / `FieldOperator.cs`. That is the next step (§6–§8 below), to be done with
+the user in the loop — not blind. Everything below is the standing plan; §8's "fix in place" is the part now landed
+(seam fix verified: `PlatonicConceptAnchors.SelectDiscriminative` is what the trainer anchors on under
+`KeepCoreControl` — `Train/GenesisTrainer.cs`, `Cognition/PlatonicConceptAnchors.cs`).
 
 ---
 

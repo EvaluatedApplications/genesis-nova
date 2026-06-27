@@ -4,8 +4,12 @@ obj/
 *.user
 *.suo
 # Local model output stays out, but the SHARED starter people fork from IS tracked (see MODEL_STORAGE.md).
+# The starter is THREE parts — all needed to seed a fresh start: the pointer (.json), the model dir, and the
+# substrate dir (.platonic, where the warmed platonic space lives). Track all three; ignore everything else.
 /models/*
+!/models/genesis-nova.json
 !/models/genesis-nova/
+!/models/genesis-nova.platonic/
 /tempbuild/Debug/net8.0-windows
 /tempbuild-tests/Debug/net8.0-windows
 /artifacts

@@ -100,13 +100,15 @@ public sealed class GrammarRoleLearner
         return 1;                                                          // SUBJECT — in both present and absent inputs
     }
 
-    /// <summary>Snapshot for persistence (the learned grammar is just these tallies).</summary>
-    public IReadOnlyList<(string Token, int Present, int Absent, int AsAnswer)> Export()
-        => _stats.Select(kv => (kv.Key, kv.Value.InAnswerPresent, kv.Value.InAnswerAbsent, kv.Value.AsAnswer)).ToList();
+    /// <summary>Snapshot for persistence (the learned grammar is just these tallies). AsCopula MUST be carried — it is
+    /// the only counter that tells a copula (→NONE) apart from a subject seen in recall frames (see LabelFor line 96);
+    /// dropping it (the old 4-tuple did) silently breaks copula classification on every reload.</summary>
+    public IReadOnlyList<(string Token, int Present, int Absent, int AsAnswer, int AsCopula)> Export()
+        => _stats.Select(kv => (kv.Key, kv.Value.InAnswerPresent, kv.Value.InAnswerAbsent, kv.Value.AsAnswer, kv.Value.AsCopula)).ToList();
 
-    public void Import(IEnumerable<(string Token, int Present, int Absent, int AsAnswer)> rows)
+    public void Import(IEnumerable<(string Token, int Present, int Absent, int AsAnswer, int AsCopula)> rows)
     {
-        foreach (var (token, present, absent, asAnswer) in rows)
-            _stats[N(token)] = new Tally { InAnswerPresent = present, InAnswerAbsent = absent, AsAnswer = asAnswer };
+        foreach (var (token, present, absent, asAnswer, asCopula) in rows)
+            _stats[N(token)] = new Tally { InAnswerPresent = present, InAnswerAbsent = absent, AsAnswer = asAnswer, AsCopula = asCopula };
     }
 }

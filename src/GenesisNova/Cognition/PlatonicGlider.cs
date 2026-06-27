@@ -185,7 +185,7 @@ public sealed class PlatonicGliderInterpreter
     // ELEMENT-NATIVE compute (REFACTOR #1, 2026-06-13): the arithmetic is now a first-class platonic
     // COMPOSITION element built by the substrate's own R2 rule (TickExecutor), decoded via the face
     // homomorphism — not an inline C# sum. The meta-layer direct sum is kept as the oracle ComputeDirect
-    // and verified identical in tests. See PROJECT_GLIDER.md.
+    // and verified identical in tests.
     private double EvalCompute(Compute compute, IReadOnlyList<string> operands)
     {
         var values = compute.Args.Select(a => AsNumber(Eval(a, operands))).ToArray();

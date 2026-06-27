@@ -4,6 +4,14 @@
 This document discloses the system below to establish priority of invention. It is written to be *enabling* — a
 person skilled in the art can reproduce the mechanisms from the descriptions and formulas given.
 
+> **Framing note (inspiration vs. mechanism).** Genesis-Nova is organised around a *platonic space* — a space of
+> ideas whose rules we are free to choose so long as they obey a small set of axioms (G1..G6: born-neutral elements,
+> differential/dialectical meaning, conservation by exact complement, monotone/archival irreversibility, etc.). Some
+> of the project's vocabulary — "conscious field", "self", "homeostasis", "cognitive reach" — is *generative
+> metaphor* drawn from physics/biology/consciousness, used to motivate the design. It is **not** a claim that the
+> system models physics or is conscious. This disclosure describes only the concrete mechanisms and the axioms they
+> satisfy; the inspirational language is flagged where it appears.
+
 ---
 
 ## Abstract
@@ -18,8 +26,9 @@ encoding), which makes related concepts cluster, makes unrelated concepts orthog
 and represents lexical **ambiguity** natively as a multi-sense superposition. A small recurrent neural network acts
 as a **thin controller** that *selects and composes* substrate operations rather than storing knowledge in its
 weights. The substrate is **conserved** (every element has an exact complement) and **monotone** (distinctions are
-archived, never destroyed). We additionally disclose a **persistent neural self-state** that conditions the
-controller and is maintained by a regenerative homeostatic loop.
+archived, never destroyed). We additionally disclose a **persistent self-state** — realized in the substrate's own
+meaning-space, not as a hidden weight vector — that conditions reasoning and is maintained by an archival
+(conserved-memory) mechanism.
 
 ---
 
@@ -108,23 +117,38 @@ meaning and accumulation is numerically safe. Identity (numeric/character faces)
 ## 7. The thin neural controller
 
 A small recurrent network (a GRU) is a **selector/router**, not a knowledge store. From an input it produces a
-shared hidden representation that drives decision heads (which retrieval/compute path to take; which operation;
+shared hidden representation that can drive decision heads (which retrieval/compute path to take; which operation;
 which composition shape). Each path *abstains* if it cannot answer, so control falls through a ladder of substrate
 operations (exact arithmetic via §3; relational retrieval via §5; composition via §4). **Capability emerges from
-the controller composing substrate operations** — the network learns only *which* operation, never a stored answer
-table or a hardcoded parser. The network has zero parameters of the substrate's width; the two are bridged by
-concept↔token correspondence, so substrate width and controller capacity are chosen independently.
+composing substrate operations** — the controller learns only *which* operation, never a stored answer table or a
+hardcoded parser. The network has zero parameters of the substrate's width; the two are bridged by concept↔token
+correspondence, so substrate width and controller capacity are chosen independently.
 
-## 8. Persistent self-state and regenerative homeostasis (disclosed component)
+In the current primary control path the substrate's own settling drives selection directly: a capability is chosen
+by the *structure* of the prompt (which operands, operators, and cues are present) and each reduction runs on the
+substrate's general primitives, with the network's classification heads bypassed; a query that nothing settles
+**abstains** rather than emitting an invented answer. (The classifier heads remain as a legacy, off-by-default
+selection path; the reduction logic they once selected was always classifier-free.) The disclosed novelty is the
+ladder of abstaining substrate operations and the thin-controller/substrate split, independent of which selection
+path drives it.
 
-We further disclose an optional mode in which the controller carries a **persistent self-state** — a recurrent
-hidden vector that is *not* reset between inputs, integrating each observation through the same learned recurrence.
-This self-state (i) conditions the controller's encoding of every input (so cognition proceeds from accumulated
-state), (ii) is written into the substrate as a self-element (the controller is represented within its own
-substrate), and (iii) is maintained by a **homeostatic loop**: the substrate is a committed identity pattern, an
-external process perturbs it (removing elements), and the controller restores the pattern from the conserved
-(archived) memory toward the committed setpoint. A measurable "cognitive reach" (the extent of pattern kept
-coherent under perturbation) characterizes the self.
+## 8. Persistent self-state (disclosed component)
+
+We further disclose a **persistent self-state** that is held in the substrate's own meaning-space (the large
+relational face) rather than as a hidden weight vector. It is a decaying accumulation of the meaning-clouds (§5) of
+the concepts cognition has recently attended to; it is *not* reset between inputs. This self-state (i) conditions
+reasoning by biasing the substrate's relaxation/retrieval toward the accumulated context (so an ambiguous query is
+resolved in the direction of what the system has been "thinking about"), and (ii) is itself shaped by learning —
+the same clouds the system sharpens by observation are what the self is built from. Because identity lives in the
+frozen faces and is conserved (§6), the substrate's learned state survives eviction (archival) and can be restored
+from conserved memory if re-observed.
+
+> *Inspirational framing (not a literal claim).* Earlier descriptions of this component used the language of a
+> "homeostatic loop", a committed identity "setpoint" restored under "perturbation", and a measurable "cognitive
+> reach". Those terms are generative metaphor for the conserved/archival mechanism above (G4 conservation, G6
+> irreversibility); they are not a claim that the system implements biological homeostasis or possesses
+> consciousness. The earlier GRU-hidden recurrent-self/perturbation apparatus is not part of the current
+> implementation; the self-state is the meaning-space accumulation described here.
 
 ## 9. Enumerated claims of novelty
 
@@ -144,16 +168,20 @@ The combination, and each of the following, is disclosed as inventive:
 5. A **conserved** (exact complement) and **monotone/archival** geometric substrate.
 6. A **thin recurrent controller** that selects and composes substrate operations (rather than storing knowledge in
    weights), with substrate and controller widths chosen independently via a name-based bridge.
-7. A **persistent, substrate-resident self-state** maintained by regenerative homeostasis against perturbation.
+7. A **persistent, substrate-resident self-state** held in the substrate's meaning-space (a decaying accumulation
+   of attended meaning-clouds) that conditions the system's relaxation/retrieval, surviving element eviction via the
+   conserved/archival mechanism (§6).
 
 ## 10. Reproducibility
 
 All formulas above (face boundaries, the `10^-(i+1)` numeric encodings, the token superposition μ(x), the complement
 and archival rules) are sufficient to implement the substrate. A reference implementation exists in the Genesis-Nova
 codebase (faces in `Core/FaceLayout.cs` and `Core/PlatonicFaceComposer.cs`; the substrate in
-`Cognition/Platonic/`; the controller in `Model/`). Companion design documents: `PLATONIC_THEORY.md` (formal model),
-`PLATONIC_NUCLEUS.md` (the dual-face data model), `PLATONIC_SPACE.md` (substrate capabilities),
-`PLATONIC_CONSCIOUSNESS.md` (the self-state component).
+`Cognition/Platonic/` — e.g. `DialecticalSpace.cs`, `Element.cs`, `ElementStore.cs`; the field-cognition control
+path in `Infer/GenesisInferenceEngine.Field.cs`; the controller in `Model/`). Companion design documents:
+`PLATONIC_THEORY.md` (formal model), `PLATONIC_NUCLEUS.md` (the dual-face data model), `PLATONIC_MIND.md` (the
+founding vision, held lightly per `PLATONIC_RECKONING.md`), and `PLATONIC_CONSCIOUSNESS.md` (the self-state
+component — its mechanisms are real, its "consciousness" language aspirational; see the §8 framing note above).
 
 ---
 

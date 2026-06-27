@@ -19,6 +19,15 @@
 > record of work done, not pending. One reframe from `PLATONIC_RECKONING.md` (2026-06): §11-step-7's "the gym
 > confirms it gets bigger" — the gym is a *probe of generalisation, never the training target*. The number
 > homomorphism (§4 existence proof) is ported **verbatim**; everything else obeys the laws it proves.
+>
+> **How to read the metaphors (inspiration, not physics).** A platonic space is a *space of ideas* — we are free to
+> *make the rules*, the only hard constraint is that they stay sound under the axioms **G1–G6 (§5)**. So the
+> dialectical / "contradiction" / "synthesis" vocabulary (Hegel, Saussure) and any field / energy-minimum framing
+> are **generative metaphors that motivate the design** — they are not claims that the system models Hegelian logic,
+> linguistics, or physics. What is *literally* claimed and must hold is the mathematics: the ontology Π (§1), Laws
+> M/D/C/S, the soundness theorems (§7), and the number homomorphism (§4) as the one realized existence proof. When
+> a sentence below reads as a strong metaphor, read it as *the idea we are building toward*; the axioms are the
+> measure of whether the build is correct.
 
 ---
 
@@ -206,8 +215,10 @@ a **testable** criterion. These are the milestone gates.
 
 ## 10. Binding to the `IPlatonicSpace` contract
 
-The new core implements `src/GenesisNova/Cognition/IPlatonicSpace.cs`; the §6 algebra is the theory, the interface is
-how nova invokes it. Each consumed member maps to one operation:
+The new core (`Cognition/Platonic/DialecticalSpace.cs`, `sealed class DialecticalSpace : IPlatonicSpace`) implements
+`src/GenesisNova/Cognition/IPlatonicSpace.cs`; the §6 algebra is the theory, the interface is how nova invokes it.
+(The legacy `PlatonicSpaceMemory` still implements the same interface as the `UseDialecticalCore=false` fallback.)
+Each consumed member maps to one operation:
 
 - **observe** (the only way meaning enters): `ObserveContradiction`, `GetContradiction`, `FineEditFromExample`,
   `ReinforceEvidence`, `FunctionGradientStep`, `DisruptAssociation`.

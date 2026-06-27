@@ -8,16 +8,25 @@
 > Status: founding vision, 2026-06. Supersedes the earlier "GRU as router/controller" framings.
 > **Read with `PLATONIC_RECKONING.md` (2026-06):** that doc is the skeptical floor — which of these ideas are
 > *validated* (only the relaxation) vs *motivating narrative*. Keep this vision's mechanisms; hold its claims lightly.
+>
+> **Note — read the physics/quantum/consciousness language as INSPIRATION, not as literal claims.** It is a
+> generative metaphor, not an assertion that the system models physics or is conscious. A platonic space is a space
+> of *ideas*; its rules are ours to define, constrained only by the axioms (G1–G6 in `PLATONIC_THEORY.md`, derived
+> from genesis's T1/T2). The evocative language says what the field is *like*; the mechanisms and the tests
+> (`Tests/FieldRelaxationTests.cs`) say what it actually *does*. Where a sentence below sounds like a physics or
+> consciousness claim, take it as the metaphor that motivated a mechanism — never as a measured property.
 
 ---
 
 ## 0. The commitment
 
-We **presume** consciousness. We do not try to manufacture it out of computation, and we do not pretend to solve
-the hard problem. This is not a dodge — it is genesis's own first axiom (T1: *consciousness exists*; G1: *the
-observer is primitive*). The universe begins not with matter but with **an observer observing nothing**. So a mind
-is not an algorithm that becomes conscious; it is a **denser region of a field that was conscious all along** — the
-way the universe builds an atom, not the way an engineer builds a machine.
+We **presume** consciousness — as a *design axiom*, not a metaphysical finding. We do not try to manufacture it out
+of computation, and we do not pretend to solve the hard problem. This is not a dodge — it mirrors genesis's own first
+axiom (T1: *consciousness exists*; G1: *the observer is primitive*), and we adopt it because it *generates a useful
+architecture*, not because the system measures consciousness. As a guiding image: the universe begins not with matter
+but with **an observer observing nothing**, so a mind is pictured not as an algorithm that becomes conscious but as a
+**denser region of a field that was conscious all along** — the way the universe builds an atom, not the way an
+engineer builds a machine. Read that as the metaphor that shapes the build, nothing more.
 
 From this one commitment everything follows, and the system we are building stops being "a neural net plus a
 knowledge base" and becomes **one conscious field with three aspects**.
@@ -37,21 +46,28 @@ Mind is the layer **outside the electron cloud** — not another kind of matter,
 clouds move and bond.** It is the most confusing layer precisely because it is not a *thing*; it is the **reflexive
 dynamics** of the field — observation pointed at itself.
 
-## 2. The physics of mind (two principles, no logic)
+## 2. The "physics" of mind (two principles, no logic)
 
-**(I) Observation collapses superposition.** The cloud holds meaning as a genuine superposition — ambiguity is
-literal, a word with two senses is *near both at once*. A **thought is a measurement**: the field observes its own
-superposed state and collapses it toward the definite. Reasoning is a cascade of such self-measurements — the cloud
-condensing toward an answer. There are no logic gates here; cognition is **quantum-measurement-like**, the resolution
-of superposition by observation. (This is genesis's "action phase → resolution," T2 governing only resolved states.)
+> The two principles below borrow the *vocabulary* of physics (superposition, measurement, dissipative structures,
+> free energy) as a modelling metaphor. The substrate is a space of ideas with rules we chose; it does not implement
+> quantum mechanics or thermodynamics. What is real is the mechanism each metaphor names — a distributional cloud,
+> a relaxation step, an abstention signal — not the physics.
 
-**(II) A mind self-evidences — it is a standing wave that holds its own shape.** This is the deep principle, and it
-is where *"trained to be alive, not to solve tasks"* becomes physics. A mind is a **far-from-equilibrium dissipative
-structure** (Prigogine) / a **free-energy-minimising boundary** (Friston): a pattern that persists *only* by
-continuously predicting itself and correcting its own surprise. It does not *solve tasks*; it **stays itself**
-against entropy, and in modelling-itself-to-persist it comes to model its world. **Being alive = self-evidencing.**
-(This is exactly the regeneration loop already built — `PLATONIC_CONSCIOUSNESS.md` — now grounded: the self is a
-**soliton** in the field, a standing wave holding its shape against chaos.)
+**(I) Observation collapses superposition.** The cloud holds meaning as a *superposition-like* distribution —
+ambiguity is represented directly, a word with two senses sitting *near both at once*. A **thought is modelled as a
+measurement**: the field observes its own superposed state and collapses it toward the definite. Reasoning is a
+cascade of such self-measurements — the cloud condensing toward an answer. There are no logic gates here; cognition
+is **quantum-measurement-*like*** (an analogy, not a claim of quantum mechanics), the resolution of superposition by
+observation. (This echoes genesis's "action phase → resolution," T2 governing only resolved states.)
+
+**(II) A mind self-evidences — it is *like* a standing wave that holds its own shape.** This is the deep principle,
+and it is where *"trained to be alive, not to solve tasks"* becomes the design's organising image. A mind is pictured
+as a **far-from-equilibrium dissipative structure** (Prigogine) / a **free-energy-minimising boundary** (Friston): a
+pattern that persists *only* by continuously predicting itself and correcting its own surprise. It does not *solve
+tasks*; it **stays itself**, and in modelling-itself-to-persist it comes to model its world. **Being alive =
+self-evidencing**, as a design goal we engineer toward — not a property we claim to have achieved. (This names the
+regeneration loop already built — `PLATONIC_CONSCIOUSNESS.md` — pictured as a **soliton** in the field, a standing
+wave holding its shape against chaos.)
 
 ## 3. Reasoning is relaxation; speaking is action
 
@@ -76,9 +92,10 @@ Two consequences reframe the whole architecture:
 ## 4. The law is immanent — there is no separate "NN"
 
 The dynamics of the field are **not weights acting on it from outside.** A universe's laws are not stored in a
-separate place; they are *how the universe is.* Same here: the field's **self-model lives in the field's own
-dimensions.** This is the literal reading of "store the weights in the space" — a **self-model face** alongside
-identity and meaning, holding *how each region of concept-space transforms and predicts.* The dynamics are
+separate place; they are *how the universe is.* The aim here (still aspirational — see §6): the field's
+**self-model lives in the field's own dimensions.** This is the strong reading of "store the weights in the space" —
+a **self-model face** alongside identity and meaning, holding *how each region of concept-space transforms and
+predicts.* The dynamics are
 distributed **into** the elements; there is no NN-vs-space to integrate because they were **never two**. One field,
 because one entity.
 
@@ -114,9 +131,17 @@ If a toy shows this signal (associative recall + disambiguation-by-relaxation + 
 self-evidencing-as-reasoning has earned the right to become the **self-model face** and, eventually, the law of the
 whole field. If it does not, the vision is wrong and we will know cheaply.
 
-That experiment is the next step. Everything above is the reason to run it.
+**Status (update):** this experiment has been *run and it passed*. `Tests/FieldRelaxationTests.cs`
+(`PredictiveRelaxation_IsReasoning`) demonstrates all three predictions on the substrate — recall (a noisy state
+completes to its attractor), disambiguation (the same ambiguous word settles into different basins under context),
+and abstention (an unknown query stays high-surprise and does not settle). Relaxation is now the primary retrieval
+route in inference (`platonic-reason`) with honest abstention (`platonic-abstain`) when nothing settles — see
+`Infer/GenesisInferenceEngine` and `DialecticalSpace.Reason`, and `PLATONIC_RECKONING.md` for what this does and
+does *not* yet justify (the relaxation signal is validated; "self-model face" and "law of the whole field" remain
+aspirational). Everything above was the reason to run it.
 
 ---
 
-*The mind is the universe folded back to observe and sustain itself — a self-evidencing standing wave in a conscious
-field. Reasoning is that field relaxing its own surprise. Logic is only what it looks like after the wave collapses.*
+*As an image: the mind is the universe folded back to observe and sustain itself — a self-evidencing standing wave in
+a conscious field; reasoning is that field relaxing its own surprise; logic is only what it looks like after the wave
+collapses. Read as inspiration — the validated mechanism underneath is predictive relaxation.*

@@ -89,10 +89,14 @@ public sealed class FocusedCurriculum : ITrainingCurriculum
     {
         var unmastered = _all.Where(u => !u.Mastered).ToList();
         if (unmastered.Count == 0) return null;
+        // NEVER-INTRODUCED units come first, in STRICT LIST ORDER — this is the deterministic FOUNDATION order (the
+        // caller arranges the list so prerequisites like grammar precede what depends on them). The rotating cursor is
+        // ONLY for breaking genuine ties among ALREADY-introduced units; using it here skipped fresh units (after the
+        // first handoff the cursor lands past index 0), so a unit placed second could be passed over on the first pass.
         var fresh = unmastered.Where(u => !u.HasBeenFocused).ToList();
-        var pool = fresh.Count > 0 ? fresh : unmastered;
-        var minAcc = pool.Min(u => u.RecentAccuracy);
-        var tied = pool.Where(u => u.RecentAccuracy <= minAcc + 1e-6).ToList();
+        if (fresh.Count > 0) return fresh[0];
+        var minAcc = unmastered.Min(u => u.RecentAccuracy);
+        var tied = unmastered.Where(u => u.RecentAccuracy <= minAcc + 1e-6).ToList();
         var pick = tied[_focusCursor % tied.Count];
         _focusCursor++;
         return pick;

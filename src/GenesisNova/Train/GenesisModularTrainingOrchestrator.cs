@@ -106,6 +106,17 @@ public sealed class GenesisModularTrainingOrchestrator
             foreach (var unit in units)
             {
                 double uQ = 0, uConf = 0; int uN = 0, uPlat = 0;
+                // FOUNDATION readiness (Open/Closed): a unit whose success is a PROPERTY OF THE SPACE self-assesses
+                // (e.g. the prebake's function-word separation). Grade by that readiness and skip surface probe-grading
+                // — the production field won't echo a content word, so its surface probes would read 0% even when warm.
+                if (unit.SelfAssess(runtime) is double selfAcc)
+                {
+                    var sa = Math.Clamp(selfAcc, 0.0, 1.0);
+                    unit.RecordCycle(new CycleGrade(sa, 1.0, sa));
+                    unitProgress.Add(new UnitProgress(unit.Name, unit.Difficulty, sa, unit.IsMastered));
+                    aggQuality += sa; aggConf += sa; aggN += 1; aggPlatonic += 1;
+                    continue;
+                }
                 foreach (var probe in unit.NextProbes())
                 {
                     if (ct.IsCancellationRequested) break;

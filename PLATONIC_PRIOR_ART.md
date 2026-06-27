@@ -1,13 +1,13 @@
 # A Dual-Face Geometric Substrate for Exact Computation, Distributional Meaning, and Compositional Memory, Driven by a Thin Neural Controller
 
 **Defensive publication / prior-art disclosure.** First public description: 2026-06-27. Project: Genesis-Nova.
-This document discloses the system below to establish priority of invention. It is written to be *enabling* — a
+This document discloses the system below to establish priority of invention. It is written to be *enabling*: a
 person skilled in the art can reproduce the mechanisms from the descriptions and formulas given.
 
-> **Framing note (inspiration vs. mechanism).** Genesis-Nova is organised around a *platonic space* — a space of
+> **Framing note (inspiration vs. mechanism).** Genesis-Nova is organised around a *platonic space*, a space of
 > ideas whose rules we are free to choose so long as they obey a small set of axioms (G1..G6: born-neutral elements,
 > differential/dialectical meaning, conservation by exact complement, monotone/archival irreversibility, etc.). Some
-> of the project's vocabulary — "conscious field", "self", "homeostasis", "cognitive reach" — is *generative
+> of the project's vocabulary ("conscious field", "self", "homeostasis", "cognitive reach") is *generative
 > metaphor* drawn from physics/biology/consciousness, used to motivate the design. It is **not** a claim that the
 > system models physics or is conscious. This disclosure describes only the concrete mechanisms and the axioms they
 > satisfy; the inspirational language is flagged where it appears.
@@ -30,7 +30,7 @@ recognized **without labels** from its neighbourhood graph topology, so grammati
 exposure. A small recurrent neural network acts as a **thin controller** that *selects and composes* substrate
 operations rather than storing knowledge in its weights. The substrate is **conserved** (every element has an exact
 complement) and **monotone** (distinctions are archived, never destroyed). We additionally disclose a **persistent
-self-state** — realized in the substrate's own meaning-space, not as a hidden weight vector — that conditions
+self-state** (realized in the substrate's own meaning-space, not as a hidden weight vector) that conditions
 reasoning and is maintained by an archival (conserved-memory) mechanism.
 
 ---
@@ -83,12 +83,12 @@ Composites are **hubs over reused component elements**, forming a ladder:
 The atom set (≈100 characters; digit place values) is **bounded**. A composite stores **part-of edges** to its
 components, which are *shared*: one character element is referenced by every word; one word element by every
 sentence. Therefore N observed composites cost **O(N + |atoms|)** storage and a *novel* composite over existing
-components costs **O(1)** — growth is recombination, not new storage. The number homomorphism (§3) is the special
+components costs **O(1)**. Growth is recombination, not new storage. The number homomorphism (§3) is the special
 case of this ladder for which composition is an exact algebraic operation.
 
 ## 5. Distributional relational meaning in the large face (and ambiguity)
 
-Each symbol x has a deterministic, symbol-seeded **token** `t(x)` — a fixed unit vector over the relational face.
+Each symbol x has a deterministic, symbol-seeded **token** `t(x)`, a fixed unit vector over the relational face.
 A concept's relational-face value (its "meaning cloud") is the normalized **superposition of its own token and the
 tokens of its relational context**:
 
@@ -100,7 +100,7 @@ the relation was observed). Properties, which follow directly:
 
 - **Emergent clustering.** Concepts that share relational context share tokens, so their clouds overlap (high cosine
   similarity); concepts with disjoint context are ≈orthogonal. Separation requires **no repulsion/contrastive
-  tuning** — orthogonality of the unrelated is automatic.
+  tuning**: orthogonality of the unrelated is automatic.
 - **Differential weighting.** Agreement (low κ) *adds* a neighbour's token; contradiction (high κ) *subtracts* it
   (meaning is defined by what a thing is *and is not*).
 - **Native ambiguity.** A polysemous symbol whose context spans two sense-clusters has a cloud that is a
@@ -114,33 +114,33 @@ meaning and accumulation is numerically safe. Identity (numeric/character faces)
 
 A relation between two elements is itself a **positioned element**: a binary, labeled composition `⟨a · label · b⟩`
 placed at the blend of its endpoints' meaning-clouds (§5), recording its two components and a relation label.
-Because the output of the composition is itself an element, composition is **recursive** — a composition may be an
-endpoint of another — so compound structures (e.g. the key `my favorite color`) are built bottom-up as nested
+Because the output of the composition is itself an element, composition is **recursive**: a composition may be an
+endpoint of another, so compound structures (e.g. the key `my favorite color`) are built bottom-up as nested
 compositions, **not** flattened into a single averaged point.
 
 Storing a told fact is creating such a composition with a relation label (e.g. `is`): a key (possibly itself a
 nested composition) is linked to a value. Recall traverses the composition back from the key to its value.
 Consequently two distinct compound keys (e.g. `my name` vs. `your name`) remain **distinct structured objects** and
-resolve to **different** values — a discrimination a single averaged representation cannot make. A newly asserted
+resolve to **different** values, a discrimination a single averaged representation cannot make. A newly asserted
 fact **revises** prior ones: asserting a new value for an existing key weakens the prior relation through the
 contradiction mechanism (§5), so the latest assertion governs recall without erasing the substrate's archived
 history (§8). This realizes associative, editable, **inspectable** memory as structure *in the space* rather than as
 adjustments to controller weights. The operation is the substrate-native form of binary recursive labeled
-composition — the minimal operation from which hierarchical structure is built.
+composition, the minimal operation from which hierarchical structure is built.
 
 ## 7. Learned structural roles from graph topology (label-free)
 
-Whether a token plays a **structural / function role** (determiners, copulas, prepositions, conjunctions — the
+Whether a token plays a **structural / function role** (determiners, copulas, prepositions, conjunctions: the
 closed-class "glue" of a language) or a **content role** (entities, attributes) is recognized **without labels**,
 from the token's position in the relation graph. A function word **bridges otherwise-unrelated concepts**: its
 neighbours do not connect to one another, so the **clustering coefficient** of its neighbourhood is low. A content
 word sits inside a cluster of mutually-related kin, so its neighbourhood clustering is high. Thresholding this graph
 signature relative to the population separates the two classes as an emergent property of how broadly a token
-co-occurs — with **no** hand-written stop-list, part-of-speech tagger, or supervised labels.
+co-occurs, with **no** hand-written stop-list, part-of-speech tagger, or supervised labels.
 
 Because the signal is purely distributional, the mechanism that learns roles from a small curriculum is, in
 principle, the same mechanism by which the system would acquire them from a natural corpus: grammatical structure is
-**learned from exposure**, not encoded. This role signal gates the compositional parse (§6) — the structural tokens
+**learned from exposure**, not encoded. This role signal gates the compositional parse (§6): the structural tokens
 mark *how* content tokens compose.
 
 ## 8. Conservation and monotonicity
@@ -157,7 +157,7 @@ A small recurrent network (a GRU) is a **selector/router**, not a knowledge stor
 shared hidden representation that can drive decision heads (which retrieval/compute path to take; which operation;
 which composition shape). Each path *abstains* if it cannot answer, so control falls through a ladder of substrate
 operations (exact arithmetic via §3; relational retrieval via §5; compositional recall via §6). **Capability emerges
-from composing substrate operations** — the controller learns only *which* operation, never a stored answer table or
+from composing substrate operations**: the controller learns only *which* operation, never a stored answer table or
 a hardcoded parser. The network has zero parameters of the substrate's width; the two are bridged by concept↔token
 correspondence, so substrate width and controller capacity are chosen independently.
 
@@ -174,7 +174,7 @@ We disclose a **persistent self-state** that is held in the substrate's own mean
 face) rather than as a hidden weight vector. It is a decaying accumulation of the meaning-clouds (§5) of the
 concepts cognition has recently attended to; it is *not* reset between inputs. This self-state (i) conditions
 reasoning by biasing the substrate's relaxation/retrieval toward the accumulated context (so an ambiguous query is
-resolved in the direction of what the system has been "thinking about"), and (ii) is itself shaped by learning —
+resolved in the direction of what the system has been "thinking about"), and (ii) is itself shaped by learning:
 the same clouds the system sharpens by observation are what the self is built from. Because identity lives in the
 frozen faces and is conserved (§8), the substrate's learned state survives eviction (archival) and can be restored
 from conserved memory if re-observed.
@@ -202,12 +202,12 @@ The combination, and each of the following, is disclosed as inventive:
    *without contrastive tuning*, and native representation of ambiguity as a multi-sense superposition.
 5. A **compositional, recursive, labeled fact memory** in which a relation is a positioned element (`⟨a·label·b⟩`)
    placed at the blend of its endpoints and recursively composable, giving structured **non-flattening** key→value
-   storage (distinct compound keys resolve distinctly) with belief revision via the contradiction mechanism —
+   storage (distinct compound keys resolve distinctly) with belief revision via the contradiction mechanism:
    associative memory as inspectable structure rather than weight updates.
 6. **Label-free recognition of a token's structural role** (function vs. content) from the **clustering coefficient
-   of its neighbourhood** in the relation graph — a function word bridges unrelated concepts (low clustering),
-   content clusters with its kin (high) — enabling distributional, supervision-free acquisition of grammatical
-   structure.
+   of its neighbourhood** in the relation graph (a function word bridges unrelated concepts with low clustering,
+   content clusters with its kin with high clustering), enabling distributional, supervision-free acquisition of
+   grammatical structure.
 7. A **conserved** (exact complement) and **monotone/archival** geometric substrate.
 8. A **thin recurrent controller** that selects and composes substrate operations (rather than storing knowledge in
    weights), with substrate and controller widths chosen independently via a name-based bridge, falling through a
@@ -223,15 +223,15 @@ as-element composition, the clustering-coefficient role signal, the complement a
 implement the substrate. A reference implementation exists in the Genesis-Nova codebase:
 
 - faces in `Core/FaceLayout.cs` and `Core/PlatonicFaceComposer.cs`;
-- the substrate in `Cognition/Platonic/` — `DialecticalSpace.cs` (distributional cloud, `Merge`/`LearnFact`/
+- the substrate in `Cognition/Platonic/`: `DialecticalSpace.cs` (distributional cloud, `Merge`/`LearnFact`/
   `TryRecallFact` compositional fact memory, `IsFunctionLike` role recognition), `Element.cs`, `ElementStore.cs`;
 - distributional acquisition of structure in `Train/PrebakeLanguageCurriculum.cs`;
 - the field-cognition control path in `Infer/GenesisInferenceEngine.Field.cs` (including the meaning-space
   self-state); the controller in `Model/`.
 
 Companion design documents: `PLATONIC_THEORY.md` (formal model), `PLATONIC_NUCLEUS.md` (the dual-face data model),
-`PLATONIC_MIND.md` (the founding vision, held lightly), and `PLATONIC_CONSCIOUSNESS.md` (the self-state component —
-its mechanisms are real, its "consciousness" language aspirational; see the §10 framing note above).
+`PLATONIC_MIND.md` (the founding vision, held lightly), and `PLATONIC_CONSCIOUSNESS.md` (the self-state component,
+whose mechanisms are real and whose "consciousness" language is aspirational; see the §10 framing note above).
 
 ---
 

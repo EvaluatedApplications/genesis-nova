@@ -17,7 +17,7 @@ public sealed class PrebakeLanguageLadderTests
         var c = new PrebakeLanguageCurriculum(trainPerCycle: 200, seed: 1);
         var inputs = c.NextTrainBatch().Select(t => t.Input).ToList();
         Assert.All(inputs, s => Assert.DoesNotContain(" . ", s));        // L1 never multi-sentence
-        Assert.All(inputs, s => Assert.True(s.Split(' ').Length <= 3));  // fragments only
+        Assert.All(inputs, s => Assert.True(s.Split(' ').Length <= 4));  // short fragments (incl. a 3-item content list)
     }
 
     [Fact]

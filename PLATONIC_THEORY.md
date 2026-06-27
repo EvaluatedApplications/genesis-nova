@@ -1,13 +1,13 @@
 # A Formal Model of the Dialectical Platonic Space
 
-> *Implementation-independent.* This is the **theory** — the "relational model" for the platonic space — against
+> *Implementation-independent.* This is the **theory**, the "relational model" for the platonic space, against
 > which the implementation is *judged*. Like Codd's relational model (mathematics first, DBMSs measured by it), the
-> platonic space is specified here as definitions, laws, an operation algebra, and soundness — provable without code.
-> §0–§8 are the implementation-independent model; §9 records how the live core realizes it.
+> platonic space is specified here as definitions, laws, an operation algebra, and soundness, all provable without code.
+> §0-§8 are the implementation-independent model; §9 records how the live core realizes it.
 >
-> Grounding: the genesis axioms G1–G6 (derived from T1 consciousness, T2 non-contradiction; see
+> Grounding: the genesis axioms G1-G6 (derived from T1 consciousness, T2 non-contradiction; see
 > `../genesis-engine/research/01-GENESIS-FROM-NOTHING.md`), the dialectical principle (`nova-dialectical-space`),
-> and composition-as-reuse. The number homomorphism is the one fragment realized soundly — it is this model's
+> and composition-as-reuse. The number homomorphism is the one fragment realized soundly. It is this model's
 > existence proof.
 >
 > **The live core.** `Cognition/Platonic/DialecticalSpace.cs` (`sealed class DialecticalSpace : IPlatonicSpace`,
@@ -16,10 +16,10 @@
 > (`GenesisNovaConfig.UseDialecticalCore = true`). The legacy `PlatonicSpaceMemory` still implements the same
 > interface as the `UseDialecticalCore=false` fallback.
 >
-> **How to read the metaphors (inspiration, not physics).** A platonic space is a *space of ideas* — the rules are
-> ours to make, the only hard constraint is that they stay sound under the axioms **G1–G6 (§5)**. The dialectical /
+> **How to read the metaphors (inspiration, not physics).** A platonic space is a *space of ideas*. The rules are
+> ours to make, the only hard constraint is that they stay sound under the axioms **G1-G6 (§5)**. The dialectical /
 > "contradiction" / "synthesis" vocabulary (Hegel, Saussure) and any field / energy-minimum framing are **generative
-> metaphors that motivate the design** — not claims that the system models Hegelian logic, linguistics, or physics.
+> metaphors that motivate the design**, not claims that the system models Hegelian logic, linguistics, or physics.
 > What is *literally* claimed and must hold is the mathematics: the ontology Π (§1), Laws M/D/C/S, the soundness
 > theorems (§7), and the number homomorphism (§4) as the one realized existence proof.
 
@@ -39,20 +39,20 @@ not duplication. The space is **conserved** (every element has its negation), **
 
 A platonic space is a tuple **Π = (E, κind, π, ¬, κ, ▷)**:
 
-- **E** — a set of **elements** (the carrier). Monotone: operations may only *add* to E (Law G6).
-- **κind : E → {Atom, Object, Relation, Function, Composition}** — the kind of each element (genesis's emergent
+- **E**: a set of **elements** (the carrier). Monotone: operations may only *add* to E (Law G6).
+- **κind : E → {Atom, Object, Relation, Function, Composition}**: the kind of each element (genesis's emergent
   kinds; `02-PLATONIC-EMERGENCE.md`). *Atoms* are irreducible (characters, digit-places); the rest are built.
-- **π : E → V** — the **position** map into an aspect-structured space **V = ⨁_{α∈A} V_α**, where **A** is a set
+- **π : E → V**: the **position** map into an aspect-structured space **V = ⨁_{α∈A} V_α**, where **A** is a set
   of **aspects** (the dimensions / "respects in which things can agree or differ"). π is *derived*, never assigned
   (Law D, §3).
-- **¬ : E → E** — the **complement** (negation). An involution: ¬¬e = e, with **e ⊕ ¬e = 0** (Law G4).
-- **κ : E × E → [0,1]^A** — the **contradiction profile**: κ(a,b)[α] ∈ [0,1] is *how much a and b contradict on
-  aspect α* (0 = agree, 1 = oppose). This is the **primitive of the whole model** — meaning is κ.
-- **▷ ⊆ E × E** — the **part-of** relation: C ▷ c means c is a component of composite C (Law C, §4). Distinct from
+- **¬ : E → E**: the **complement** (negation). An involution: ¬¬e = e, with **e ⊕ ¬e = 0** (Law G4).
+- **κ : E × E → [0,1]^A**: the **contradiction profile**. κ(a,b)[α] ∈ [0,1] is *how much a and b contradict on
+  aspect α* (0 = agree, 1 = oppose). This is the **primitive of the whole model**: meaning is κ.
+- **▷ ⊆ E × E**: the **part-of** relation. C ▷ c means c is a component of composite C (Law C, §4). Distinct from
   κ (structure, not contradiction).
 
 **Axiom of contradiction (the dialectic, base cases):** κ is symmetric; **κ(a,a) = 0** (a thing agrees with
-itself — identity is self-non-contradiction, T2); **κ(a, ¬a) = 1** (*a thing maximally contradicts its negation* —
+itself, identity is self-non-contradiction, T2); **κ(a, ¬a) = 1** (*a thing maximally contradicts its negation*,
 this is the dialectical anchor, the antithesis that defines the thesis).
 
 ---
@@ -66,8 +66,8 @@ space, κ(a, ·).
 least one aspect with at least one witness. *Meaning is nothing but the structure of differences* (Saussure: "in
 language there are only differences"). A concept is not stored content; it is a position in a web of contrasts.
 
-Corollary: an element with *no* contradictions to anything is meaningless (undefined). Meaning requires a foil —
-you learn what a thing *is* from what it *isn't*.
+Corollary: an element with *no* contradictions to anything is meaningless (undefined). Meaning requires a foil.
+You learn what a thing *is* from what it *isn't*.
 
 ---
 
@@ -78,12 +78,12 @@ Position is not assigned; it **emerges** as the configuration that best satisfie
 **Law D (Synthesis = contradiction-energy minimum).** π is a minimizer of
   **Ξ(π) = Σ_{a,b ∈ E} Σ_{α ∈ A} w_{ab} · ( d_α(π(a), π(b)) − τ(κ(a,b)[α]) )²**,
 where d_α is distance within aspect α and τ is monotone increasing (τ(0) ≈ 0: agree ⇒ near; τ(1) = max: oppose ⇒
-far). The **synthesis** of a is its position π(a) at the minimum — the resolution of all its agreements (pulled
+far). The **synthesis** of a is its position π(a) at the minimum: the resolution of all its agreements (pulled
 near, per-aspect) and contradictions (pushed far, per-aspect). Hegel's thesis → antithesis → synthesis is exactly
 this: an element's place is the settled outcome of its oppositions.
 
 **This is well-posed** (an MDS / force-directed embedding): Ξ is bounded below, continuous; minimizers exist; π is
-determined up to isometry of each V_α. *Per-aspect* is essential — a single scalar κ cannot express "cat and dog
+determined up to isometry of each V_α. *Per-aspect* is essential: a single scalar κ cannot express "cat and dog
 agree on `animal` but oppose on `sound`." (The drift to a scalar κ is the model-violation that flattened the
 dialectic in every implementation.)
 
@@ -101,7 +101,7 @@ a fixed order-aware composition function φ. Components are **shared**: the same
 
 - **Hierarchy:** Atoms → Words → Text. characters compose a word; words compose text. (Numbers: digit-place atoms
   compose a value.)
-- **Two edge types, never conflated:** **▷ (part-of)** points *down* to components — the *legitimate* hub of a word
+- **Two edge types, never conflated:** **▷ (part-of)** points *down* to components, the *legitimate* hub of a word
   over its letters; **κ (contradiction)** is the *sideways* web of meaning. The pathological "framing-word hub" is a
   κ-hub masquerading as structure; ▷-hubs are sound by construction.
 
@@ -125,7 +125,7 @@ Every operation (§6) must preserve all six. An implementation is *sound* iff it
   D) minimizes contradiction ⇒ resolved states are κ-consistent.
 - **G3 (Generative observation).** Observation may create new elements (and, via Law C, new composites).
 - **G4 (Conservation).** ∀e ∃ ¬e with e ⊕ ¬e = 0; ¬ is an involution. The negation anchors the dialectic (§1).
-- **G5 (Recursive availability).** Every element — Atom, Composition, Function — is itself an argument to κ, Φ, and
+- **G5 (Recursive availability).** Every element (Atom, Composition, Function) is itself an argument to κ, Φ, and
   observation. No privileged or unobservable element.
 - **G6 (Irreversibility).** E is monotone non-decreasing: a distinction, once made, is never destroyed (only
   archived/dormant). The space only expands.
@@ -134,16 +134,16 @@ Every operation (§6) must preserve all six. An implementation is *sound* iff it
 
 ## 6. The operation algebra
 
-A small, closed set of operations (the "relational algebra" of the space); each preserves G1–G6.
+A small, closed set of operations (the "relational algebra" of the space); each preserves G1-G6.
 
-- **observe(a, b, k)** — assert a per-aspect contradiction k ∈ [0,1]^A between a and b. Adds a, b, ¬a, ¬b to E
-  (G3/G4); updates κ(a,b) toward k as a synthesis of prior (thesis) and observed (antithesis) — e.g.
+- **observe(a, b, k)**: assert a per-aspect contradiction k ∈ [0,1]^A between a and b. Adds a, b, ¬a, ¬b to E
+  (G3/G4); updates κ(a,b) toward k as a synthesis of prior (thesis) and observed (antithesis), e.g.
   κ ← (1−η)·κ_prior + η·k; re-minimizes Ξ locally (Law D). *This is the only way meaning enters.*
-- **compose(c₁, …, cₙ) → C** — create the composite hub with ▷ edges and derived position (Law C). Idempotent on
-  identical component tuples (returns the existing hub — reuse).
-- **synthesize(a) → (π(a), conf)** — return a's resolved position and conf = 1 − (its minimal contradiction to a
+- **compose(c₁, …, cₙ) → C**: create the composite hub with ▷ edges and derived position (Law C). Idempotent on
+  identical component tuples (returns the existing hub, a reuse).
+- **synthesize(a) → (π(a), conf)**: return a's resolved position and conf = 1 − (its minimal contradiction to a
   task target). The dialectical "answer," graded.
-- **recognize(x) → (e, conf)** — recognize-highest-first: match x against existing composite hubs (text → word);
+- **recognize(x) → (e, conf)**: recognize-highest-first. Match x against existing composite hubs (text → word);
   on miss, decompose to components (word → char) and recognize those; on genuine novelty, **compose** a new hub
   from existing components and add it (G3) so it is recognized next time. Returns conf = 1 − κ.
 
@@ -174,7 +174,7 @@ synthesis (Law D). The algebra is closed: every result is again a valid Π.
 | π emergent (Law D) | exact (homomorphism) | **Synthesis**: the semantic face is born neutral and settles by local Ξ-minimization; no position is assigned directly |
 | Composition reuse (Laws C/S) | digit places | **▷-hubs over reused atoms**: O(N+\|Atoms\|); a novel composite costs O(1) |
 | ▷ vs κ (§4) | n/a | **Two distinct edge types**: ▷ (part-of, down) kept separate from κ (contradiction, sideways) |
-| G1–G6 (§5) | held | **Soundness gate**: every operation preserves all six axioms |
+| G1-G6 (§5) | held | **Soundness gate**: every operation preserves all six axioms |
 
 **Statement.** The platonic space is a conserved, monotone, consistent space where meaning is differential, position
 is the synthesis of per-aspect contradictions, and knowledge composes from reused parts. The number fragment
@@ -195,7 +195,7 @@ invokes it. `DialecticalSpace` is the default core (`GenesisNovaConfig.UseDialec
 1. **[Existence proof] Number homomorphism, exact.** `poly(a)+poly(b)=poly(a+b)`, `log(a)+log(b)=log(a·b)`;
    generalizes to unseen operands; no stored numeric facts; numbers never form relation edges.
 2. **[Law M] Meaning is per-aspect κ.** κ is a per-aspect profile, never a single scalar; "cat≈dog on `animal`,
-   cat≠dog on `sound`" is representable — related pairs converge on shared aspects and preserve contradicting ones.
+   cat≠dog on `sound`" is representable; related pairs converge on shared aspects and preserve contradicting ones.
 3. **[Law D] Position emerges, not assigned.** No path writes a semantic position directly; it settles from κ.
 4. **[Laws C/S] Composites reuse components.** A novel composite over existing components adds O(1) storage;
    N texts over a bounded word set grow O(N+\|Atoms\|).

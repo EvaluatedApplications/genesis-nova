@@ -20,6 +20,7 @@ public class MainWindow : Form
     private readonly GenesisEvalAppRuntime _runtime;
     private readonly string _gymStateDir;
     private readonly bool _seededFromStarter; // true if this fresh start was seeded from the committed repo starter
+    private PrebakeLanguageCurriculum? _prebake; // the run-first language prebake (its difficulty level persists across restarts)
     private CancellationTokenSource? _autonomousTrainingCts;
     private CancellationTokenSource? _gymCts;
     private GymTrainer? _gym;
@@ -1429,9 +1430,16 @@ public class MainWindow : Form
         // retrieval. Training DATA (real words + nonce salt), not a dispatch list — the structure is learned distributionally.
         if (GetControl<CheckBox>("CurPrebakeLanguage")?.Checked ?? false)
         {
-            children.Add(new PrebakeLanguageCurriculum(trainPerCycle: _gymTrainPerCycle));
-            AppendOutput("[train] PREBAKE: language schemas (L1 function-words → L5 multi-sentence; warms the learned structural signal)");
+            // RESUME the difficulty reached on a prior run — the space is checkpointed, so the level must persist too,
+            // else every restart snaps the curriculum back to L1 (function words) and it never ramps in the later skills.
+            var prebakeLvlPath = Path.Combine(_gymStateDir, "prebake-language-level.txt");
+            var prebakeStart = 1;
+            try { if (File.Exists(prebakeLvlPath) && int.TryParse(File.ReadAllText(prebakeLvlPath).Trim(), out var pl) && pl >= 1) prebakeStart = pl; } catch { }
+            _prebake = new PrebakeLanguageCurriculum(trainPerCycle: _gymTrainPerCycle, startLevel: prebakeStart);
+            children.Add(_prebake);
+            AppendOutput($"[train] PREBAKE: language schemas (resume L{prebakeStart}; L1 function-words → L5 multi-sentence)");
         }
+        else _prebake = null;
         if (GetControl<CheckBox>("CurCreators")?.Checked ?? false)
         {
             children.AddRange(CreatorUnit.SkillLadder(trainCount: _gymTrainPerCycle));   // each creator = one focusable trainer
@@ -1592,6 +1600,7 @@ public class MainWindow : Form
             TrainOnFailureOnly = true,                 // don't reinforce already-correct answers; train only failures
         };
         var lastLevels = gymChildren.ToDictionary(g => g, g => g.Level);
+        var lastPrebake = _prebake?.Difficulty ?? 0;
         var lastPersonaLevel = persona?.Level ?? 0;
         await orchestrator.RunAsync(_runtime, curriculum, options, m =>
         {
@@ -1603,6 +1612,13 @@ public class MainWindow : Form
                 lastLevels[g] = g.Level;
                 try { File.WriteAllText(Path.Combine(_gymStateDir, g.Name + "-level.txt"), g.Level.ToString()); } catch { }
                 AppendOutput($"[train] {g.Name} LEVEL → {g.Level}");
+            }
+            // The run-first language prebake persists its difficulty too, so a restart resumes the ladder instead of L1.
+            if (_prebake is not null && _prebake.Difficulty != lastPrebake)
+            {
+                lastPrebake = _prebake.Difficulty;
+                try { File.WriteAllText(Path.Combine(_gymStateDir, "prebake-language-level.txt"), _prebake.Difficulty.ToString()); } catch { }
+                AppendOutput($"[train] prebake LEVEL → {_prebake.Difficulty}");
             }
             // The persona's level grows its pool — when it unlocks a new situation, SEED the now-larger repertoire so
             // the freshly-active intents are retrievable before they're probed next cycle.

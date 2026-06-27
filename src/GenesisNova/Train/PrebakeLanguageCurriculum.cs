@@ -34,29 +34,34 @@ public sealed class PrebakeLanguageCurriculum : ITrainingCurriculum
 
     // ── REAL content in REAL semantic clusters (DATA, not dispatch) ─────────────────────────────────────────
     // Concrete nouns only (no broad words like thing/do/make that distribute like function words and blur the line).
-    private static readonly string[] People = { "sam", "joe", "mia", "ben", "ana", "leo", "kai", "zoe" };
-    // VOCABULARY DIVERSITY is what the clustering signal runs on — a function word separates only because it bridges
-    // MANY distinct, weakly-interconnected content words. A tiny lexicon (~50 words) stays densely interconnected →
-    // high clustering → NO separation at reachable scale (VerbClusteringDiagnostic: 72 words → function 0.88, stuck L1).
-    // So the real content pool is broad (≈100 real words across many domains) + a large NONCE long-tail (below). People
-    // is one CLUSTER among many — subjects draw from the WHOLE pool (see Subj()) so verbs bridge diversely.
+    private static readonly string[] People = { "sam", "joe", "mia", "ben", "ana", "leo", "kai", "zoe", "max", "eve" };
+    // VOCABULARY DIVERSITY is what the clustering signal runs on, and it must be WIDE: a content word stays "content"
+    // only while it co-occurs with enough CONTENT kin. Too few words (or frames that surround content with only function
+    // words) starve it of kin → its neighbourhood collapses to function words → it reads function-like and the signal
+    // erodes (seen at L3). So the pool is broad (17 clusters × 10 ≈ 170 real words across many domains) + a large NONCE
+    // long-tail (below); clusters are DISJOINT (no word in two) so each word has a clear home cluster.
     private static readonly string[][] NounClusters =
     {
-        new[] { "cat", "dog", "bird", "fish", "horse", "cow", "frog", "bee" },         // animals
-        new[] { "red", "blue", "green", "yellow", "black", "white", "pink", "gray" },  // colours
-        new[] { "apple", "bread", "rice", "soup", "cake", "egg", "milk", "pear" },     // food
-        new[] { "park", "house", "school", "shop", "farm", "lake", "road", "hill" },   // places
-        new[] { "car", "ball", "book", "cup", "hat", "key", "box", "door" },           // objects
-        new[] { "hand", "foot", "head", "eye", "ear", "nose", "arm", "leg" },          // body
-        new[] { "shirt", "coat", "shoe", "sock", "dress", "glove", "scarf", "belt" },  // clothes
-        new[] { "bus", "van", "bike", "boat", "train", "plane", "truck", "cart" },     // vehicles
-        new[] { "saw", "hammer", "nail", "rope", "brush", "spoon", "fork", "knife" },  // tools
-        new[] { "tree", "leaf", "rock", "sand", "wind", "rain", "snow", "cloud" },     // nature
-        new[] { "tea", "water", "juice", "wine", "beer", "cola", "broth", "cream" },   // drinks
-        People,                                                                         // people
+        new[] { "cat", "dog", "bird", "fish", "horse", "cow", "frog", "bee", "duck", "goat" },           // animals
+        new[] { "red", "blue", "green", "yellow", "black", "white", "pink", "gray", "brown", "gold" },   // colours
+        new[] { "apple", "bread", "rice", "soup", "cake", "egg", "milk", "pear", "plum", "jam" },         // food
+        new[] { "park", "house", "school", "shop", "farm", "lake", "road", "hill", "town", "beach" },     // places
+        new[] { "car", "ball", "book", "cup", "hat", "key", "box", "door", "lamp", "clock" },             // objects
+        new[] { "hand", "foot", "head", "eye", "ear", "nose", "arm", "leg", "hair", "tooth" },            // body
+        new[] { "shirt", "coat", "shoe", "sock", "dress", "glove", "scarf", "belt", "cap", "boot" },      // clothes
+        new[] { "bus", "van", "bike", "boat", "train", "plane", "truck", "cart", "ship", "jet" },         // vehicles
+        new[] { "saw", "hammer", "nail", "rope", "brush", "spoon", "fork", "knife", "drill", "screw" },   // tools
+        new[] { "tree", "leaf", "rock", "sand", "wind", "rain", "snow", "cloud", "star", "moon" },        // nature
+        new[] { "tea", "water", "juice", "wine", "ale", "cola", "broth", "cream", "soda", "cider" },      // drinks
+        new[] { "chair", "table", "bed", "desk", "shelf", "sofa", "stool", "bench", "crib", "rack" },     // furniture
+        new[] { "drum", "flute", "harp", "horn", "bell", "pipe", "lute", "gong", "reed", "chime" },       // instruments
+        new[] { "rose", "fern", "oak", "vine", "moss", "weed", "bush", "palm", "ivy", "herb" },           // plants
+        new[] { "chef", "nurse", "pilot", "clerk", "guard", "maid", "smith", "monk", "scout", "cook" },   // jobs
+        new[] { "sun", "fog", "ice", "heat", "storm", "frost", "mist", "hail", "dew", "gust" },           // weather
+        People,                                                                                            // people
     };
-    private static readonly string[] Verbs = { "likes", "sees", "has", "wants", "eats", "finds", "knows", "makes", "holds", "needs" };
-    private static readonly string[] Adjs = { "big", "small", "old", "new", "warm", "cold", "fast", "slow", "happy", "tall" };
+    private static readonly string[] Verbs = { "likes", "sees", "has", "wants", "eats", "finds", "knows", "makes", "holds", "needs", "takes", "gives", "keeps", "sends", "brings", "hears", "feels", "loves", "builds", "breaks", "opens", "reads", "draws", "paints" };
+    private static readonly string[] Adjs = { "big", "small", "old", "new", "warm", "cold", "fast", "slow", "happy", "tall", "short", "long", "wide", "soft", "hard", "loud", "quiet", "bright", "dark", "clean", "sharp", "heavy", "light", "smooth" };
 
     // ── NONCE salt: held-out, never real — the clean anchor + the generalisation proof ──────────────────────
     private readonly string[] _nonceNouns, _nonceVerbs, _nonceAdjs;
@@ -76,14 +81,18 @@ public sealed class PrebakeLanguageCurriculum : ITrainingCurriculum
     private readonly Random _rng;
     private readonly int _trainPerCycle;
     private const int MaxLevel = 5;
+    private const double AdvanceBar = 0.65;   // "warm enough" to ramp the next skill in; lower levels keep rehearsing to perfect
+    private const int LevelPatience = 25;     // backstop: never let a slow level stall the whole ladder
     private int _level = 1;
     private int _streak;
+    private int _cyclesAtLevel;
     private bool _mastered;
 
-    public PrebakeLanguageCurriculum(int trainPerCycle = 128, int probeCount = 16, int? seed = null)
+    public PrebakeLanguageCurriculum(int trainPerCycle = 128, int probeCount = 16, int? seed = null, int startLevel = 1)
     {
         _rng = seed is int s ? new Random(s) : new Random();
         _trainPerCycle = Math.Max(16, trainPerCycle);
+        _level = Math.Clamp(startLevel, 1, MaxLevel);  // resume the difficulty reached on a prior run (persisted by the gym)
         var nr = new Random(seed ?? 12345); var used = new HashSet<string>(StringComparer.Ordinal);
         _nonceNouns = BuildNonce(160, nr, used);  // a large long-tail — the diversity the clustering signal runs on
         _nonceVerbs = BuildNonce(24, nr, used);
@@ -106,55 +115,64 @@ public sealed class PrebakeLanguageCurriculum : ITrainingCurriculum
     private string Verb() => _rng.NextDouble() < NonceRate ? Pick(_nonceVerbs) : Pick(Verbs);
     private string Adj() => _rng.NextDouble() < NonceRate ? Pick(_nonceAdjs) : Pick(Adjs);
     private (string A, string B) TwoNouns() { var a = Noun(); string b; do { b = Noun(); } while (b == a); return (a, b); }
+    private (string A, string B, string C) ThreeNouns() { var a = Noun(); string b, c; do { b = Noun(); } while (b == a); do { c = Noun(); } while (c == a || c == b); return (a, b, c); }
 
     // ── The schema ladder. Each returns (Input, Output=the salient content token to recover) ────────────────
-    private (string Input, string Output) Level1() // function-words / fragments
+    private (string Input, string Output) Level1() // function-words / fragments (with content↔content so content keeps kin)
     {
         var n = Noun();
-        return _rng.Next(5) switch
+        switch (_rng.Next(7))
         {
-            0 => ($"{Pick(Det)} {n}", n),
-            1 => ($"{Pick(Poss)} {n}", n),
-            2 => ($"{Pick(Prep)} {Pick(Det)} {n}", n),
-            3 => (TwoNouns() is var (x, y) ? $"{x} {Pick(Conj)} {y}" : n, n),
-            _ => ($"{Pick(Cop)} {n}", n),
-        };
-    }
-    private (string Input, string Output) Predication() // L2
-    {
-        switch (_rng.Next(4))
-        {
-            case 0: { var a = Adj(); return ($"{Subj()} is {a}", a); }                       // copula: sam is happy
-            case 1: { var (n, n2) = TwoNouns(); return ($"{Pick(Poss)} {n} is {n2}", n2); }  // possessive copula
-            case 2: { var o = Noun(); return ($"{Subj()} {Verb()} {Pick(Det)} {o}", o); }    // SVO + det
-            default: { var o = Noun(); return ($"{Subj()} {Verb()} {o}", o); }               // bare SVO
+            case 0: return ($"{Pick(Det)} {n}", n);
+            case 1: return ($"{Pick(Poss)} {n}", n);
+            case 2: return ($"{Pick(Prep)} {Pick(Det)} {n}", n);
+            case 3: { var (x, y) = TwoNouns(); return ($"{x} {Pick(Conj)} {y}", y); }                  // content + content
+            case 4: return ($"{Adj()} {n}", n);                                                        // content + content (adj+noun)
+            case 5: { var (a, b, c) = ThreeNouns(); return ($"{a} {b} {Pick(Conj)} {c}", c); }          // content list
+            default: return ($"{Pick(Cop)} {n}", n);
         }
     }
-    private (string Input, string Output) Questions() // L3 — teach + ask in one (multi-clause)
+    private (string Input, string Output) Predication() // L2 — predication / SVO (content↔content via the verb)
     {
-        switch (_rng.Next(3))
+        switch (_rng.Next(6))
         {
-            case 0: { var s = Subj(); var a = Adj(); return ($"{s} is {a} what is {s}", a); }
+            case 0: { var a = Adj(); return ($"{Subj()} is {a}", a); }                              // copula: sam is happy
+            case 1: { var (n, n2) = TwoNouns(); return ($"{Pick(Poss)} {n} is {n2}", n2); }         // possessive copula
+            case 2: { var o = Noun(); return ($"{Subj()} {Verb()} {Pick(Det)} {o}", o); }           // SVO + det
+            case 3: { var o = Noun(); return ($"{Subj()} {Verb()} {o}", o); }                       // bare SVO
+            case 4: { var o = Noun(); return ($"{Adj()} {Subj()} {Verb()} {o}", o); }               // adj subject + object
+            default: { var o = Noun(); return ($"{Subj()} {Verb()} {Adj()} {o}", o); }              // SVO + adj object
+        }
+    }
+    private (string Input, string Output) Questions() // L3 — teach + ask (subjects kept next to CONTENT, not only glue)
+    {
+        switch (_rng.Next(5))
+        {
+            case 0: { var s = Subj(); var a = Adj(); var o = Noun(); return ($"{s} is {a} and {s} {Verb()} {o} what does {s} have", o); } // s sees adj + object (content)
             case 1: { var s = Subj(); var p = Noun(); return ($"{s} is {Pick(Prep)} the {p} where is {s}", p); }
-            default: { var s = Subj(); var v = Verb(); var o = Noun(); return ($"{s} {v} {o} what does {s} {v}", o); }
+            case 2: { var s = Subj(); var v = Verb(); var o = Noun(); return ($"{s} {v} {o} what does {s} {v}", o); }
+            case 3: { var s = Subj(); var v = Verb(); var (o1, o2) = TwoNouns(); return ($"{s} {v} {o1} and {o2} what does {s} {v}", o2); } // content list near s
+            default: { var s = Subj(); var v = Verb(); var o = Noun(); return ($"{s} {v} the {Adj()} {o} what does {s} {v}", o); }          // adj content near s
         }
     }
     private (string Input, string Output) Modification() // L4 — nested phrases
     {
-        switch (_rng.Next(3))
+        switch (_rng.Next(4))
         {
             case 0: { var n = Noun(); return ($"{Adj()} {Adj()} {n}", n); }
             case 1: { var n = Noun(); return ($"{Pick(Poss)} {Adj()} {n}", n); }
-            default: { var (n, n2) = TwoNouns(); return ($"the {Adj()} {n} {Pick(Prep)} the {n2}", n2); }
+            case 2: { var (n, n2) = TwoNouns(); return ($"the {Adj()} {n} {Pick(Prep)} the {n2}", n2); }
+            default: { var (n, n2) = TwoNouns(); return ($"{Adj()} {n} and {Adj()} {n2}", n2); }       // content + content, both modified
         }
     }
     private (string Input, string Output) Discourse() // L5 — multi-sentence / coreference / paragraphs
     {
-        switch (_rng.Next(3))
+        switch (_rng.Next(4))
         {
-            case 0: { var o = Noun(); var a = Adj(); return ($"{Subj()} {Verb()} {Pick(Det)} {o} . it is {a}", a); }         // coreference
-            case 1: { var o2 = Noun(); return ($"{Subj()} {Verb()} {Noun()} . {Subj()} {Verb()} {o2}", o2); }                // two sentences
-            default: { var s = Subj(); var o = Noun(); return ($"{s} is {Adj()} . {s} {Verb()} {o} . {s} is {Adj()}", o); }  // 3-clause paragraph
+            case 0: { var o = Noun(); var a = Adj(); return ($"{Subj()} {Verb()} {Pick(Det)} {o} . it is {a}", a); }              // coreference
+            case 1: { var o2 = Noun(); return ($"{Subj()} {Verb()} {Noun()} . {Subj()} {Verb()} {o2}", o2); }                     // two sentences
+            case 2: { var s = Subj(); var o = Noun(); return ($"{s} is {Adj()} . {s} {Verb()} {o} . {s} is {Adj()}", o); }        // 3-clause paragraph
+            default: { var (o1, o2) = TwoNouns(); return ($"{Subj()} {Verb()} {o1} . {Subj()} {Verb()} {o2} . they are {Adj()}", o2); } // two minds, content objects
         }
     }
 
@@ -208,8 +226,13 @@ public sealed class PrebakeLanguageCurriculum : ITrainingCurriculum
 
     public void RecordCycle(CycleGrade grade)
     {
-        if (grade.Accuracy >= 0.80) { _streak++; if (_streak >= 3) { _mastered = true; if (_level < MaxLevel) { _level++; _streak = 0; } } }
-        else { _streak = 0; if (grade.Accuracy < 0.55) _mastered = false; }
+        _cyclesAtLevel++;
+        if (grade.Accuracy >= AdvanceBar) _streak++; else _streak = 0;
+        // Ramp the next skill in when the current level is warm enough (held briefly) OR a patience budget elapses, so a
+        // slow-warming level can't block the whole ladder (e.g. the L2 verb plateau). Lower levels keep rehearsing via
+        // Frame, so they keep sharpening after the focus moves on — overlapping-waves acquisition, not master-then-advance.
+        if ((_streak >= 2 || _cyclesAtLevel >= LevelPatience) && _level < MaxLevel) { _level++; _streak = 0; _cyclesAtLevel = 0; }
+        _mastered = _level >= MaxLevel && grade.Accuracy >= AdvanceBar;
     }
 
     // ── DIAGNOSTICS (consumed by the smoke / compatible with the prior function-word curriculum) ─────────────

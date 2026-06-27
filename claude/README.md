@@ -1,26 +1,26 @@
 # Claude tools for Genesis-Nova
 
 The CLI an agent (Claude) uses to **inspect** the trained Genesis-Nova model. `GenesisInspect` is a standalone
-console app that references the `GenesisNova` project (like `bench/RaceBench`); it is **not** part of
+console app that references the `GenesisNova` project (like `bench/RaceBench`). It is **not** part of
 `GenesisNova.slnx`, so it never affects the test suite.
 
 ```
 claude/
-  GenesisInspect/   diagnostic CLI — what the trained model IS + how it answers (the only CLI)
+  GenesisInspect/   diagnostic CLI: what the trained model IS + how it answers (the only CLI)
 ```
 Runtime data (not source) lives at the repo root in **`.claude-nova/`**: the model checkpoint. Checkpoints are
 now a **sharded binary directory + manifest** (`genesis-nova.autosave.checkpoint.json` is the legacy/logical name;
 see `MODEL_STORAGE.md`) plus the platonic substrate's companion shards.
 
 **Memory:** the flat file memory (`MEMORY.md` + its files) is the durable source of truth and is **read
-directly** — there is no daemon or associative index. Continuous skill training lives in the GenesisNova
+directly**. There is no daemon or associative index. Continuous skill training lives in the GenesisNova
 desktop app's **gym** (see `[[nova-gym]]`), not a background CLI.
 
 ## GenesisInspect
 
 Strictly **read-only** inspection of a trained checkpoint. By DEFAULT it inspects the model in
 `<repo>/.claude-nova/` (the NN + its `.platonic.json` companion); pass `--state-dir` to inspect a
-different model — e.g. the desktop app's gym checkpoint at `%LocalAppData%/GenesisNova/gym/`.
+different model, for example the desktop app's gym checkpoint at `%LocalAppData%/GenesisNova/gym/`.
 
 ```bash
 dotnet run --project claude/GenesisInspect -c Release -- report                    # architecture + substrate + capacity
@@ -34,7 +34,7 @@ dotnet run --project claude/GenesisInspect -c Release -- gymprobe 1             
 
 ## How Claude uses this (convention)
 
-- Read `MEMORY.md` directly at the start of a task as a cheap "what do I already know near this?" — the file
+- Read `MEMORY.md` directly at the start of a task as a cheap "what do I already know near this?". The file
   memory is the source of truth; open the linked memory file(s) it points to.
 - After learning durable facts: write them to the file memory (`MEMORY.md` + a file), linked with `[[ ]]`.
 - `GenesisInspect report`/`probe` to check the model's current capabilities before trusting a route.

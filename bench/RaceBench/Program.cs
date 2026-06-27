@@ -34,6 +34,7 @@ var dev = cuda.is_available() ? CUDA : CPU;
 const int HIDDEN = 256, SEED = 7;  // SMALL: nova keeps all faces (poly/log/char/word); the
                                                 // question is whether a transformer this size has the capacity
 var rng = new Random(SEED);
+var maxEpochs = args.Length > 0 && int.TryParse(args[0], out var me) && me > 0 ? me : 10; // fixed-length race (default 10 epochs); a keypress still stops early
 
 // ── Full curriculum: pool every creator, split disjoint train / held-out per creator ─────────────────
 // Plus a LEARNABLE association-recall task (race-local): arithmetic/number-word are computed/codec (nothing to
@@ -96,14 +97,14 @@ P("  GENESIS-NOVA  vs  TRANSFORMER    —    FULL CURRICULUM (every creator), eq
 Rule();
 P($"  device      : {dev.type}");
 P($"  curriculum  : {string.Join(", ", creators.Select(c => c.Name))}");
-P($"  data        : train {train.Count}   held-out {heldAll.Count}   tokenizer shared   (runs until a key is pressed)");
+P($"  data        : train {train.Count}   held-out {heldAll.Count}   tokenizer shared   (racing {maxEpochs} epochs; press a key to stop early)");
 P($"  nova        : {novaParams,10:N0} params   ~{NovaMB,5:F1} MB   (conscious-field cognition over the dialectical substrate, SGD)");
 P($"  transformer : {xf.ParameterCount,10:N0} params   ~{XfMB,5:F1} MB   (d={best.d} L={best.L} h={best.h}, Adam)");
 P($"  budget      : EQUAL PARAMETERS, both SMALL — nova's structure needs little capacity; can a transformer this size find it?");
 Rule();
 P("  GATED RACE — both models train in LOCKSTEP: neither starts epoch N+1 until BOTH have finished epoch N.");
 P("  (per-epoch barrier ⇒ EQUAL training work; GPU kernels serialized on one CUDA stream. Compare held-out at matched epochs.)");
-P("  >>> PRESS ANY KEY to stop the race and print the final per-creator breakdown. <<<");
+P($"  >>> racing {maxEpochs} epochs — press any key to stop early and print the final per-creator breakdown. <<<");
 P("  ──────────────────────────────────────────────────────────────────────────────────────────────────────────");
 
 double Acc(Func<string, string> gen, List<(string Input, string Output)> data)
@@ -148,8 +149,7 @@ void Post(string who, ConsoleColor color, int ep, double tr, double held, double
     }
 }
 
-// Run until the user presses a key (interactive console). A safety cap bounds non-interactive/piped runs.
-const int SAFETYCAP = 100_000;
+// Race a fixed number of epochs (maxEpochs); a keypress stops early in an interactive console.
 var cts = new System.Threading.CancellationTokenSource();
 var keyWatcher = Task.Run(() =>
 {
@@ -162,7 +162,7 @@ var keyWatcher = Task.Run(() =>
 var novaTask = Task.Run(() =>
 {
     var rngN = new Random(SEED + 11);
-    for (var ep = 1; ep <= SAFETYCAP && !cts.IsCancellationRequested; ep++)
+    for (var ep = 1; ep <= maxEpochs && !cts.IsCancellationRequested; ep++)
     {
         var epSw = System.Diagnostics.Stopwatch.StartNew(); // time THIS epoch's work (train + eval), not wall clock
         var order = train.OrderBy(_ => rngN.Next()).ToList();
@@ -189,7 +189,7 @@ var novaTask = Task.Run(() =>
 var xfTask = Task.Run(() =>
 {
     var rngX = new Random(SEED + 22);
-    for (var ep = 1; ep <= SAFETYCAP && !cts.IsCancellationRequested; ep++)
+    for (var ep = 1; ep <= maxEpochs && !cts.IsCancellationRequested; ep++)
     {
         var epSw = System.Diagnostics.Stopwatch.StartNew(); // time THIS epoch's work (train + eval), not wall clock
         var order = train.OrderBy(_ => rngX.Next()).ToList();

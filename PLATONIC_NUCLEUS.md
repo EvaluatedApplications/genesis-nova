@@ -1,15 +1,15 @@
 # The Nucleus & the Cloud — how an element stores data across its dimensions
 
 > Every element is a single vector, but its dimensions are not equal. Some are a **frozen nucleus** — the element's
-> exact, immutable *identity*. The rest are a **free electron cloud** — where *meaning* lives and moves. The nucleus
-> is the fixed structure everything else pivots off of: an element can drift, cluster, and relate in the free
-> dimensions all it likes, and its identity never moves — in the current substrate it is re-derived from the symbol
-> rather than stored, so it cannot drift (the legacy fallback restored the frozen dimensions after every step).
+> exact, immutable *identity*. The rest are a **free electron cloud** — where *meaning* lives and moves. Identity is
+> re-derived from the symbol via the codec rather than stored, so it cannot drift; the only mutable region is the
+> word face `[202,dim)`. An element can drift, cluster, and relate in that free region all it likes, and its
+> identity never moves.
 >
 > This is the genesis dual-face (`research/03-SYMMETRY-BRIDGE` Corr. 7): the **arithmetic face is *like* the
 > proton/nucleus** (crisp, conserved, exact), the **semantic face is *like* the electron orbital** (distributed,
 > probabilistic, mobile).
-> Companions: `PLATONIC_THEORY.md` (the formal model), `PLATONIC_CONSCIOUSNESS.md`, `PLATONIC_RECKONING.md`.
+> Companions: `PLATONIC_THEORY.md` (the formal model), `PLATONIC_CONSCIOUSNESS.md`.
 
 > **On the physics language (read this first).** "Nucleus", "orbital", "proton/electron", "conservation" are an
 > **inspiration — a generative metaphor**, not a claim that the system models physics. A platonic space is a space
@@ -49,7 +49,8 @@ flowchart LR
 ## 1. One vector, two kinds of dimension
 
 A concept is a vector of width `dim` (production 512). Reading left→right is reading from the crisp **nucleus** to
-the diffuse **cloud**:
+the diffuse **cloud**. The boundaries are fixed in `Core/FaceLayout.cs` (`PolyFaceMax = 42`,
+`FaceLayout.cs:29`; `CharFaceStart = 42`, `FaceLayout.cs:58`; `WordFaceStart = 202`, `FaceLayout.cs:64`):
 
 ```mermaid
 flowchart LR
@@ -75,50 +76,52 @@ flowchart LR
   phrase of words**, and this is where a concept's meaning lives as a *cloud*: a superposition of the words and
   phrases it appears with. Ambiguity lives here — a two-sense word is near *both* senses at once.
 
+The **poly + log + char faces are the identity nucleus** (frozen, codec-derived); the **word face `[202,dim)` is
+the single mutable region** for every element.
+
 ---
 
-## 2. What is frozen depends on what the element *is*
+## 2. Identity is codec-derived, never stored
 
-The frozen (identity) region differs by element kind. A number's identity is its *value*; a word's identity is the
-*word itself* (its char-composed form).
+An element stores **only** its learnable orbital — the word face `[202,dim)` — plus its structural part-of edges
+(`Element.cs:25–29`). The whole identity nucleus (the arithmetic poly/log faces and the char face) is **recomputed
+from the symbol via the codec on demand** (`FaceCodec.AssemblePositiveFace`, `FaceCodec.cs:79–99`), so it *cannot*
+drift. The mutable region begins at `FaceCodec.SemanticStart = FaceLayout.WordFaceStart` (`FaceCodec.cs:18–19`) —
+the same offset for **both** numbers and words.
 
-> **How the current substrate realizes this (`Cognition/Platonic/*`, default `UseDialecticalCore=true`).** Identity
-> is not snapped-back after edits — it is **never stored at all**. An element keeps only its learnable orbital (the
-> word face `[202,dim)`) plus its structural part-of edges; the whole identity nucleus (arithmetic + char faces) is
-> **recomputed from the symbol via the codec on demand** (`FaceCodec.AssemblePositiveFace`,
-> `Element.cs:25–29`), so it *cannot* drift. The single mutable region is the word face `[202,dim)`
-> (`FaceCodec.SemanticStart = FaceLayout.WordFaceStart`, `FaceCodec.cs:18–19`) — for **both** numbers and words. So
-> below, treat the char face `[42,202)` and the numeric face `[0,42)` as part of the *codec-derived identity*; only
-> the word/sentence face `[202,dim)` actually moves. (The diagrams keep the original per-kind split for intuition;
-> the legacy `PlatonicSpaceMemory` fallback did snap identity back after each step via `RestoreFrozenIdentity` —
-> the current default avoids drift by never storing identity.)
+So a number's identity is its *value* (read off the poly/log face), and a word's identity is the *word itself* (its
+char-composed form). Both are reconstructed from the symbol, never mutated. Only the word/sentence face `[202,dim)`
+actually moves:
 
 ```mermaid
 flowchart TB
   subgraph NUM["a NUMBER — e.g. 5"]
     direction LR
-    n1["🔒 numeric&nbsp; [0,42)<br/><b>EXACT VALUE</b> — the nucleus"]
-    n2["☁️ word + sentence faces&nbsp; [42,512)<br/>FREE — drifts toward 'five', into phrases & meaning"]
+    n1["🔒 identity&nbsp; [0,202)<br/><b>EXACT VALUE</b> (poly/log) + char form<br/>codec-derived — never stored"]
+    n2["☁️ word face&nbsp; [202,512)<br/>FREE — settles near 'five', into phrases & meaning"]
     n1 --- n2
   end
   subgraph TXT["a WORD — e.g. five, cat"]
     direction LR
-    t1["☁️ numeric&nbsp; [0,42)<br/>FREE — may take on a value"]
-    t2["🔒 'char' face&nbsp; [42,202)<br/><b>THE WORD ITSELF</b> — the nucleus"]
-    t3["☁️ 'word' face&nbsp; [202,512)<br/>FREE — the phrases/sentences it lives in (meaning)"]
-    t1 --- t2 --- t3
+    t1["🔒 identity&nbsp; [0,202)<br/><b>THE WORD ITSELF</b> (char face)<br/>codec-derived — never stored"]
+    t2["☁️ word face&nbsp; [202,512)<br/>FREE — the phrases/sentences it lives in (meaning)"]
+    t1 --- t2
   end
   classDef nuc fill:#922b21,color:#ffffff,stroke:#f1948a,stroke-width:2px;
   classDef free fill:#1a5276,color:#ffffff,stroke:#85c1e9,stroke-width:2px;
-  class n1,t2 nuc;
-  class n2,t1,t3 free;
+  class n1,t1 nuc;
+  class n2,t2 free;
 ```
 
-| element | frozen nucleus (identity) | free cloud (meaning) |
+| element | frozen nucleus (identity, `[0,202)`) | free cloud (meaning, `[202,dim)`) |
 |---|---|---|
-| number `5` | numeric `[0,42)` — the exact value | the word/sentence faces — settles near `five`, gains meaning |
-| word `five` / `cat` | the "char" face `[42,202)` — **the word itself** | numeric + the "word"/sentence face — value + the phrases it appears in |
+| number `5` | numeric `[0,42)` — the exact value | settles near `five`, gains meaning |
+| word `five` / `cat` | the "char" face `[42,202)` — **the word itself** | the phrases / sentences it appears in |
 | sentence / phrase | composed from its word-slots in the "word" face `[202,dim)` | (its meaning cloud) |
+
+A number is routed through the homomorphism and carries no stored orbital for arithmetic, but it still gets a
+semantic position written into the word face (so `5` can settle near `five`) *without* touching its exact
+arithmetic face `[0,42)` (`FaceCodec.cs:91–98`).
 
 ---
 
@@ -154,17 +157,16 @@ ambiguous meaning.
 
 ### Why the cloud can move without ever corrupting identity
 
-Every relational update touches only the free (word-face) dimensions; the nucleus never moves, and the complement
-(`¬e = −e`, G4) is re-enforced. In the current default substrate the nucleus is never *stored*, so it cannot drift
-(it is re-derived from the symbol via the codec); the legacy fallback snapped it back exact after each step
-(`RestoreFrozenIdentity`). Either way, learning is *all* in the cloud:
+Every relational update touches only the free word-face dimensions; the nucleus is never *stored*, so it cannot
+drift (it is re-derived from the symbol via the codec). Learning is *all* in the cloud, and the complement
+(`¬e = −e`, G4) is re-enforced on the assembled face (`FaceCodec.Negate`, `FaceCodec.cs:101–108`):
 
 ```mermaid
 sequenceDiagram
   participant E as element
   participant Obs as observe(a, b, κ)
   Obs->>E: move the FREE word-face orbital toward (agree) / away (contradict) the neighbour
-  Obs->>E: identity stays exact (codec-derived — never stored; legacy fallback snapped it back)
+  Obs->>E: identity stays exact (codec-derived — never stored)
   Obs->>E: enforce ¬e = −e (G4 conservation)
   Note over E: only meaning moved — value & the word itself are untouched
 ```
@@ -173,10 +175,9 @@ sequenceDiagram
 
 ## 4. Why this structure is the right way to store data
 
-- **Identity is permanent and free of charge.** Because identity lives in frozen dims, an element can be pushed
-  anywhere in the cloud and still decode to exactly itself — its value, or the word it is. No amount of relational
-  learning can corrupt what a thing *is*. (Current default: identity is codec-derived and never stored, so it
-  can't drift; the legacy fallback restored it after every move via `RestoreFrozenIdentity`.)
+- **Identity is permanent and free of charge.** Identity is codec-derived and never stored, so it can't drift — an
+  element can be pushed anywhere in the cloud and still decode to exactly itself (its value, or the word it is). No
+  amount of relational learning can corrupt what a thing *is*.
 - **The nucleus is a fixed coordinate frame.** Relations don't float in a vacuum — they pivot off the stable
   nuclei. You always know *what* two elements are; learning only settles *how they relate*.
 - **Exact computation rides the frozen nucleus.** Arithmetic is read straight off the numeric nucleus

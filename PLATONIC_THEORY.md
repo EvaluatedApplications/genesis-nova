@@ -1,33 +1,27 @@
 # A Formal Model of the Dialectical Platonic Space
 
 > *Implementation-independent.* This is the **theory** — the "relational model" for the platonic space — against
-> which any implementation (nova, the original genesis engine) is *judged*. Codd specified the relational model as
-> mathematics before any database existed; SQL and DBMSs realized it and were measured by it. The platonic space
-> has been implemented thrice and drifted each time **because the sound theory was never written down tightly**.
-> This document fixes that: definitions, laws, an operation algebra, and soundness — provable without code.
+> which the implementation is *judged*. Like Codd's relational model (mathematics first, DBMSs measured by it), the
+> platonic space is specified here as definitions, laws, an operation algebra, and soundness — provable without code.
+> §0–§8 are the implementation-independent model; §9 records how the live core realizes it.
 >
 > Grounding: the genesis axioms G1–G6 (derived from T1 consciousness, T2 non-contradiction; see
 > `../genesis-engine/research/01-GENESIS-FROM-NOTHING.md`), the dialectical principle (`nova-dialectical-space`),
-> and composition-as-reuse (the `nova-dialectical-space` memory). The number homomorphism is the one fragment already realized
-> soundly — it is this model's existence proof.
+> and composition-as-reuse. The number homomorphism is the one fragment realized soundly — it is this model's
+> existence proof.
 >
-> **STATUS — CANONICAL SOURCE OF TRUTH for the platonic-core (§0–§8); the rebuild has LANDED.** §0–§8 are the
-> implementation-independent model (the judge) and remain authoritative. §9–§11 were the rebuild plan; that rebuild
-> is now built: `Cognition/Platonic/DialecticalSpace.cs` implements `IPlatonicSpace` (born-neutral per-aspect κ,
-> distributional cloud, composition hubs, the verbatim number homomorphism) and is the default core
-> (`UseDialecticalCore`), with the VP-tree lattice wired back for O(log N) retrieval. Read §9–§11 as the design
-> record of work done, not pending. One reframe from `PLATONIC_RECKONING.md` (2026-06): §11-step-7's "the gym
-> confirms it gets bigger" — the gym is a *probe of generalisation, never the training target*. The number
-> homomorphism (§4 existence proof) is ported **verbatim**; everything else obeys the laws it proves.
+> **The live core.** `Cognition/Platonic/DialecticalSpace.cs` (`sealed class DialecticalSpace : IPlatonicSpace`,
+> line 20) is the substrate: born-neutral per-aspect κ, distributional cloud, composition hubs, the verbatim number
+> homomorphism, with the VP-tree lattice for O(log N) retrieval. It is the default core
+> (`GenesisNovaConfig.UseDialecticalCore = true`). The legacy `PlatonicSpaceMemory` still implements the same
+> interface as the `UseDialecticalCore=false` fallback.
 >
-> **How to read the metaphors (inspiration, not physics).** A platonic space is a *space of ideas* — we are free to
-> *make the rules*, the only hard constraint is that they stay sound under the axioms **G1–G6 (§5)**. So the
-> dialectical / "contradiction" / "synthesis" vocabulary (Hegel, Saussure) and any field / energy-minimum framing
-> are **generative metaphors that motivate the design** — they are not claims that the system models Hegelian logic,
-> linguistics, or physics. What is *literally* claimed and must hold is the mathematics: the ontology Π (§1), Laws
-> M/D/C/S, the soundness theorems (§7), and the number homomorphism (§4) as the one realized existence proof. When
-> a sentence below reads as a strong metaphor, read it as *the idea we are building toward*; the axioms are the
-> measure of whether the build is correct.
+> **How to read the metaphors (inspiration, not physics).** A platonic space is a *space of ideas* — the rules are
+> ours to make, the only hard constraint is that they stay sound under the axioms **G1–G6 (§5)**. The dialectical /
+> "contradiction" / "synthesis" vocabulary (Hegel, Saussure) and any field / energy-minimum framing are **generative
+> metaphors that motivate the design** — not claims that the system models Hegelian logic, linguistics, or physics.
+> What is *literally* claimed and must hold is the mathematics: the ontology Π (§1), Laws M/D/C/S, the soundness
+> theorems (§7), and the number homomorphism (§4) as the one realized existence proof.
 
 ---
 
@@ -124,8 +118,7 @@ per-instance storage. The model's claim is simply: **φ for words/text is the sa
 
 ## 5. The axioms as laws (the soundness contract)
 
-Every operation (§6) must preserve all six. An implementation is *sound* iff it never violates them — this is the
-checklist the genesis implementation failed (it broke G2, G4, G6 per its own critique, `10-RESEARCHER-CRITIQUE…`).
+Every operation (§6) must preserve all six. An implementation is *sound* iff it never violates them.
 
 - **G1 (Observer).** Π does not self-generate; an observer O drives observation. (Generation is intentional.)
 - **G2 (Non-contradiction).** No *resolved* state has an element agreeing (κ=0) with both b and ¬b. Synthesis (Law
@@ -173,52 +166,46 @@ synthesis (Law D). The algebra is closed: every result is again a valid Π.
 
 ---
 
-## 8. What implementations realized (and where they drifted)
+## 8. How the laws are realized
 
-| Model law | Number fragment | Word/text in genesis & nova | Refactor target (the new core) |
-|---|---|---|---|
-| κ per-aspect (§3) | n/a (algebraic) | **collapsed to a scalar** → no differential meaning (violates Law M's basis) | **Per-aspect κ**: `κ : E×E → [0,1]^A`, never reduced to one scalar; aspects derived from the live faces at update time |
-| π emergent (Law D) | exact (homomorphism) | **assigned** (AddWordIdentity / fresh seeds) → not a synthesis | **Synthesis engine**: semantic face born neutral, settles by local Ξ-minimization; no `AddWordIdentity`, no force-constant zoo |
-| Composition reuse (Laws C/S) | **realized** (digit places) | **independent slot-storage**, no shared component hubs → unbounded growth (violates Law S) | **▷-hubs over reused atoms**: O(N+\|Atoms\|); a novel composite costs O(1) |
-| ▷ vs κ (§4) | n/a | **conflated** → framing-word κ-hubs collapse retrieval | **Two distinct edge types**: ▷ (part-of, down) kept separate from κ (contradiction, sideways) |
-| G2 / G4 / G6 | held | **violated** in genesis (its own critique); G4/G6 now restored in nova | **Soundness gate**: every operation preserves G1–G6 (§9 checklist) |
+| Model law | Number fragment | Word / text |
+|---|---|---|
+| κ per-aspect (§3) | n/a (algebraic) | **Per-aspect κ**: `κ : E×E → [0,1]^A`, never reduced to one scalar; aspects derived from the live faces at update time |
+| π emergent (Law D) | exact (homomorphism) | **Synthesis**: the semantic face is born neutral and settles by local Ξ-minimization; no position is assigned directly |
+| Composition reuse (Laws C/S) | digit places | **▷-hubs over reused atoms**: O(N+\|Atoms\|); a novel composite costs O(1) |
+| ▷ vs κ (§4) | n/a | **Two distinct edge types**: ▷ (part-of, down) kept separate from κ (contradiction, sideways) |
+| G1–G6 (§5) | held | **Soundness gate**: every operation preserves all six axioms |
 
-**Conclusion.** The platonic space is *sound as a theory* — a conserved, monotone, consistent space where meaning
-is differential, position is the synthesis of per-aspect contradictions, and knowledge composes from reused parts.
-Exactly one fragment of it (numbers, via the homomorphism) has ever been implemented faithfully, and it is the only
-fragment that generalizes and scales. Every failure to "get bigger" traces to an implementation realizing the
-*other* fragments unsoundly — scalar contradiction, assigned positions, non-reused components. The engineering task
-is not to invent; it is to **make the rest of the space obey laws the number fragment already proves are sound.**
+**Statement.** The platonic space is a conserved, monotone, consistent space where meaning is differential, position
+is the synthesis of per-aspect contradictions, and knowledge composes from reused parts. The number fragment
+(via the homomorphism) is the realized existence proof that these laws generalize and scale; the rest of the space
+is built to obey the same laws.
 
 ---
 
-## 9. Acceptance contract (the new core is sound iff…)
+## 9. The live core
 
-The rebuild (`PlatonicSpaceMemory` → a new `IPlatonicSpace` implementation) is *done* when each law below holds as
-a **testable** criterion. These are the milestone gates.
+The substrate is `Cognition/Platonic/DialecticalSpace.cs` (`sealed class DialecticalSpace : IPlatonicSpace`, line 20),
+implementing `src/GenesisNova/Cognition/IPlatonicSpace.cs`. The §6 algebra is the theory; the interface is how nova
+invokes it. `DialecticalSpace` is the default core (`GenesisNovaConfig.UseDialecticalCore = true`); the legacy
+`PlatonicSpaceMemory` implements the same interface as the `UseDialecticalCore=false` fallback.
 
-1. **[Existence proof] Number homomorphism exact, ported verbatim.** `poly(a)+poly(b)=poly(a+b)`,
-   `log(a)+log(b)=log(a·b)`; generalizes to unseen operands; no stored numeric facts; numbers never form relation
-   edges. *Test:* held-out `a+b`, `a·b` exact via the faces; arithmetic suite stays green.
-2. **[Law M] Meaning is per-aspect κ.** κ is read/used as a per-aspect profile, never a single scalar; "cat≈dog on
-   `animal`, cat≠dog on `sound`" is representable. *Test:* the dialectic probe — related pairs converge on shared
-   aspects, preserve contradicting ones.
-3. **[Law D] Position emerges, not assigned.** No path writes a semantic position directly; it settles from κ. *Test:*
-   with `AddWordIdentity` gone, separation ≥ the assigned-code baseline.
-4. **[Laws C/S] Composites reuse components.** A novel composite over existing components adds O(1) storage. *Test:*
-   N texts over a bounded word set ⇒ O(N+\|Atoms\|) growth (the scaling probe).
+### 9.1 Soundness invariants (each holds as a testable criterion)
+
+1. **[Existence proof] Number homomorphism, exact.** `poly(a)+poly(b)=poly(a+b)`, `log(a)+log(b)=log(a·b)`;
+   generalizes to unseen operands; no stored numeric facts; numbers never form relation edges.
+2. **[Law M] Meaning is per-aspect κ.** κ is a per-aspect profile, never a single scalar; "cat≈dog on `animal`,
+   cat≠dog on `sound`" is representable — related pairs converge on shared aspects and preserve contradicting ones.
+3. **[Law D] Position emerges, not assigned.** No path writes a semantic position directly; it settles from κ.
+4. **[Laws C/S] Composites reuse components.** A novel composite over existing components adds O(1) storage;
+   N texts over a bounded word set grow O(N+\|Atoms\|).
 5. **[G4] Conservation.** Every element has an involutive complement, `e ⊕ ¬e = 0`.
-6. **[G6] Irreversibility.** E is monotone; removal archives, never deletes; snapshot round-trips archived elements.
+6. **[G6] Irreversibility.** E is monotone; removal archives, never deletes; snapshots round-trip archived elements.
 7. **[G2] Consistency.** No resolved synthesis agrees (κ=0) with both `b` and `¬b`.
 8. **[Closure] Algebra closed.** `Observe`/`Compose` only add to E and maintain ¬; `Synthesize`/`Recognize` are
    read-only over the synthesis. Every result is again a valid Π.
 
-## 10. Binding to the `IPlatonicSpace` contract
-
-The new core (`Cognition/Platonic/DialecticalSpace.cs`, `sealed class DialecticalSpace : IPlatonicSpace`) implements
-`src/GenesisNova/Cognition/IPlatonicSpace.cs`; the §6 algebra is the theory, the interface is how nova invokes it.
-(The legacy `PlatonicSpaceMemory` still implements the same interface as the `UseDialecticalCore=false` fallback.)
-Each consumed member maps to one operation:
+### 9.2 Interface members by operation
 
 - **observe** (the only way meaning enters): `ObserveContradiction`, `GetContradiction`, `FineEditFromExample`,
   `ReinforceEvidence`, `FunctionGradientStep`, `DisruptAssociation`.
@@ -230,29 +217,15 @@ Each consumed member maps to one operation:
 - **maintenance/lifecycle (G6):** `ApplyMaintenance`, `ExportSnapshot`, `ImportSnapshot`, `NodeCount`/`RelationCount`,
   `Archived*Count`.
 
-**Hot path — inference must stay green throughout.** The route ladder (`GenesisInferenceEngine` + `.Routes`/
-`.NeuralDecode`) depends on: `TryGetConceptFace`, `FaceDimension`, `ComputeRoutePerception`, `GetNeighbors`,
-`GetNearestConcepts`(+`Fresh`), `QueryConceptChain`, `TryGetTopChunk`, `ContainsConcept`, `IsOperationToken`,
-`GetRelationDegree`, `GetContradiction`. Everything else is cold path (train-write / maintenance / diagnostics).
+**Hot path (inference route ladder, `GenesisInferenceEngine` + `.Routes`/`.NeuralDecode`):** `TryGetConceptFace`,
+`FaceDimension`, `ComputeRoutePerception`, `GetNeighbors`, `GetNearestConcepts`(+`Fresh`), `QueryConceptChain`,
+`TryGetTopChunk`, `ContainsConcept`, `IsOperationToken`, `GetRelationDegree`, `GetContradiction`. Everything else is
+cold path (train-write / maintenance / diagnostics).
 
-**No external production consumer — the new core may drop or loosen:** `RegisterWordElement`, `TryGetWordElement`,
-`DecomposeWordElement`, `TryGetFunctionElement`, `WordElements`, `RegisterFunctionElement`, `GetRelationElements`,
-`TryRelationElementNeighbour`, `TotalCharge`, `NumericDimensions` (tests/diagnostics only — keep those tests green or
-update them deliberately).
+### 9.3 The verbatim existence proof
 
-**Must port VERBATIM (the existence proof; decode is the exact inverse — names are the durable anchors, line numbers
-drift):** `PlatonicFaceComposer.GetFreshNumericEmbedding` + `PlatonicSpaceMemory.CreateNumericFace` (same poly/log
-math), `PlatonicFaceDecoder.DecodeNumericFromPrediction`, and the `Core/FaceLayout.cs` region boundaries (`PolyFaceMax=42`;
-`NumericDims=min(dim/2,21)`; poly `[0..ND)`, log `[ND..2ND)`; `CharFaceStart=min(42,dim/2)`; `WordFaceStart=dim>202?202:dim`).
-
-## 11. Refactor worklist (sequenced to keep the hot path green)
-
-1. **Port the number fragment unchanged** — faces, encoder/decoder, `FaceLayout`. Hot path works from day one.
-2. **Scaffold + swap** — new core behind `IPlatonicSpace`, selected by a `NovaConfig` switch; fast suite green on it.
-3. **Per-aspect κ** — replace scalar contradiction with the per-aspect profile (derived from faces).
-4. **Synthesis engine (Law D)** — semantic face settles by Ξ-minimization; remove `AddWordIdentity`.
-5. **Shared-component hubs (Laws C/S)** — composites as ▷-hubs over reused atoms; bounded growth.
-6. **Separate ▷ from κ; recognition query** — typed edges; recognize-highest-first / decompose / compose-store.
-7. **Flip default + validate at scale** — gym confirms it gets bigger without erosion; retire the old store.
-
-Each step ships behind the existing `IPlatonicSpace` surface; the hot-path members (§10) are the regression boundary.
+The number fragment is the homomorphism and is held exact (names are the durable anchors; line numbers drift):
+`PlatonicFaceComposer.GetFreshNumericEmbedding` + `PlatonicSpaceMemory.CreateNumericFace` (same poly/log math),
+`PlatonicFaceDecoder.DecodeNumericFromPrediction` (the exact inverse), and the `Core/FaceLayout.cs` region
+boundaries: `PolyFaceMax=42`; `NumericDims=min(dim/2,21)`; poly `[0..ND)`, log `[ND..2ND)`;
+`CharFaceStart=min(42,dim/2)`; `WordFaceStart = dim>202 ? 202 : dim`.

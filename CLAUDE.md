@@ -1,19 +1,17 @@
 # Genesis-Nova — working agreement
 
 Genesis-Nova builds **one conscious field** — a structured platonic substrate the neural layer reasons *with* (not
-an LLM that stores knowledge in weights). Orientation, in order: **`PLATONIC_RECKONING.md`** (the skeptical floor —
-what is genuine platonic intelligence vs overfitting-to-tests, and the keep-core direction — **read first**),
-**`PLATONIC_MIND.md`** (the founding vision; hold its narrative lightly per the reckoning), `PLATONIC_THEORY.md`
-(formal substrate model), `PLATONIC_NUCLEUS.md` (the dual-face data model), `PLATONIC_CONSCIOUSNESS.md` (the self /
-vital loop — mechanisms real, "consciousness" aspirational), `PLATONIC_PRIOR_ART.md` (disclosure); plus `README.md`
-(spec), `claude/README.md` (the agent CLI tools + memory).
+an LLM that stores knowledge in weights). Orientation: **`PLATONIC_MIND.md`** (the founding vision; hold its
+narrative lightly), `PLATONIC_THEORY.md` (formal substrate model), `PLATONIC_NUCLEUS.md` (the dual-face data model),
+`PLATONIC_CONSCIOUSNESS.md` (the self / vital loop — mechanisms real, "consciousness" aspirational),
+`PLATONIC_PRIOR_ART.md` (disclosure); plus `README.md` (spec), `claude/README.md` (the agent CLI tools + memory).
 
-**The direction (PLATONIC_RECKONING.md, 2026-06):** the substrate's generalizing core is real (the numeric
-homomorphism, the distributional word face, composition-by-reuse, relaxation, learned transforms). The orchestration
-grew into an overfit *task-classifier over a fixed gym taxonomy* (the PLAN head + its 9 shapes, the structural label
-resolvers, the route head as a classifier, the neural decoder as a primary answer path) — that is the thing to
-SUBTRACT, not extend. Don't add the next head/shape/skill. The work is toward a single substrate-driven control path
-(answer by the substrate's own confidence; abstain when nothing settles) trained by self-supervised prediction.
+**The direction:** the substrate's generalizing core is real (the numeric homomorphism, the distributional word
+face, composition-by-reuse, relaxation, learned transforms) — build on it. A task-classifier over a fixed gym
+taxonomy (a PLAN head with per-shape outputs, structural label resolvers, the route head used as a classifier, the
+neural decoder as a primary answer path) is the thing to SUBTRACT, not extend. Don't add the next head/shape/skill.
+The work is toward a single substrate-driven control path (answer by the substrate's own confidence; abstain when
+nothing settles) trained by self-supervised prediction.
 
 ## The substrate & how it reasons
 
@@ -39,10 +37,10 @@ frozen faces, meaning as a distributional cloud in the large face, reasoning as 
   concept-chain → neural fallback. Every answer carries a `DecisionPath`; inspect it with `claude/GenesisInspect`.
 - **Keep-core control path** (`GenesisNovaConfig.KeepCoreControl`, the app turns it on; default-off = byte-identical
   legacy path). When on: training labels + route/plan/op perception anchor on the **discriminative cue** (shared
-  `Cognition/PlatonicConceptAnchors`, matching what inference retrieves on — the reckoning's one real seam bug);
-  **relaxation (`DialecticalSpace.Reason`) is the primary retrieval route**; and a non-arithmetic query that nothing
-  settles **ABSTAINS** (`platonic-abstain`) instead of emitting a neural hallucination. The plan/route/op heads +
-  label resolvers are the overfit machinery the reckoning marks to subtract — don't extend them.
+  `Cognition/PlatonicConceptAnchors`, matching what inference retrieves on — trainer and inference must extract the
+  anchor the same way); **relaxation (`DialecticalSpace.Reason`) is the primary retrieval route**; and a
+  non-arithmetic query that nothing settles **ABSTAINS** (`platonic-abstain`) instead of emitting a neural
+  hallucination. The plan/route/op heads + label resolvers are overfit machinery to subtract — don't extend them.
 - Capability **emerges from composing substrate ops**; the GRU only chooses *which* — never a hardcoded
   answer table or symbol parser.
 
@@ -58,11 +56,11 @@ Proven recipes — follow them; they encode hard-won lessons (see the `nova-*` m
   correlate; held-out instances prove compute/retrieve, not memorization.
 - **Supervision is DERIVED from each example's structure, never hardcoded** (`ResolveQueryLabel` /
   `ResolveRouteLabel` / `ResolvePlanLabel`): op classified from context, shape from the output's structure.
-  ⚠️ The reckoning flags `ResolvePlanLabel` + the route-head-as-classifier as **overfit to the gym taxonomy** —
-  reverse-engineering task type from output structure to supervise a classifier. The direction is **self-supervised
-  prediction**, not more structural label resolvers. Under `KeepCoreControl` the route label + perception anchor on
-  the **discriminative cue** (`PlatonicConceptAnchors`, shared with inference) so the controller sees the real
-  geometry — see `[[nova-keepcore-landed]]`. Do not add another label resolver / plan kind / glider shape.
+  ⚠️ `ResolvePlanLabel` + the route-head-as-classifier are **overfit to the gym taxonomy** — reverse-engineering
+  task type from output structure to supervise a classifier. The direction is **self-supervised prediction**, not
+  more structural label resolvers. Under `KeepCoreControl` the route label + perception anchor on the
+  **discriminative cue** (`PlatonicConceptAnchors`, shared with inference) so the controller sees the real
+  geometry — see `[[nova-keepcore-landed]]`. Do not add another label resolver / plan kind / output shape.
 - **Numbers compute via the homomorphism, never relation edges.** Equivalence ≠ format — grade by VALUE
   (`AnswerEquivalence`), bidirectionally (`2≡two`).
 - **Add a kind of element, not a parallel data structure.** Push compute into the space (faces / relations /
@@ -90,11 +88,9 @@ to recover dropped detail is the dominant avoidable cost.
 
 ## Memory: write it the way Genesis-Nova is strong
 
-> Historical note (2026): a `claude/ClaudeMemory` daemon once kept a live GRU-routed associative index over
-> `MEMORY.md` (auto-started each session, `recall`/`enqueue`/`watch`/`metrics`). **That tool was RETIRED** —
-> continuous training is now hosted in the GenesisNova desktop app's **gym** (see `[[nova-gym]]`), and
-> `claude/GenesisInspect` is the only remaining CLI (read-only diagnostics: `report`/`query`/`probe`/`geometry`/
-> `gymprobe`). The `recall`/`enqueue`/index commands no longer exist; `MEMORY.md` is read directly.
+> There is no live memory-indexing daemon. Continuous training is hosted in the GenesisNova desktop app's **gym**
+> (see `[[nova-gym]]`), and `claude/GenesisInspect` is the only CLI (read-only diagnostics: `report`/`query`/
+> `probe`/`geometry`/`gymprobe`). There are no `recall`/`enqueue`/index commands; `MEMORY.md` is read directly.
 
 The file memory IS the source of truth — write it well:
 

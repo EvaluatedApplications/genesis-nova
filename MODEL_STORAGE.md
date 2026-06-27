@@ -1,36 +1,30 @@
 # Genesis-Nova — Model Storage & Sharing
 
-How a Genesis-Nova model is saved, sharded, shared via git, and forked. The goal: **a starter model people
-clone from the repo, train their own fork locally, and PR a better one back — after tests verify it.**
+How a Genesis-Nova model is stored, shared via git, seeded, and promoted. A starter model lives in the repo;
+people clone it, train their own fork locally in the in-app **gym**, and PR a better one back after tests verify it.
 
 ---
 
 ## 1. Two tiers: shared vs local
 
-A checkpoint mixes three things; we split them along the **shared / local** seam:
+A checkpoint splits along the **shared / local** seam:
 
 | Tier | Contents | Lives in | Git |
 |---|---|---|---|
-| **Shared model** — the starter everyone forks | vocab, embeddings, output/route/edit heads, **GRU gates**, learned spacing/casing, **+ the platonic substrate** | `models/genesis-nova/` (+ pointer `models/genesis-nova.json`, substrate `models/genesis-nova.platonic/`) | committed |
-| **Local working state** — per user | the user's evolving fork as the in-app **gym** trains it, curriculum/mastery, metrics/logs | `%LocalAppData%/GenesisNova/gym/` | not committed |
+| **Shared starter** — what everyone forks | vocab, embeddings, output/route/edit heads, GRU gates, learned spacing/casing, **+ the platonic substrate** | `models/genesis-nova/` (+ pointer `models/genesis-nova.json`, substrate `models/genesis-nova.platonic/`) | committed |
+| **Local working state** — per user | the user's evolving fork as the in-app gym trains it, curriculum/mastery, metrics/logs | `%LocalAppData%/GenesisNova/gym/` | not committed |
 
-The committed starter is a **read-only baseline**. On first run the app **seeds** it into the local gym working
-dir (`GenesisShardedCheckpointStore.SeedFromStarter`, called from `MainWindow`) and trains *that*; the repo model
-only changes when someone **promotes** a fork (`PromoteToStarter`) and opens a PR.
-
-> The committed starter is **three parts**, all tracked (see `.gitignore`): the pointer `models/genesis-nova.json`,
-> the model dir `models/genesis-nova/`, and the substrate dir `models/genesis-nova.platonic/`. A clone with no local
-> gym checkpoint seeds from these; once a local checkpoint exists, the gym fork evolves on its own and is never
-> overwritten.
+The committed starter is a read-only baseline. The repo model changes only when someone promotes a fork and opens a PR.
+The committed starter is **three tracked parts** (`.gitignore:10-12`): the pointer `models/genesis-nova.json`, the model
+dir `models/genesis-nova/`, and the substrate dir `models/genesis-nova.platonic/`.
 
 ---
 
 ## 2. Binary, all-`double`
 
-Weights are stored as raw little-endian **`double`** (8 bytes), not JSON text or `float32`:
-- **Exact resume.** The starter exists to be *trained further*; `float32` injects rounding the moment a forker
-  continues, and that drift compounds down a fork chain. `double` keeps a continued fork bit-faithful.
-- **Smaller + faster than JSON** anyway (~3× smaller, far quicker to parse than text `double[]`).
+Weights are stored as raw little-endian **`double`** (8 bytes), not JSON text or `float32`. The starter exists to be
+*trained further*; `double` keeps a continued fork bit-faithful (no rounding drift down a fork chain) and is ~3× smaller
+and faster to parse than text.
 
 ---
 
@@ -41,89 +35,63 @@ A model is a **directory of small binary shards + a text manifest**, not one blo
 ```
 models/genesis-nova/
   manifest.json              # text — the reviewable, PR-able unit
-  shards/<sha256>.gnv         # small binary double shards, content-addressed
+  shards/<sha256>.gnv        # small binary double shards, content-addressed
 ```
 
-**Shard size: 32 MiB target** (`GenesisShardedCheckpointStore.TargetShardBytes`). Why:
-- GitHub **warns at 50 MB**, **blocks at 100 MB** per file. A single GRU matrix at HiddenSize 2048 is ~100 MB —
-  already over the limit — so even one tensor *must* split.
-- 32 MiB sits comfortably under the 50 MB warning (no GitHub nags), splits a ~100 MB tensor into ~4 shards and a
-  full ~460 MB model into ~15 — a **flat, simple `shards/` directory**, not a sprawling tree (git stays sane).
-- Power-of-two aligned; tunable in one constant.
+**Shard size: 32 MiB target** (`GenesisShardedCheckpointStore.TargetShardBytes`, `GenesisShardedCheckpointStore.cs:19`).
+This sits under GitHub's 50 MB warning / 100 MB block per file, so a single ~100 MB GRU matrix (HiddenSize 2048) splits
+into ~4 shards and a full ~460 MB model into ~15 — a flat `shards/` directory, not a sprawling tree.
 
-**Content-addressed (hash-named):** a shard's filename is its SHA-256. So:
-- identical shards across forks/saves are stored **once** (dedup),
-- a "better model" PR is a **manifest diff** (text, reviewable) plus only the shards that actually changed,
-- shards are content-addressed, so they double as portable artifacts for fork/share flows.
+**Content-addressed (hash-named):** a shard's filename is its SHA-256. Identical shards across forks/saves are stored
+**once** (dedup); a "better model" PR is a **manifest diff** (text, reviewable) plus only the shards that changed.
 
-**Sectioned**, so an unchanged tensor keeps its hash and isn't rewritten. Each section
-(`embeddings`, `outputWeights`, `gruWih`, … plus JSON sections like `config`, `vocab`, `spacingModel`) records
-its `kind` (`f64` / `json`), shape, and ordered shard hashes in the manifest. Big `f64` tensors are raw doubles;
-small structured state is UTF-8 JSON — both chunked the same way.
+**Sectioned**, so an unchanged tensor keeps its hash and isn't rewritten. Each section (`embeddings`, `outputWeights`,
+`gruWih`, … plus JSON sections like `config`, `vocab`, `spacingModel`) records its `kind` (`f64` / `json`), shape, and
+ordered shard hashes in the manifest. Big `f64` tensors are raw doubles; small structured state is UTF-8 JSON.
 
-The **platonic substrate** is a *separate* sharded directory (`…/<name>.platonic/`) so it can be reset (delete
-the dir) without disturbing the long-lived NN — preserving the existing "wipe space, keep GRU" behaviour.
+The **platonic substrate** is a *separate* sharded directory (`…/<name>.platonic/`, `GenesisShardedCheckpointStore.cs:28`)
+so it can be reset (delete the dir) without disturbing the long-lived NN — the "wipe space, keep GRU" behaviour.
 
-> When the committed total approaches ~1 GB, move the large shards to **Git LFS** or distribute them as a
-> **GitHub Release asset / download-on-first-run**. The manifest stays the source of truth, so this switch does
-> **not** change the fork/PR workflow — only where the bytes live.
+A per-save **generation** id is stamped on the model manifest, the substrate manifest, and the pointer marker, so a load
+verifies all parts came from the same save and rejects a torn (crash-interrupted) checkpoint.
+
+The loader reads this sharded format. A one-time legacy-JSON migration path also exists for older single-file checkpoints.
 
 ---
 
-## 4. Backwards compatibility + cleanup
+## 4. Seed & promote
 
-Older checkpoints are the single JSON file `genesis-nova.autosave.checkpoint.json` (+ `*.platonic.json`
-companion), `Version ≤ 3`.
+**Seed** (`GenesisShardedCheckpointStore.SeedFromStarter`, `GenesisShardedCheckpointStore.cs:184`): if NO local gym
+checkpoint exists yet and the committed starter is present and consistent, the app copies the starter's pointer + model +
+substrate into the local gym dir, so a clone / fresh machine begins from the warmed model instead of an empty brain.
+It is a **no-op** once a local checkpoint exists (the local fork then evolves independently and is never overwritten) or
+if the starter is absent / torn. Called on startup from `MainWindow` (`MainWindow.cs:61`), before the runtime resumes.
 
-- **Migrate on first load.** If the sharded model dir is absent but the legacy JSON exists, load it with the
-  legacy reader, re-save in the sharded binary format, then **clean up** the legacy files (move them to a
-  `.legacy-backup/` subdir of the state dir — out of the active directory so there's **no confusion about what's
-  relevant**, but recoverable). One-time, idempotent. (`GenesisCheckpointStore.MigrateLegacyToSharded`,
-  `ResolveStored`.)
-- **Delayed hard delete.** The legacy-JSON reader + migration path is marked `// LEGACY: delete after <release>`
-  to be removed once migration is proven in the wild.
-- Your current 2048 / face-512 model migrates cleanly (dims, vocab, GRU, substrate all carry over).
+**Promote** (`GenesisShardedCheckpointStore.PromoteToStarter`, `GenesisShardedCheckpointStore.cs:171`): copies a local
+fork's pointer + model + substrate (mirroring the destination) into the starter location (`models/genesis-nova{.json,/,.platonic/}`)
+so it can be committed and opened as a PR. It is **test-covered but not yet exposed as a UI/CLI action** — promotion is a
+deliberate, manual step.
+
+Both take POINTER paths (the `.json` marker); the model/substrate dirs derive from them.
 
 ---
 
 ## 5. Fork & contribute flow
 
 1. `git clone` → `models/genesis-nova{.json,/,.platonic/}` is your starter.
-2. **Seed on app start**: if there's no local gym checkpoint yet, the app copies the committed starter →
-   `%LocalAppData%/GenesisNova/gym/` (`SeedFromStarter`, from `MainWindow`); the in-app **gym** then trains *that*
-   fork locally. The committed starter is untouched; once a local checkpoint exists, seeding is a no-op.
-3. **Promote**: `GenesisShardedCheckpointStore.PromoteToStarter` copies your local fork (pointer + model +
-   substrate, mirroring the destination) into a fresh `models/genesis-nova{.json,/,.platonic/}` (new manifest +
-   changed shards), which you commit and open a PR for.
-4. **CI verifies** before merge — held-out generalisation, equal-budget "is it actually better?" (RaceBench),
-   regime/retention suites. Manifest lineage + content hashes track provenance.
-
-So "start from my work, train your own, PR a better one" falls straight out of the layout.
-
-> Status: `SeedFromStarter` is wired (`MainWindow`, runs on startup). `PromoteToStarter` exists and is
-> test-covered (`Tests/StarterSeedPromoteTests.cs`) but is **not yet exposed as a UI/CLI action** — promotion is a
-> deliberate, manual step. The old `ClaudeMemory` daemon `serve`/`promote` flow this section once described is
-> **retired**; continuous training is hosted in the in-app gym.
+2. **Seed on app start**: with no local gym checkpoint, the app copies the committed starter →
+   `%LocalAppData%/GenesisNova/gym/`; the in-app **gym** trains *that* fork locally. The committed starter is untouched.
+3. **Promote**: copy the local fork back into a fresh `models/genesis-nova{.json,/,.platonic/}` (new manifest + changed
+   shards), commit, and open a PR.
+4. **CI verifies** before merge — held-out generalisation, equal-budget "is it actually better?" (RaceBench), regime /
+   retention suites. Manifest content hashes track provenance.
 
 ---
 
-## 6. Roadmap
-
-1. **Binary sharded store + manifest + migration + cleanup** — behind the existing Save/Load surface (this doc's
-   core). ← *done*
-2. Repo `models/` layout + seed-from-starter-on-first-run + `promote`/`export`. ← *seed + promote landed*
-   (`SeedFromStarter`/`PromoteToStarter`); manifest lineage/hash field and a promote UI/CLI action still pending.
-3. PR-with-tests CI verification gate. ← *pending*
-4. Training-set generator packages (`ITrainingSetGenerator` — the "ability library").
-5. P2P platonic-element coordination (reuses `ExportSnapshot`/`ImportSnapshot` + reliability/UCB +
-   content-addressed shards).
-
----
-
-## 7. On-disk reference
+## 6. On-disk reference
 
 ```
-models/genesis-nova.json             # SHARED (committed) — the pointer marker (commit of a save)
+models/genesis-nova.json             # SHARED (committed) — the pointer marker
 models/genesis-nova/                 #   the model dir
   manifest.json                      #     sections → shard hashes, dims, generation
   shards/<sha256>.gnv                #     32 MiB content-addressed double shards
@@ -134,5 +102,4 @@ models/genesis-nova.platonic/        #   substrate (separate → resettable), sa
   genesis-nova.autosave.checkpoint/          # the local fork (sharded, same format)
   genesis-nova.autosave.checkpoint.platonic/
   gym-<skill>-level.txt / personality-level.txt   # per-muscle curriculum levels
-  .legacy-backup/                            # migrated-away legacy JSON (safe to delete)
 ```

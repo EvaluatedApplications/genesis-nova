@@ -124,31 +124,29 @@ composing substrate operations** — the controller learns only *which* operatio
 hardcoded parser. The network has zero parameters of the substrate's width; the two are bridged by concept↔token
 correspondence, so substrate width and controller capacity are chosen independently.
 
-In the current primary control path the substrate's own settling drives selection directly: a capability is chosen
-by the *structure* of the prompt (which operands, operators, and cues are present) and each reduction runs on the
+In the primary control path the substrate's own settling drives selection directly: a capability is chosen by the
+*structure* of the prompt (which operands, operators, and cues are present) and each reduction runs on the
 substrate's general primitives, with the network's classification heads bypassed; a query that nothing settles
-**abstains** rather than emitting an invented answer. (The classifier heads remain as a legacy, off-by-default
-selection path; the reduction logic they once selected was always classifier-free.) The disclosed novelty is the
-ladder of abstaining substrate operations and the thin-controller/substrate split, independent of which selection
-path drives it.
+**abstains** rather than emitting an invented answer. (Classifier heads remain as a legacy, off-by-default selection
+path; the reduction logic they select is itself classifier-free.) The disclosed novelty is the ladder of abstaining
+substrate operations and the thin-controller/substrate split, independent of which selection path drives it.
 
 ## 8. Persistent self-state (disclosed component)
 
-We further disclose a **persistent self-state** that is held in the substrate's own meaning-space (the large
-relational face) rather than as a hidden weight vector. It is a decaying accumulation of the meaning-clouds (§5) of
-the concepts cognition has recently attended to; it is *not* reset between inputs. This self-state (i) conditions
+We disclose a **persistent self-state** that is held in the substrate's own meaning-space (the large relational
+face) rather than as a hidden weight vector. It is a decaying accumulation of the meaning-clouds (§5) of the
+concepts cognition has recently attended to; it is *not* reset between inputs. This self-state (i) conditions
 reasoning by biasing the substrate's relaxation/retrieval toward the accumulated context (so an ambiguous query is
 resolved in the direction of what the system has been "thinking about"), and (ii) is itself shaped by learning —
 the same clouds the system sharpens by observation are what the self is built from. Because identity lives in the
 frozen faces and is conserved (§6), the substrate's learned state survives eviction (archival) and can be restored
 from conserved memory if re-observed.
 
-> *Inspirational framing (not a literal claim).* Earlier descriptions of this component used the language of a
-> "homeostatic loop", a committed identity "setpoint" restored under "perturbation", and a measurable "cognitive
-> reach". Those terms are generative metaphor for the conserved/archival mechanism above (G4 conservation, G6
-> irreversibility); they are not a claim that the system implements biological homeostasis or possesses
-> consciousness. The earlier GRU-hidden recurrent-self/perturbation apparatus is not part of the current
-> implementation; the self-state is the meaning-space accumulation described here.
+> *Inspirational framing (not a literal claim).* The language of a "homeostatic loop", a committed identity
+> "setpoint" restored under "perturbation", and a measurable "cognitive reach" is generative metaphor for the
+> conserved/archival mechanism above (G4 conservation, G6 irreversibility); it is not a claim that the system
+> implements biological homeostasis or possesses consciousness. The self-state is the meaning-space accumulation
+> described here, not a recurrent hidden weight vector.
 
 ## 9. Enumerated claims of novelty
 
@@ -180,8 +178,8 @@ codebase (faces in `Core/FaceLayout.cs` and `Core/PlatonicFaceComposer.cs`; the 
 `Cognition/Platonic/` — e.g. `DialecticalSpace.cs`, `Element.cs`, `ElementStore.cs`; the field-cognition control
 path in `Infer/GenesisInferenceEngine.Field.cs`; the controller in `Model/`). Companion design documents:
 `PLATONIC_THEORY.md` (formal model), `PLATONIC_NUCLEUS.md` (the dual-face data model), `PLATONIC_MIND.md` (the
-founding vision, held lightly per `PLATONIC_RECKONING.md`), and `PLATONIC_CONSCIOUSNESS.md` (the self-state
-component — its mechanisms are real, its "consciousness" language aspirational; see the §8 framing note above).
+founding vision, held lightly), and `PLATONIC_CONSCIOUSNESS.md` (the self-state component — its mechanisms are real,
+its "consciousness" language aspirational; see the §8 framing note above).
 
 ---
 

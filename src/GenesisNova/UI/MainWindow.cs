@@ -1,3 +1,4 @@
+using GenesisNova.Cognition.Platonic;
 using GenesisNova.Core;
 using GenesisNova.Data;
 using GenesisNova.Runtime;
@@ -20,7 +21,6 @@ public class MainWindow : Form
     private readonly GenesisEvalAppRuntime _runtime;
     private readonly string _gymStateDir;
     private readonly bool _seededFromStarter; // true if this fresh start was seeded from the committed repo starter
-    private PrebakeLanguageCurriculum? _prebake; // the run-first language prebake (its difficulty level persists across restarts)
     private CancellationTokenSource? _autonomousTrainingCts;
     private CancellationTokenSource? _gymCts;
     private GymTrainer? _gym;
@@ -29,10 +29,14 @@ public class MainWindow : Form
     private double _lastLoss, _lastAcc, _lastRoute, _lastConf;
     private double _gymBar = 0.90;
     private int _gymTrainPerCycle = 256;
-    private int _gymThrottlePct = 100;  // 0..500 — rest this % of the last cycle's time between cycles (0 = full speed)
+    private int _gymThrottlePct = 0;  // 0..500 — rest this % of the last cycle's time between cycles (0 = full speed)
     private HttpListener? _control;
     private string _exampleFolder;
     private TabControl _tabControl = null!;
+    private readonly List<(int Cycle, double Acc, double Loss)> _warmHistory = new(); // Inspect-tab warming curve
+    private System.Windows.Forms.Timer? _inspectTimer;
+    private volatile bool _inspectReading;
+    private string[]? _inspectGlue, _inspectContent; // probe words pulled from the LIVE foundation vocabulary (so the table shows trained words)
     private bool _replTraceEnabled;
     private PlatonicActivationView? _latestActivation;
     private int _activeTrainingOperations;
@@ -97,7 +101,8 @@ public class MainWindow : Form
             BringToFront();
             if (_seededFromStarter)
                 AppendOutput("[seed] fresh start — seeded the gym from the committed repo starter (models/genesis-nova)");
-            StartGym(); // host the gym in-app: on startup, run what the daemon used to do
+            // Gym no longer AUTO-STARTS on launch (user preference) — the model loads idle; press "▶ Start Gym" to train.
+            AppendOutput("[gym] ready — auto-start disabled. Press ▶ Start Gym to begin training.");
             StartControlServer(); // headless control endpoint so tools/Claude can drive the live model
         };
         
@@ -132,6 +137,9 @@ public class MainWindow : Form
 
         // Tab 2: REPL
         _tabControl.TabPages.Add(CreateReplTab());
+
+        // Tab 3: Inspect — live view of the platonic space (the foundation-warming debugger)
+        _tabControl.TabPages.Add(CreateInspectTab());
 
         Controls.Add(_tabControl);
     }
@@ -182,7 +190,7 @@ public class MainWindow : Form
         flow.Controls.Add(new NumericUpDown { Name = "GymTrainPerCycle", Width = 120, Minimum = 16, Maximum = 256, Increment = 16, Value = 256 });
 
         flow.Controls.Add(new Label { Text = "Throttle (% backoff of last cycle time)", AutoSize = true, Margin = new Padding(0, 12, 0, 2) });
-        var throttleNum = new NumericUpDown { Name = "GymThrottle", Width = 120, Minimum = 0, Maximum = 500, Increment = 25, Value = 100 };
+        var throttleNum = new NumericUpDown { Name = "GymThrottle", Width = 120, Minimum = 0, Maximum = 500, Increment = 25, Value = 0 };
         throttleNum.ValueChanged += (s, e) => _gymThrottlePct = (int)throttleNum.Value; // live — applies next cycle, no restart
         flow.Controls.Add(throttleNum);
 
@@ -196,7 +204,7 @@ public class MainWindow : Form
         static CheckBox Cur(string name, string text, bool runFirst = false) =>
             new() { Name = name, Text = text, Checked = runFirst, AutoSize = true, Margin = new Padding(20, 1, 0, 1) };
 
-        flow.Controls.Add(Cur("CurPrebakeLanguage", "Prebake — language schemas (function words → SVO → questions → nesting → multi-sentence)", runFirst: true));
+        flow.Controls.Add(Cur("CurPrebakeLanguage", "Prebake — warm function-word recognition from BOTH a real text corpus (Wikipedia) + synthetic L1", runFirst: true));
         flow.Controls.Add(Cur("CurOpCues", "Op-cue words — sum / difference / product / quotient → operator"));
         flow.Controls.Add(Cur("CurNumberWords", "Number words — digit ↔ word lexicon"));
         foreach (var skill in Enum.GetValues<GenesisNova.Train.GymSkill>())
@@ -1430,16 +1438,16 @@ public class MainWindow : Form
         // retrieval. Training DATA (real words + nonce salt), not a dispatch list — the structure is learned distributionally.
         if (GetControl<CheckBox>("CurPrebakeLanguage")?.Checked ?? false)
         {
-            // RESUME the difficulty reached on a prior run — the space is checkpointed, so the level must persist too,
-            // else every restart snaps the curriculum back to L1 (function words) and it never ramps in the later skills.
-            var prebakeLvlPath = Path.Combine(_gymStateDir, "prebake-language-level.txt");
-            var prebakeStart = 1;
-            try { if (File.Exists(prebakeLvlPath) && int.TryParse(File.ReadAllText(prebakeLvlPath).Trim(), out var pl) && pl >= 1) prebakeStart = pl; } catch { }
-            _prebake = new PrebakeLanguageCurriculum(trainPerCycle: _gymTrainPerCycle, startLevel: prebakeStart);
-            children.Add(_prebake);
-            AppendOutput($"[train] PREBAKE: language schemas (resume L{prebakeStart}; L1 function-words → L5 multi-sentence)");
+            // WARM the function-word signal from BOTH a REAL TEXT CORPUS (Wikipedia — natural context breadth, the signal
+            // warms and HOLDS without per-token tuning) AND the synthetic L1 prebake (clean, dense function-word frames with
+            // nonce salt). The two are complementary foundations and both grade by the SAME space property (function-word
+            // separation), so they reinforce the prerequisite the Merge parse / fact memory / learned cues (∘qst …) rest on.
+            var synthFoundation = new PrebakeLanguageCurriculum(trainPerCycle: _gymTrainPerCycle, seed: 7);
+            var corpusFoundation = new CorpusWarmCurriculum(trainPerCycle: _gymTrainPerCycle);
+            try { _inspectGlue = synthFoundation.Glue.Take(14).ToArray(); _inspectContent = synthFoundation.SampleContent(12).ToArray(); } catch { } // Inspect-tab probe words = actual trained vocab
+            children.Add(new FoundationBlendCurriculum(synthFoundation, corpusFoundation, trainPerCycle: _gymTrainPerCycle, syntheticFraction: 0.95));
+            AppendOutput("[train] PREBAKE: warming function-word recognition from a 95% SYNTHETIC / 5% CORPUS blend (synthetic shows the pattern; a little corpus keeps it honest without collapsing the signal)");
         }
-        else _prebake = null;
         if (GetControl<CheckBox>("CurCreators")?.Checked ?? false)
         {
             children.AddRange(CreatorUnit.SkillLadder(trainCount: _gymTrainPerCycle));   // each creator = one focusable trainer
@@ -1521,7 +1529,9 @@ public class MainWindow : Form
         // never-seen units in LIST order (see NextWeakest), so this prefix IS that order.
         static int BootstrapRank(ITrainingCurriculum c) => c switch
         {
-            PrebakeLanguageCurriculum => 0, // prerequisite — warms the language schemas everything parses through
+            FoundationBlendCurriculum => 0, // prerequisite — warms function-word recognition (80% synthetic / 20% corpus blend)
+            CorpusWarmCurriculum => 0,      // (if used standalone) same prerequisite role
+            PrebakeLanguageCurriculum => 0, // (if used standalone) same prerequisite role
             OpCueCurriculum => 1,                // worded arithmetic synonyms → op
             NumberWordCurriculum => 2,           // digit↔word lexicon atoms
             _ => 3,                              // the gym muscles + anything else, in their existing order
@@ -1600,11 +1610,11 @@ public class MainWindow : Form
             TrainOnFailureOnly = true,                 // don't reinforce already-correct answers; train only failures
         };
         var lastLevels = gymChildren.ToDictionary(g => g, g => g.Level);
-        var lastPrebake = _prebake?.Difficulty ?? 0;
         var lastPersonaLevel = persona?.Level ?? 0;
         await orchestrator.RunAsync(_runtime, curriculum, options, m =>
         {
             _gymCycle = m.Cycle; _lastDifficulty = m.Difficulty; _lastLoss = m.Loss; _lastAcc = m.Accuracy; _lastRoute = m.RoutePurity; _lastConf = m.Confidence;
+            lock (_warmHistory) { _warmHistory.Add((m.Cycle, m.Accuracy, m.Loss)); if (_warmHistory.Count > 400) _warmHistory.RemoveAt(0); } // Inspect-tab warming curve
             // Each muscle advances + persists its OWN level independently (Name = "gym-<skill>").
             foreach (var g in gymChildren)
             {
@@ -1612,13 +1622,6 @@ public class MainWindow : Form
                 lastLevels[g] = g.Level;
                 try { File.WriteAllText(Path.Combine(_gymStateDir, g.Name + "-level.txt"), g.Level.ToString()); } catch { }
                 AppendOutput($"[train] {g.Name} LEVEL → {g.Level}");
-            }
-            // The run-first language prebake persists its difficulty too, so a restart resumes the ladder instead of L1.
-            if (_prebake is not null && _prebake.Difficulty != lastPrebake)
-            {
-                lastPrebake = _prebake.Difficulty;
-                try { File.WriteAllText(Path.Combine(_gymStateDir, "prebake-language-level.txt"), _prebake.Difficulty.ToString()); } catch { }
-                AppendOutput($"[train] prebake LEVEL → {_prebake.Difficulty}");
             }
             // The persona's level grows its pool — when it unlocks a new situation, SEED the now-larger repertoire so
             // the freshly-active intents are retrievable before they're probed next cycle.
@@ -1674,6 +1677,182 @@ public class MainWindow : Form
     private static string Shorten(string name) =>
         name.StartsWith("gym-", StringComparison.Ordinal) ? name.Substring(4) : name;
 
+    // ── INSPECT TAB ─────────────────────────────────────────────────────────────────────────────────────────────────
+    // A live window into the platonic space — the foundation-warming debugger. Reads the live DialecticalSpace BEST-EFFORT
+    // off the UI's timer (heavy reads on a background task, all wrapped in try/catch, tolerant of mid-mutation), so it
+    // never blocks the UI or fights the throttle-0 /status starvation. Four panes: SPACE vitals + train split, the
+    // FUNCTION-WORD SEPARATION table (the thing we keep chasing — see which words bridge vs cluster, live), the WARMING
+    // CURVE (acc over cycles, with the 0.85 mastery line — watch it hold vs collapse), and a CONCEPT PROBE (type a word →
+    // fn-like? / coherence / degree / nearest neighbours). Tip: it's cleanest to read with /gym/pause, but live works too.
+    private static readonly Font InspMono = new("Consolas", 9f);
+    private TabPage CreateInspectTab()
+    {
+        var tab = new TabPage("Inspect");
+        var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 2, Padding = new Padding(6), BackColor = Color.FromArgb(18, 18, 22) };
+        root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 48));
+        root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 52));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 56));
+        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+
+        var vitals = new Label { Name = "InspVitals", Dock = DockStyle.Fill, Font = InspMono, ForeColor = Color.Gainsboro,
+            Text = "(start the gym to populate the space)" };
+        root.Controls.Add(vitals, 0, 0); root.SetColumnSpan(vitals, 2);
+
+        var funcBox = new TextBox { Name = "InspFunc", Dock = DockStyle.Fill, Multiline = true, ReadOnly = true,
+            ScrollBars = ScrollBars.Vertical, Font = InspMono, BackColor = Color.FromArgb(24, 24, 28), ForeColor = Color.Gainsboro };
+        root.Controls.Add(funcBox, 0, 1);
+
+        var right = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3 };
+        right.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+        right.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
+        right.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+        var curve = new Panel { Name = "InspCurve", Dock = DockStyle.Fill, BackColor = Color.FromArgb(14, 14, 18) };
+        curve.Paint += DrawWarmingCurve;
+        right.Controls.Add(curve, 0, 0);
+        var probeIn = new TextBox { Name = "InspProbeIn", Dock = DockStyle.Fill, Font = InspMono,
+            BackColor = Color.FromArgb(30, 30, 36), ForeColor = Color.White, Text = "type a word + Enter to probe…" };
+        probeIn.GotFocus += (s, e) => { if (probeIn.Text.StartsWith("type a word")) probeIn.Text = ""; };
+        probeIn.KeyDown += (s, e) => { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; ProbeConcept(probeIn.Text); } };
+        right.Controls.Add(probeIn, 0, 1);
+        var probeOut = new TextBox { Name = "InspProbe", Dock = DockStyle.Fill, Multiline = true, ReadOnly = true,
+            ScrollBars = ScrollBars.Vertical, Font = InspMono, BackColor = Color.FromArgb(24, 24, 28), ForeColor = Color.Gainsboro,
+            Text = "Probe a concept: is it function-like? its coherence, degree, and nearest neighbours in meaning space." };
+        right.Controls.Add(probeOut, 0, 2);
+        root.Controls.Add(right, 1, 1);
+
+        tab.Controls.Add(root);
+        _inspectTimer = new System.Windows.Forms.Timer { Interval = 1500 };
+        _inspectTimer.Tick += (s, e) => RefreshInspect();
+        _inspectTimer.Start();
+        return tab;
+    }
+
+    private void RefreshInspect()
+    {
+        GetControl<Panel>("InspCurve")?.Invalidate();                 // redraw the curve from captured history (cheap, UI thread)
+        if (_tabControl.SelectedTab?.Text != "Inspect" || _inspectReading) return;
+        if (_runtime?.State?.Memory is not DialecticalSpace space) return;
+        _inspectReading = true;
+        Task.Run(() =>
+        {
+            try
+            {
+                var (vitals, func) = BuildInspectStrings(space);
+                BeginInvoke(new Action(() =>
+                {
+                    var v = GetControl<Label>("InspVitals"); if (v != null && vitals.Length > 0) v.Text = vitals;
+                    var f = GetControl<TextBox>("InspFunc"); if (f != null && func.Length > 0) f.Text = func;
+                }));
+            }
+            catch { /* best-effort live read — skip this tick */ }
+            finally { _inspectReading = false; }
+        });
+    }
+
+    private (string vitals, string func) BuildInspectStrings(DialecticalSpace ds)
+    {
+        var ex = GenesisNova.Train.GenesisTrainer.ProfExamples;
+        var split = ex > 0
+            ? $"   |   per-ex: NN {GenesisNova.Train.GenesisTrainer.ProfNnMs / ex:F0}ms  Substrate {GenesisNova.Train.GenesisTrainer.ProfSubstrateMs / ex:F0}ms  Other {GenesisNova.Train.GenesisTrainer.ProfOtherMs / ex:F0}ms"
+            : "";
+        var vitals =
+            $"SPACE   nodes {ds.NodeCount:N0}    relations {ds.RelationCount:N0}    archived {ds.ArchivedNodeCount:N0}    atoms {ds.AtomCount}{split}\n" +
+            $"GYM     cycle {_gymCycle}   acc {_lastAcc:P0}   loss {_lastLoss:F2}   level {_lastDifficulty}   throttle {_gymThrottlePct}%";
+
+        // Probe the ACTUAL trained vocabulary (pulled from the live foundation curriculum) so content words are really in
+        // the space — a fixed guessed list reads all-zero because those words were never trained / got discharged as noise.
+        var glue = _inspectGlue is { Length: > 0 } ? _inspectGlue : new[] { "the", "of", "is", "a", "to", "in", "and", "with", "my", "your", "for", "on" };
+        var content = _inspectContent is { Length: > 0 } ? _inspectContent : new[] { "cat", "dog", "red", "blue", "green", "pink", "cow", "pig", "hen", "fox" };
+        double mean = 0, thr = 0; var active = 0; var gotStats = false;
+        try { var s = ds.FunctionStats("the"); mean = s.Mean; thr = s.Threshold; active = s.Active; gotStats = true; } catch { }
+
+        var sb = new System.Text.StringBuilder();
+        int gCoh = 0, gPmi = 0, cCoh = 0, cPmi = 0;
+        var rows = new System.Text.StringBuilder();
+        rows.AppendLine("  GLUE (want ✓)       coh graph   assoc PMI");
+        foreach (var w in glue) { var (cf, coh, deg, pf, asc) = ProbeWord(ds, w); if (cf) gCoh++; if (pf) gPmi++;
+            rows.AppendLine($"    {w,-13}{coh,5:F2} {(cf ? "✓" : "·"),-5}  {asc,6:F2} {(pf ? "✓" : "·")}"); }
+        rows.AppendLine();
+        rows.AppendLine("  CONTENT (want ·)    coh graph   assoc PMI");
+        foreach (var w in content) { var (cf, coh, deg, pf, asc) = ProbeWord(ds, w); if (cf) cCoh++; if (pf) cPmi++;
+            rows.AppendLine($"    {w,-13}{coh,5:F2} {(cf ? "✓" : "·"),-5}  {asc,6:F2} {(pf ? "✓" : "·")}"); }
+
+        var graphSep = (double)gCoh / glue.Length - (double)cCoh / content.Length;
+        var pmiSep = (double)gPmi / glue.Length - (double)cPmi / content.Length;
+        sb.AppendLine($"FUNCTION-WORD SEPARATION   graph {graphSep:P0}   |   PMI {pmiSep:P0}");
+        sb.AppendLine($"  graph: glue {gCoh}/{glue.Length} content {cCoh}/{content.Length}   PMI: glue {gPmi}/{glue.Length} content {cPmi}/{content.Length}");
+        if (gotStats) sb.AppendLine($"  coherence mean {mean:F2} ≤{thr:F2}   active {active:N0}");
+        sb.AppendLine();
+        sb.Append(rows);
+        return (vitals, sb.ToString());
+    }
+
+    // Both verdicts computed DIRECTLY from the stats (not IsFunctionLike) so the panel shows graph-clustering vs the PMI
+    // distributional metric SIDE-BY-SIDE on the same warmed space — the live A/B for "does PMI separate what the graph misses".
+    private static (bool cohFn, double coh, int deg, bool pmiFn, double assoc) ProbeWord(DialecticalSpace ds, string w)
+    {
+        try
+        {
+            var s = ds.FunctionStats(w);
+            var a = ds.AssociationStats(w);
+            var cohFn = s.MinWarm >= 6 && s.Std > 1e-6 && s.Centrality <= s.Threshold && s.Centrality <= s.Floor; // graph verdict
+            var pmiFn = s.MinWarm >= 6 && a.Std > 1e-6 && a.Assoc <= a.Threshold;                                 // PMI verdict
+            return (cohFn, s.Centrality, s.MinWarm, pmiFn, a.Assoc);
+        }
+        catch { return (false, 0, 0, false, 0); }
+    }
+
+    private void ProbeConcept(string word)
+    {
+        word = (word ?? "").Trim().ToLowerInvariant();
+        if (word.Length == 0) return;
+        if (_runtime?.State?.Memory is not DialecticalSpace space) { var o0 = GetControl<TextBox>("InspProbe"); if (o0 != null) o0.Text = "(no space — start the gym)"; return; }
+        Task.Run(() =>
+        {
+            string text;
+            try
+            {
+                var sb = new System.Text.StringBuilder();
+                var exists = space.ContainsConcept(word);
+                sb.AppendLine($"'{word}'  {(exists ? "" : "— not in the active space (discharged as noise, or never seen)")}");
+                if (exists)
+                {
+                    var s = space.FunctionStats(word);
+                    sb.AppendLine($"  function-like : {(space.IsFunctionLike(word) ? "YES — bridges unrelated words (glue)" : "no — clusters with kin (content)")}");
+                    sb.AppendLine($"  coherence     : {s.Centrality:F3}     (function if ≤ {s.Threshold:F2})");
+                    sb.AppendLine($"  degree        : {s.MinWarm}     (relation neighbours)");
+                    sb.AppendLine();
+                    sb.AppendLine("  nearest in meaning space:");
+                    foreach (var (sym, dist) in space.GetNearestConcepts(word, maxNeighbors: 12))
+                        sb.AppendLine($"    {dist,5:F2}   {sym}");
+                }
+                text = sb.ToString();
+            }
+            catch (Exception ex) { text = $"(read failed — space busy: {ex.GetType().Name})"; }
+            try { BeginInvoke(new Action(() => { var o = GetControl<TextBox>("InspProbe"); if (o != null) o.Text = text; })); } catch { }
+        });
+    }
+
+    private void DrawWarmingCurve(object? sender, PaintEventArgs e)
+    {
+        var p = (Panel)sender!; var g = e.Graphics; g.Clear(p.BackColor);
+        (int Cycle, double Acc, double Loss)[] hist; lock (_warmHistory) hist = _warmHistory.ToArray();
+        int w = p.Width, h = p.Height, pad = 6, top = 18, bot = h - 6;
+        float Y(double a) => (float)(bot - Math.Clamp(a, 0, 1) * (bot - top));
+        g.DrawString("acc warming curve (0–1)", InspMono, Brushes.Gray, pad, 2);
+        using (var grid = new Pen(Color.FromArgb(48, 48, 56)))
+            foreach (var lvl in new[] { 0.0, 0.5, 1.0 }) g.DrawLine(grid, pad, Y(lvl), w - pad, Y(lvl));
+        using (var master = new Pen(Color.FromArgb(120, 90, 200, 90))) { g.DrawLine(master, pad, Y(0.85), w - pad, Y(0.85)); g.DrawString("0.85 mastery", InspMono, Brushes.DarkSeaGreen, w - 96, Y(0.85) - 14); }
+        if (hist.Length >= 2)
+        {
+            float X(int i) => pad + (w - 2 * pad) * (i / (float)(hist.Length - 1));
+            using var accPen = new Pen(Color.FromArgb(80, 200, 255), 2f);
+            for (var i = 1; i < hist.Length; i++) g.DrawLine(accPen, X(i - 1), Y(hist[i - 1].Acc), X(i), Y(hist[i].Acc));
+            g.DrawString($"{hist[^1].Acc:P0} @cyc {hist[^1].Cycle}", new Font("Consolas", 9f, FontStyle.Bold), Brushes.Aqua, pad + 2, top);
+        }
+        else g.DrawString("(no cycles yet — start the gym)", InspMono, Brushes.Gray, pad + 2, h / 2);
+    }
+
     // ── Control endpoint: a tiny localhost HTTP server so headless tools (and Claude) can drive the LIVE in-app
     // model — recall against it, read gym status, pause/resume — without a second process fighting for the GPU.
     private void StartControlServer(int port = 8787)
@@ -1709,6 +1888,7 @@ public class MainWindow : Form
             {
                 case "":
                 case "/status":
+                    var mem = _runtime.State?.Memory;
                     body = JsonSerializer.Serialize(new
                     {
                         running = _gymCts is not null && !_gymCts.IsCancellationRequested,
@@ -1720,6 +1900,14 @@ public class MainWindow : Form
                         conf = _lastConf,
                         throttle = _gymThrottlePct,
                         hidden = _runtime.HiddenSize,
+                        nodes = mem?.NodeCount ?? 0,
+                        relations = mem?.RelationCount ?? 0,
+                        archived = mem?.ArchivedNodeCount ?? 0,
+                        profEx = GenesisNova.Train.GenesisTrainer.ProfExamples,
+                        profNnMs = GenesisNova.Train.GenesisTrainer.ProfNnMs,
+                        profSubMs = GenesisNova.Train.GenesisTrainer.ProfSubstrateMs,
+                        profCloneMs = GenesisNova.Train.GenesisTrainer.ProfCloneMs,
+                        profOtherMs = GenesisNova.Train.GenesisTrainer.ProfOtherMs,
                         model = _gymStateDir
                     });
                     break;

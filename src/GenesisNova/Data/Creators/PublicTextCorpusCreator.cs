@@ -246,23 +246,19 @@ public sealed class PublicTextCorpusCreator : IExampleCreator
 
         if (_allowRemoteFetch)
         {
+            // LAZY (non-blocking): if a hydration download is in flight, DO NOT await it — awaiting throttles the whole
+            // training cycle while it waits on the network. Pick up rows only if the download has ALREADY finished;
+            // otherwise serve whatever is on disk now (or the fallback) and let it keep streaming in the background.
             if (HasActiveHydrationTask(localFile, out var hydrationTask))
             {
-                try
+                if (TryObserveHydrationCompletion(localFile, hydrationTask, out var hydrated))
                 {
-                    var hydrated = await hydrationTask.ConfigureAwait(false);
                     if (hydrated.Hydrated)
                         localSnippets = TryLoadLocalSnippets(localFile, trainingPressure);
-
                     if (localSnippets.Length > 0)
                         ClearHydrationCooldown(localFile);
-
-                    return localSnippets.Length > 0 ? localSnippets : _fallbackSnippets;
                 }
-                catch
-                {
-                    // Hydration task failed, continue with available data
-                }
+                return localSnippets.Length > 0 ? localSnippets : _fallbackSnippets;
             }
 
             if (TryGetHydrationCooldown(localFile, out _))
@@ -303,23 +299,17 @@ public sealed class PublicTextCorpusCreator : IExampleCreator
 
         if (_allowRemoteFetch)
         {
+            // LAZY (non-blocking) — see LoadCorpusSnippetsAsync: never await the in-flight download; serve what's on disk.
             if (HasActiveHydrationTask(localFile, out var hydrationTask))
             {
-                try
+                if (TryObserveHydrationCompletion(localFile, hydrationTask, out var hydrated))
                 {
-                    var hydrated = await hydrationTask.ConfigureAwait(false);
                     if (hydrated.Hydrated)
                         localPairs = TryLoadLocalPairs(localFile, trainingPressure);
-
                     if (localPairs.Length > 0)
                         ClearHydrationCooldown(localFile);
-
-                    return localPairs.Length > 0 ? localPairs : _fallbackPairs;
                 }
-                catch
-                {
-                    // Hydration task failed, continue with available data
-                }
+                return localPairs.Length > 0 ? localPairs : _fallbackPairs;
             }
 
             if (TryGetHydrationCooldown(localFile, out _))

@@ -5,10 +5,11 @@ using Xunit;
 
 namespace GenesisNova.Tests;
 
-// FAST (no training): the leveled language prebake generates the right SHAPES — L1 is short function-word fragments,
-// higher levels compose LONGER + MULTI-SENTENCE inputs, content is REAL words salted with held-out NONCE, and the
-// relational/argument sides of the readiness signal are disjoint. Validates the schema ladder + the real-vs-nonce
-// decision deterministically, without a slow warming run.
+// FAST (no training): the synthetic language prebake generates the right SHAPES — short function-word fragments, content
+// is REAL words salted with held-out NONCE, and the relational/argument sides of the readiness signal are disjoint. Per
+// option 4 the synthetic prebake is a FUNCTION-WORD FOUNDATION capped at L1 (a parsing prerequisite); longer + multi-
+// sentence composition is the corpus warmer's + Merge parser's job, so the ladder no longer climbs. Validates the schema
+// + the real-vs-nonce decision deterministically, without a slow warming run.
 public sealed class PrebakeLanguageLadderTests
 {
     [Fact]
@@ -17,18 +18,18 @@ public sealed class PrebakeLanguageLadderTests
         var c = new PrebakeLanguageCurriculum(trainPerCycle: 200, seed: 1);
         var inputs = c.NextTrainBatch().Select(t => t.Input).ToList();
         Assert.All(inputs, s => Assert.DoesNotContain(" . ", s));        // L1 never multi-sentence
-        Assert.All(inputs, s => Assert.True(s.Split(' ').Length <= 4));  // short fragments (incl. a 3-item content list)
+        Assert.All(inputs, s => Assert.True(s.Split(' ').Length <= 5));  // short fragments (incl. coordinated glue: "my cat and your dog")
     }
 
     [Fact]
-    public void HigherLevels_ComposeLongerAndMultiSentence()
+    public void Prebake_IsCappedAtL1_FunctionWordFoundationOnly()
     {
+        // Option 4: the synthetic prebake is a function-word foundation (a parsing prerequisite), NOT a multi-sentence
+        // composer — longer/multi-sentence composition is the corpus warmer's + Merge parser's job. So the ladder is
+        // capped at L1: driving mastery cycles must never climb past it.
         var c = new PrebakeLanguageCurriculum(trainPerCycle: 400, seed: 2);
-        for (var i = 0; i < 20; i++) c.RecordCycle(new CycleGrade(0.95, 1, 1)); // drive to the top of the ladder
-        Assert.Equal(5, c.Difficulty);
-        var inputs = c.NextTrainBatch().Select(t => t.Input).ToList();
-        Assert.Contains(inputs, s => s.Contains(" . "));                 // multi-sentence composition appears
-        Assert.Contains(inputs, s => s.Split(' ').Length >= 5);         // genuinely longer than L1
+        for (var i = 0; i < 20; i++) c.RecordCycle(new CycleGrade(0.95, 1, 1));
+        Assert.Equal(1, c.Difficulty);
     }
 
     [Fact]

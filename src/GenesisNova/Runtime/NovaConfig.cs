@@ -67,6 +67,7 @@ public sealed record NovaConfig(
         // Substrate (platonic space)
         memory.UseInfoNceRepulsion = Substrate.UseInfoNceRepulsion;
         memory.DimensionalContradiction = Substrate.DimensionalContradiction;
+        memory.GenerativeAtoms = Substrate.GenerativeAtoms; // token-as-atom + on-demand decompose/recognise (off = legacy chars)
 
         // Reasoning (routing)
         inference.EdgeRoutingEnabled = Routing.EdgeRoutingEnabled;
@@ -105,7 +106,8 @@ public sealed record NovaConfig(
 /// now; wiring those through here is a follow-on — the toggle that matters today is the repulsion MODE.)</summary>
 public sealed record SubstrateOptions(
     bool UseInfoNceRepulsion = false,    // false = manual constant-step repulsion (live); true = InfoNCE push
-    bool DimensionalContradiction = true); // Phase 1 dialectic: per-dimension agreement/contradiction (false = legacy scalar)
+    bool DimensionalContradiction = true, // Phase 1 dialectic: per-dimension agreement/contradiction (false = legacy scalar)
+    bool GenerativeAtoms = false);        // false = legacy eager char-atoms; true = token-as-atom + decompose/recognise via ticks
 
 /// <summary>GRU controller / decision-head toggles.</summary>
 public sealed record ControllerOptions(

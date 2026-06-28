@@ -41,6 +41,13 @@ public sealed class GenesisTrainer
     private int _conceptPlanTick;
     private const int ConceptPlanStride = 8;       // run the NN concept-planner 1-in-N examples (else use mirror)
     private const int EditHeadReinforceStride = 4; // reinforce the edit head 1-in-N examples
+
+    // ── PROFILING (temporary diagnostic — measure the GPU/CPU split before optimising the train loop). Cumulative ms,
+    //    accumulated per training example; poll /status twice and diff. NN = the GPU TrainExample step (+ edit-head
+    //    reinforce), Substrate = ObserveLearningSignals (the CPU substrate write), Clone = the per-example graph break
+    //    (copies all params), Other = labels / loss-estimate reads / GC / the rest. Static: one model/trainer is live.
+    public static double ProfNnMs, ProfSubstrateMs, ProfCloneMs, ProfOtherMs;
+    public static long ProfExamples;
     // Model-driven edit-head wiring: ObservePlatonicSpace stashes the (explored) magnitude it
     // requested from _model.PredictEditMagnitude (plus the tokens it conditioned on); the surrounding
     // train step then rewards the head via _model.ReinforceEditHead with a CAUSAL, space-state-
@@ -544,17 +551,22 @@ public sealed class GenesisTrainer
        {
           cancellationToken.ThrowIfCancellationRequested();
            
+          var iterT0 = System.Diagnostics.Stopwatch.GetTimestamp();
+          long nnT = 0;
           var item = batch[i];
           var inputTokens = item.InputTokens;
           var targetTokens = item.TargetTokens;
           var example = item.Original;
           var weight = ComputeTrainingWeight(example);
           var labels = ResolveLabels(example, inputTokens);
+          var subT0 = System.Diagnostics.Stopwatch.GetTimestamp();
           var concepts = ObserveLearningSignals(example);
+          var subT = System.Diagnostics.Stopwatch.GetTimestamp() - subT0;
           var roleLabels = _inferencePolicy.DeriveRoleLabels(example.Input); // self-supervised structure labels (after warming this example)
           var shouldSkip = ShouldSkipTrainingExample(example, targetTokens);
           TrainingLoss loss;
           var effectiveWeight = weight;
+          var nnT0 = System.Diagnostics.Stopwatch.GetTimestamp(); // GPU step (TrainExample) ≈ this if/else block
           if (shouldSkip)
           {
              skippedCorrectCount++;
@@ -596,6 +608,7 @@ public sealed class GenesisTrainer
              totalTokenWeight += targetTokens.Length * effectiveWeight;
           }
                   
+          nnT += System.Diagnostics.Stopwatch.GetTimestamp() - nnT0;
           _trainStepCount++;
           MaybeInterleaveMasteredRehearsal();
 
@@ -633,7 +646,9 @@ public sealed class GenesisTrainer
               GC.Collect(0, GCCollectionMode.Optimized);
           }
 
+          var cloneT0 = System.Diagnostics.Stopwatch.GetTimestamp();
           _model.CloneParametersToBreakGraph();
+          var cloneT = System.Diagnostics.Stopwatch.GetTimestamp() - cloneT0;
           // Edit-head REINFORCE backward runs AFTER the main autograd graph is broken, so the two
           // backwards never share graph state — the "backward through the graph a second time" trigger
           // that surfaced at the arithmetic phase of long autonomous runs. ReinforceEditHead re-encodes a
@@ -641,9 +656,20 @@ public sealed class GenesisTrainer
           // SPEED: it's a second forward/backward per example — reinforce only 1-in-N examples.
           if (_trainStepCount % EditHeadReinforceStride == 0)
           {
+             var reinfT0 = System.Diagnostics.Stopwatch.GetTimestamp();
              RewardEditHead(example, loss.TokenLoss);
              MaybeReinforceRoute(example, inputTokens, labels);
+             nnT += System.Diagnostics.Stopwatch.GetTimestamp() - reinfT0; // a 2nd GPU fwd/bwd 1-in-N
           }
+
+          // PROFILE: split this example's wall-time into NN(GPU) / Substrate(CPU) / Clone / Other (residual).
+          var iterT = System.Diagnostics.Stopwatch.GetTimestamp() - iterT0;
+          var toMs = 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+          ProfNnMs += nnT * toMs;
+          ProfSubstrateMs += subT * toMs;
+          ProfCloneMs += cloneT * toMs;
+          ProfOtherMs += Math.Max(0, iterT - nnT - subT - cloneT) * toMs;
+          ProfExamples++;
        }
 
        var avgTokenLoss = totalTokenLoss / Math.Max(1.0, totalTokenWeight);
@@ -1369,6 +1395,9 @@ public sealed class GenesisTrainer
         // LEARN the intent cues (de-hardcoding #3/#4: compare / to-word / to-digit) from the example's structure — after
         // LearnNumberWord so the lexicon can type the output. No-op for frames that don't match an intent shape.
         _inferencePolicy.LearnIntentCue(example.Input, example.Output);
+        // LEARN the INTERROGATIVE cue (de-hardcoding the IsQuestionCue wh-list): a wh-question retrieves its answer
+        // (absent from the input) and is fronted by a function-like token → relate that token to ∘qst. No-op otherwise.
+        _inferencePolicy.LearnQuestionCue(example.Input, example.Output);
         if (allowTransformDiscovery)
             UpdateTransformDiscovery(example);
 

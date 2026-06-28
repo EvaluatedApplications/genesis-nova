@@ -26,48 +26,78 @@ public sealed class PrebakeLanguageCurriculum : ITrainingCurriculum
     // ── Closed-class GLUE (REAL — the structural skeleton we WANT recognised as function) ───────────────────
     private static readonly string[] Det = { "the", "a", "an" };
     private static readonly string[] Poss = { "my", "your", "his", "her", "its", "our", "their" };
-    private static readonly string[] Prep = { "in", "on", "at", "by", "near", "with", "under", "over", "to", "from" };
+    private static readonly string[] Prep = { "in", "on", "at", "by", "near", "under", "over" };  // spatial only, so "X is {prep} the place" reads right
     private static readonly string[] Cop = { "is", "are", "was", "were" };
     private static readonly string[] Conj = { "and", "or", "but" };
-    private static readonly string[] Wh = { "what", "where", "who", "which" };          // query markers (L3)
-    private static readonly string[] Aux = { "does", "did", "can", "will" };            // auxiliaries (L3)
+    private static readonly string[] Wh = { "what", "where", "who" };    // query markers actually used at L3
+    private static readonly string[] Aux = { "does" };                  // do-support (L3)
 
-    // ── REAL content in REAL semantic clusters (DATA, not dispatch) ─────────────────────────────────────────
-    // Concrete nouns only (no broad words like thing/do/make that distribute like function words and blur the line).
+    // ── CONTENT as a TYPED LEXICON (the clever data structure). Every word carries a semantic CATEGORY; every verb
+    // carries a CASE-FRAME (subject-category, object-category). The generator fills typed slots from this, so plausibility
+    // ("cat eats fish", never "cat eats screw") lives in the DATA. That keeps co-occurrence STRUCTURED — a content word
+    // keeps a distinctive in-domain neighbourhood instead of smearing across everything, which is what averaged the
+    // clustering signal to death. Function words and verbs stay universal; they SHOULD bridge.
+    private static readonly string[] Animals = { "cat", "dog", "bird", "fish", "horse", "cow", "frog", "bee", "duck", "goat" };
+    private static readonly string[] Colours = { "red", "blue", "green", "yellow", "black", "white", "pink", "gray", "brown", "gold" };
+    private static readonly string[] Food = { "apple", "bread", "rice", "soup", "cake", "egg", "milk", "pear", "plum", "jam" };
+    private static readonly string[] Places = { "park", "house", "school", "shop", "farm", "lake", "road", "hill", "town", "beach" };
+    private static readonly string[] Objects = { "ball", "book", "cup", "hat", "key", "box", "lamp", "clock", "bag", "toy" };
+    private static readonly string[] Body = { "hand", "foot", "head", "eye", "ear", "nose", "arm", "leg", "hair", "tooth" };
+    private static readonly string[] Clothes = { "shirt", "coat", "shoe", "sock", "dress", "glove", "scarf", "belt", "cap", "boot" };
+    private static readonly string[] Vehicles = { "bus", "van", "bike", "boat", "train", "plane", "truck", "cart", "ship", "jet" };
+    private static readonly string[] Tools = { "saw", "hammer", "nail", "rope", "brush", "spoon", "fork", "knife", "drill", "screw" };
+    private static readonly string[] Nature = { "tree", "leaf", "rock", "sand", "wind", "rain", "snow", "cloud", "star", "moon" };
+    private static readonly string[] Drinks = { "tea", "water", "juice", "wine", "ale", "cola", "broth", "cream", "soda", "cider" };
+    private static readonly string[] Furniture = { "chair", "table", "bed", "desk", "shelf", "sofa", "stool", "bench", "crib", "rack" };
+    private static readonly string[] Instruments = { "drum", "flute", "harp", "horn", "bell", "pipe", "lute", "gong", "reed", "chime" };
+    private static readonly string[] Plants = { "rose", "fern", "oak", "vine", "moss", "weed", "bush", "palm", "ivy", "herb" };
+    private static readonly string[] Jobs = { "chef", "nurse", "pilot", "clerk", "guard", "maid", "smith", "monk", "scout", "cook" };
+    private static readonly string[] Weather = { "sun", "fog", "ice", "heat", "storm", "frost", "mist", "hail", "dew", "gust" };
     private static readonly string[] People = { "sam", "joe", "mia", "ben", "ana", "leo", "kai", "zoe", "max", "eve" };
-    // VOCABULARY DIVERSITY is what the clustering signal runs on, and it must be WIDE: a content word stays "content"
-    // only while it co-occurs with enough CONTENT kin. Too few words (or frames that surround content with only function
-    // words) starve it of kin → its neighbourhood collapses to function words → it reads function-like and the signal
-    // erodes (seen at L3). So the pool is broad (17 clusters × 10 ≈ 170 real words across many domains) + a large NONCE
-    // long-tail (below); clusters are DISJOINT (no word in two) so each word has a clear home cluster.
-    private static readonly string[][] NounClusters =
+    private static readonly string[][] NounClusters = { Animals, Colours, Food, Places, Objects, Body, Clothes, Vehicles, Tools, Nature, Drinks, Furniture, Instruments, Plants, Jobs, Weather, People };
+    private static readonly string[] AllNouns = NounClusters.SelectMany(c => c).Distinct().ToArray();
+    private static readonly HashSet<string> Proper = new(People, StringComparer.Ordinal);  // proper names take NO article
+    private static readonly string[][] CommonClusters = NounClusters.Where(c => c != People).ToArray();  // clusters that take articles/adjectives
+
+    // category -> words: base clusters + UNION categories that span clusters (agent, edible, handleable, …)
+    private static readonly Dictionary<string, string[]> Cat = new(StringComparer.Ordinal)
     {
-        new[] { "cat", "dog", "bird", "fish", "horse", "cow", "frog", "bee", "duck", "goat" },           // animals
-        new[] { "red", "blue", "green", "yellow", "black", "white", "pink", "gray", "brown", "gold" },   // colours
-        new[] { "apple", "bread", "rice", "soup", "cake", "egg", "milk", "pear", "plum", "jam" },         // food
-        new[] { "park", "house", "school", "shop", "farm", "lake", "road", "hill", "town", "beach" },     // places
-        new[] { "car", "ball", "book", "cup", "hat", "key", "box", "door", "lamp", "clock" },             // objects
-        new[] { "hand", "foot", "head", "eye", "ear", "nose", "arm", "leg", "hair", "tooth" },            // body
-        new[] { "shirt", "coat", "shoe", "sock", "dress", "glove", "scarf", "belt", "cap", "boot" },      // clothes
-        new[] { "bus", "van", "bike", "boat", "train", "plane", "truck", "cart", "ship", "jet" },         // vehicles
-        new[] { "saw", "hammer", "nail", "rope", "brush", "spoon", "fork", "knife", "drill", "screw" },   // tools
-        new[] { "tree", "leaf", "rock", "sand", "wind", "rain", "snow", "cloud", "star", "moon" },        // nature
-        new[] { "tea", "water", "juice", "wine", "ale", "cola", "broth", "cream", "soda", "cider" },      // drinks
-        new[] { "chair", "table", "bed", "desk", "shelf", "sofa", "stool", "bench", "crib", "rack" },     // furniture
-        new[] { "drum", "flute", "harp", "horn", "bell", "pipe", "lute", "gong", "reed", "chime" },       // instruments
-        new[] { "rose", "fern", "oak", "vine", "moss", "weed", "bush", "palm", "ivy", "herb" },           // plants
-        new[] { "chef", "nurse", "pilot", "clerk", "guard", "maid", "smith", "monk", "scout", "cook" },   // jobs
-        new[] { "sun", "fog", "ice", "heat", "storm", "frost", "mist", "hail", "dew", "gust" },           // weather
-        People,                                                                                            // people
+        ["animal"] = Animals, ["colour"] = Colours, ["food"] = Food, ["place"] = Places, ["object"] = Objects,
+        ["body"] = Body, ["clothes"] = Clothes, ["vehicle"] = Vehicles, ["tool"] = Tools, ["nature"] = Nature,
+        ["drink"] = Drinks, ["furniture"] = Furniture, ["instrument"] = Instruments, ["plant"] = Plants,
+        ["job"] = Jobs, ["weather"] = Weather, ["person"] = People,
+        ["agent"] = People.Concat(Jobs).Concat(Animals).ToArray(),
+        ["human"] = People.Concat(Jobs).ToArray(),
+        ["edible"] = Food.Concat(Drinks).ToArray(),
+        ["thing"] = Objects.Concat(Tools).Concat(Furniture).Concat(Instruments).Concat(Clothes).ToArray(),
+        ["handleable"] = Objects.Concat(Tools).Concat(Furniture).Concat(Instruments).Concat(Clothes).Concat(Food).Concat(Vehicles).ToArray(),
+        ["any"] = AllNouns,
+        ["common"] = AllNouns.Where(w => !Proper.Contains(w)).ToArray(),  // non-proper: takes articles / possessives / adjectives
+        // things you can be in/on/near/under — MANY clusters, so a preposition bridges domains (and reads relational)
+        // instead of only ever seeing places and clustering with them.
+        ["locative"] = Places.Concat(Furniture).Concat(Objects).Concat(Nature).Concat(Vehicles).Concat(Body).Concat(Tools).Concat(Instruments).ToArray(),
     };
-    private static readonly string[] Verbs = { "likes", "sees", "has", "wants", "eats", "finds", "knows", "makes", "holds", "needs", "takes", "gives", "keeps", "sends", "brings", "hears", "feels", "loves", "builds", "breaks", "opens", "reads", "draws", "paints" };
+    // VERB CASE-FRAMES: (verb, subject-category, object-category) — selectional restrictions AS DATA.
+    private static readonly (string V, string Subj, string Obj)[] VerbFrames =
+    {
+        ("eat", "agent", "edible"),
+        ("read", "human", "object"), ("make", "human", "handleable"), ("build", "human", "handleable"),
+        ("hold", "human", "handleable"), ("open", "human", "handleable"), ("break", "human", "handleable"),
+        ("draw", "human", "thing"), ("paint", "human", "thing"), ("take", "human", "handleable"),
+        ("give", "human", "handleable"), ("keep", "human", "handleable"), ("send", "human", "handleable"),
+        ("bring", "human", "handleable"),
+        ("find", "agent", "thing"), ("have", "agent", "handleable"), ("want", "agent", "handleable"), ("need", "agent", "handleable"),
+        ("like", "agent", "any"), ("see", "agent", "any"), ("know", "agent", "any"),
+        ("feel", "agent", "any"), ("love", "agent", "any"), ("hear", "agent", "any"),
+    };
+    private static string Sg(string v) => v == "have" ? "has" : v + "s";   // 3rd-person-singular for statements (base form used in questions)
+    private static readonly string[] Verbs = VerbFrames.Select(f => Sg(f.V)).Distinct().ToArray();  // statement-form verbs = the relational set for SelfAssess
     private static readonly string[] Adjs = { "big", "small", "old", "new", "warm", "cold", "fast", "slow", "happy", "tall", "short", "long", "wide", "soft", "hard", "loud", "quiet", "bright", "dark", "clean", "sharp", "heavy", "light", "smooth" };
 
     // ── NONCE salt: held-out, never real — the clean anchor + the generalisation proof ──────────────────────
     private readonly string[] _nonceNouns, _nonceVerbs, _nonceAdjs;
-    // ~0.45 so the large nonce long-tail actually PARTICIPATES in neighbourhoods (at 0.15 each nonce word was ~10× rarer
-    // than a real word → it barely diversified anything). Real words still appear the majority (~55%) → usable + grounded.
-    private const double NonceRate = 0.45;
+    // Low: structured REAL words carry the signal now; nonce is just a light generalisation salt (parse a never-seen word).
+    private const double NonceRate = 0.12;
 
     private static string[] BuildNonce(int count, Random r, HashSet<string> used)
     {
@@ -80,7 +110,12 @@ public sealed class PrebakeLanguageCurriculum : ITrainingCurriculum
 
     private readonly Random _rng;
     private readonly int _trainPerCycle;
-    private const int MaxLevel = 5;
+    // CAPPED AT L1 (option 4): the prebake's ONE job is to warm function-word recognition, which stays clean in the
+    // simple-frame regime. Climbing into multi-clause frames (L2-L5) DENSIFIES the co-occurrence graph and erodes that
+    // signal no matter how structured the data is (function 0.31 vs nouns 0.53 at L5, still drifting). So composition —
+    // SVO, questions, multi-sentence — is handled as a PARSING task by the inference engine (Merge over the function-word
+    // skeleton), NOT warmed here. The L2-L5 templates are kept (re-enable by raising MaxLevel) but are not trained.
+    private const int MaxLevel = 1;
     private const double AdvanceBar = 0.65;   // "warm enough" to ramp the next skill in; lower levels keep rehearsing to perfect
     private const int LevelPatience = 25;     // backstop: never let a slow level stall the whole ladder
     private int _level = 1;
@@ -103,76 +138,109 @@ public sealed class PrebakeLanguageCurriculum : ITrainingCurriculum
     public int Difficulty => _level;
     public bool IsMastered => _mastered;
 
-    // ── Word pickers (REAL with a NONCE-salt chance, so every slot proves generalisation) ───────────────────
+    // ── Typed pickers, driven by the lexicon + case-frames ──────────────────────────────────────────────────
     private string Pick(string[] a) => a[_rng.Next(a.Length)];
-    private string Noun() => _rng.NextDouble() < NonceRate ? Pick(_nonceNouns)
-        : NounClusters[_rng.Next(NounClusters.Length)] is var cl ? cl[_rng.Next(cl.Length)] : "";
-    // CRITICAL for L2: subjects must be as DIVERSE as objects. Drawing them only from the 8-person pool made every verb
-    // co-occur with a tight people-hub → highly interconnected neighbourhood → verbs clustered like NOUNS (~0.6 vs
-    // function ~0.19, VerbClusteringDiagnostic) → SVO never crossed the relational threshold (stuck L2 ~66%). Drawing
-    // from the FULL noun vocabulary makes a verb bridge many clusters → low clustering → relational, like the copula.
-    private string Subj() => Noun();
-    private string Verb() => _rng.NextDouble() < NonceRate ? Pick(_nonceVerbs) : Pick(Verbs);
+    private string[] WordsOf(string cat) => Cat.TryGetValue(cat, out var w) ? w : AllNouns;
+    // a BARE content word of a category, with occasional NONCE salt (generalisation proof)
+    private string Word(string cat) => _rng.NextDouble() < NonceRate ? Pick(_nonceNouns) : Pick(WordsOf(cat));
     private string Adj() => _rng.NextDouble() < NonceRate ? Pick(_nonceAdjs) : Pick(Adjs);
-    private (string A, string B) TwoNouns() { var a = Noun(); string b; do { b = Noun(); } while (b == a); return (a, b); }
-    private (string A, string B, string C) ThreeNouns() { var a = Noun(); string b, c; do { b = Noun(); } while (b == a); do { c = Noun(); } while (c == a || c == b); return (a, b, c); }
-
-    // ── The schema ladder. Each returns (Input, Output=the salient content token to recover) ────────────────
-    private (string Input, string Output) Level1() // function-words / fragments (with content↔content so content keeps kin)
+    // a/an agreement, and a "the / a / an" article picker that agrees with the word it precedes.
+    private static string AnA(string w) => w.Length > 0 && "aeiou".IndexOf(char.ToLowerInvariant(w[0])) >= 0 ? "an" : "a";
+    private string Art(string w) => _rng.Next(2) == 0 ? "the" : AnA(w);
+    // an argument NOUN PHRASE: proper names take no article, common nouns get an agreeing one. Returns (surface, bare word).
+    private (string Surface, string Word) NP(string cat)
     {
-        var n = Noun();
-        switch (_rng.Next(7))
+        var w = Word(cat);
+        return (Proper.Contains(w) ? w : $"{Art(w)} {w}", w);
+    }
+    // a CLAUSE from a verb case-frame: subject + verb + object, type-consistent. The STATEMENT uses the 3rd-singular form
+    // ("sam eats fish"); the returned Verb is the BASE form, for the do-support question ("what does sam eat").
+    private (string Text, string Subj, string Verb, string Obj) Clause(bool adjObj = false)
+    {
+        var f = VerbFrames[_rng.Next(VerbFrames.Length)];
+        var nonce = _rng.NextDouble() < NonceRate;
+        var baseV = nonce ? Pick(_nonceVerbs) : f.V;          // question form
+        var sgV = nonce ? baseV : Sg(f.V);                    // statement form
+        var s = NP(f.Subj);
+        var o = NP(f.Obj);
+        var objText = adjObj ? InsertAdj(o.Surface) : o.Surface;
+        return ($"{s.Surface} {sgV} {objText}", s.Surface, baseV, o.Word);
+    }
+    private string InsertAdj(string np) { var a = Adj(); var sp = np.IndexOf(' '); return sp < 0 ? $"{a} {np}" : np.Insert(sp + 1, a + " "); }
+    // 2-3 BARE words from the SAME cluster (conjunctions/lists keep content with its kin, never "cat and screw")
+    private string[] SameCluster(int n, bool common = false)
+    {
+        var pool = common ? CommonClusters : NounClusters;
+        var cl = pool[_rng.Next(pool.Length)];
+        var pick = new List<string>(n);
+        while (pick.Count < n) { var w = cl[_rng.Next(cl.Length)]; if (!pick.Contains(w)) pick.Add(w); }
+        return pick.ToArray();
+    }
+
+    // ── The schema ladder. Each returns (Input, Output=the bare content token to recover) ─────────────────────
+    private (string Input, string Output) Level1()  // fragments — function words bridging DIVERSE content
+    {
+        // Closed-class glue (articles/possessives/prepositions) must bridge MANY token types to read function-like (its
+        // neighbourhood washes out → low coherence). Putting possessives/articles ONLY before a single noun kept them
+        // looking content-ish (measured: possessives stuck at coherence ~0.16-0.27). So here they co-occur with
+        // ADJECTIVES, OTHER GLUE, CONJUNCTIONS and nouns from ALL clusters — diverse neighbourhoods, not one cluster.
+        switch (_rng.Next(13))
         {
-            case 0: return ($"{Pick(Det)} {n}", n);
-            case 1: return ($"{Pick(Poss)} {n}", n);
-            case 2: return ($"{Pick(Prep)} {Pick(Det)} {n}", n);
-            case 3: { var (x, y) = TwoNouns(); return ($"{x} {Pick(Conj)} {y}", y); }                  // content + content
-            case 4: return ($"{Adj()} {n}", n);                                                        // content + content (adj+noun)
-            case 5: { var (a, b, c) = ThreeNouns(); return ($"{a} {b} {Pick(Conj)} {c}", c); }          // content list
-            default: return ($"{Pick(Cop)} {n}", n);
+            case 0:  { var n = Word("common"); return ($"{Art(n)} {n}", n); }                                  // the book / a cup
+            case 1:  { var n = Word("common"); return ($"{Art(n)} {Adj()} {n}", n); }                          // the big cup (article + adjective)
+            case 2:  { var n = Word("common"); return ($"{Pick(Poss)} {n}", n); }                              // my hat
+            case 3:  { var n = Word("common"); return ($"{Pick(Poss)} {Adj()} {n}", n); }                      // my big hat (possessive + adjective)
+            case 4:  { var s = SameCluster(2, common: true); return ($"{Pick(Poss)} {s[0]} {Pick(Conj)} {Pick(Poss)} {s[1]}", s[1]); } // my cat and your dog
+            case 5:  { var n = Word("common"); return ($"{Pick(Prep)} {Pick(Poss)} {n}", n); }                 // in my house (preposition + possessive)
+            case 6:  { var p = NP("locative"); return ($"{Pick(Prep)} {p.Surface}", p.Word); }                 // on the table / near the tree
+            case 7:  { var s = SameCluster(2, common: true); return ($"{Art(s[0])} {s[0]} {Pick(Conj)} {Art(s[1])} {s[1]}", s[1]); } // a cat and the dog (article + conjunction)
+            case 8:  { var s = SameCluster(2); return ($"{s[0]} {Pick(Conj)} {s[1]}", s[1]); }                 // cat and dog
+            case 9:  { var n = Word("common"); return ($"{Adj()} {n}", n); }                                   // big cat
+            case 10: { var s = SameCluster(3); return ($"{s[0]} {s[1]} {Pick(Conj)} {s[2]}", s[2]); }          // tea juice and water
+            case 11: { var n = Word("common"); return ($"{Pick(Cop)} {Pick(Poss)} {n}", n); }                 // is my book (copula + possessive)
+            default: { var n = Word("thing"); return ($"{Pick(Cop)} {n}", n); }                               // is book
         }
     }
-    private (string Input, string Output) Predication() // L2 — predication / SVO (content↔content via the verb)
+    private (string Input, string Output) Predication()  // L2 — copula + SVO from case-frames
     {
         switch (_rng.Next(6))
         {
-            case 0: { var a = Adj(); return ($"{Subj()} is {a}", a); }                              // copula: sam is happy
-            case 1: { var (n, n2) = TwoNouns(); return ($"{Pick(Poss)} {n} is {n2}", n2); }         // possessive copula
-            case 2: { var o = Noun(); return ($"{Subj()} {Verb()} {Pick(Det)} {o}", o); }           // SVO + det
-            case 3: { var o = Noun(); return ($"{Subj()} {Verb()} {o}", o); }                       // bare SVO
-            case 4: { var o = Noun(); return ($"{Adj()} {Subj()} {Verb()} {o}", o); }               // adj subject + object
-            default: { var o = Noun(); return ($"{Subj()} {Verb()} {Adj()} {o}", o); }              // SVO + adj object
+            case 0: { var s = NP("agent"); var a = Adj(); return ($"{s.Surface} is {a}", a); }                       // sam is happy / the cat is happy
+            case 1: { var s = NP("thing"); var a = Adj(); return ($"{s.Surface} is {a}", a); }                       // the soup is warm
+            case 2: { var t = Word("thing"); var col = Word("colour"); return ($"{Pick(Poss)} {t} is {col}", col); } // my hat is blue
+            case 3: { var c = Clause();             return (c.Text, c.Obj); }                                        // cat eats fish / sam reads a book
+            case 4: { var c = Clause(adjObj: true); return (c.Text, c.Obj); }                                        // sam reads the big book
+            default: { var c = Clause();            return (c.Text, c.Obj); }                                        // more SVO weight
         }
     }
-    private (string Input, string Output) Questions() // L3 — teach + ask (subjects kept next to CONTENT, not only glue)
-    {
-        switch (_rng.Next(5))
-        {
-            case 0: { var s = Subj(); var a = Adj(); var o = Noun(); return ($"{s} is {a} and {s} {Verb()} {o} what does {s} have", o); } // s sees adj + object (content)
-            case 1: { var s = Subj(); var p = Noun(); return ($"{s} is {Pick(Prep)} the {p} where is {s}", p); }
-            case 2: { var s = Subj(); var v = Verb(); var o = Noun(); return ($"{s} {v} {o} what does {s} {v}", o); }
-            case 3: { var s = Subj(); var v = Verb(); var (o1, o2) = TwoNouns(); return ($"{s} {v} {o1} and {o2} what does {s} {v}", o2); } // content list near s
-            default: { var s = Subj(); var v = Verb(); var o = Noun(); return ($"{s} {v} the {Adj()} {o} what does {s} {v}", o); }          // adj content near s
-        }
-    }
-    private (string Input, string Output) Modification() // L4 — nested phrases
+    private (string Input, string Output) Questions()  // L3 — statement then question (warms wh + do-support)
     {
         switch (_rng.Next(4))
         {
-            case 0: { var n = Noun(); return ($"{Adj()} {Adj()} {n}", n); }
-            case 1: { var n = Noun(); return ($"{Pick(Poss)} {Adj()} {n}", n); }
-            case 2: { var (n, n2) = TwoNouns(); return ($"the {Adj()} {n} {Pick(Prep)} the {n2}", n2); }
-            default: { var (n, n2) = TwoNouns(); return ($"{Adj()} {n} and {Adj()} {n2}", n2); }       // content + content, both modified
+            case 0: { var c = Clause(); return ($"{c.Text} what does {c.Subj} {c.Verb}", c.Obj); }                   // sam reads a book what does sam read
+            case 1: { var s = NP("agent"); var p = NP("place"); return ($"{s.Surface} is {Pick(Prep)} {p.Surface} where is {s.Surface}", p.Word); } // the cat is in the park where is the cat
+            case 2: { var s = NP("agent"); var a = Adj(); return ($"{s.Surface} is {a} who is {a}", s.Word); }       // sam is happy who is happy -> sam
+            default: { var c = Clause(adjObj: true); return ($"{c.Text} what does {c.Subj} {c.Verb}", c.Obj); }
         }
     }
-    private (string Input, string Output) Discourse() // L5 — multi-sentence / coreference / paragraphs
+    private (string Input, string Output) Modification()  // L4 — nested phrases
     {
         switch (_rng.Next(4))
         {
-            case 0: { var o = Noun(); var a = Adj(); return ($"{Subj()} {Verb()} {Pick(Det)} {o} . it is {a}", a); }              // coreference
-            case 1: { var o2 = Noun(); return ($"{Subj()} {Verb()} {Noun()} . {Subj()} {Verb()} {o2}", o2); }                     // two sentences
-            case 2: { var s = Subj(); var o = Noun(); return ($"{s} is {Adj()} . {s} {Verb()} {o} . {s} is {Adj()}", o); }        // 3-clause paragraph
-            default: { var (o1, o2) = TwoNouns(); return ($"{Subj()} {Verb()} {o1} . {Subj()} {Verb()} {o2} . they are {Adj()}", o2); } // two minds, content objects
+            case 0: { var n = Word("common"); return ($"{Adj()} {Adj()} {n}", n); }                                  // big old cat
+            case 1: { var n = Word("common"); return ($"{Pick(Poss)} {Adj()} {n}", n); }                            // my red hat
+            case 2: { var s = SameCluster(2, common: true); return ($"the {Adj()} {s[0]} {Pick(Prep)} the {s[1]}", s[1]); } // the big cat near the dog
+            default: { var s = SameCluster(2, common: true); return ($"{Adj()} {s[0]} and {Adj()} {s[1]}", s[1]); } // big cat and small dog
+        }
+    }
+    private (string Input, string Output) Discourse()  // L5 — multi-sentence / coreference / paragraphs
+    {
+        switch (_rng.Next(4))
+        {
+            case 0: { var c = Clause(); var a = Adj(); return ($"{c.Text} . it is {a}", a); }                        // sam holds a cup . it is red
+            case 1: { var c1 = Clause(); var c2 = Clause(); return ($"{c1.Text} . {c2.Text}", c2.Obj); }             // two sentences
+            case 2: { var c = Clause(); var a = Adj(); return ($"{c.Subj} is {a} . {c.Text}", c.Obj); }              // sam is happy . sam eats fish
+            default: { var c1 = Clause(); var c2 = Clause(); var a = Adj(); return ($"{c1.Text} . {c2.Text} . they are {a}", a); }
         }
     }
 
@@ -246,4 +314,13 @@ public sealed class PrebakeLanguageCurriculum : ITrainingCurriculum
     public IReadOnlyList<string> Predicates => Verbs;
     /// <summary>The query markers (wh + aux) introduced at L3.</summary>
     public IReadOnlyList<string> QueryMarkers => Wh.Concat(Aux).ToArray();
+
+    /// <summary>DIAGNOSTIC: PURE frames for a given level (bypasses the rehearsal mix), so generated English can be
+    /// inspected for parsability/plausibility level by level.</summary>
+    public IReadOnlyList<(string Input, string Output)> SampleLevel(int lvl, int n)
+    {
+        var outp = new List<(string, string)>(n);
+        for (var i = 0; i < n; i++) outp.Add(ByLevel(Math.Clamp(lvl, 1, MaxLevel)));
+        return outp;
+    }
 }

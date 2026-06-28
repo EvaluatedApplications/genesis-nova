@@ -151,6 +151,11 @@ public sealed class FocusUnit : ITrainingCurriculum
     public IReadOnlyList<string> OperationTokens => _inner.OperationTokens;
     public IReadOnlyList<(string Input, string Output)> NextTrainBatch() => _inner.NextTrainBatch();
     public IReadOnlyList<TrainingProbe> NextProbes() => _inner.NextProbes();
+    // FORWARD the foundation-readiness self-assessment + drive-to-depth target. Without this the wrapper returned the
+    // interface DEFAULTS (SelfAssess null, MasteryDepth 1), so a foundation unit (graded by SelfAssess, no surface probes)
+    // produced NO progress entry under FocusedCurriculum → the HUD showed "mastered 0/0" whenever >1 trainer was active.
+    public double? SelfAssess(GenesisNova.Runtime.GenesisEvalAppRuntime runtime) => _inner.SelfAssess(runtime);
+    public int MasteryDepth => _inner.MasteryDepth;
 
     public void RecordCycle(CycleGrade grade)
     {

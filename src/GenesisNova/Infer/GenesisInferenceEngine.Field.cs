@@ -286,9 +286,9 @@ public sealed partial class GenesisInferenceEngine
     //    "∘" anchor; resolve at inference, ABSTAIN on competing (framing words spread across intents). Gated by
     //    LearnedCuesOnly (default OFF = the hardcoded lists, byte-identical) until validated, then flipped.
     public bool LearnedCuesOnly { get; set; }
-    private enum FieldIntent { None, Compare, ToWord, ToDigit, Retrieve }
+    private enum FieldIntent { None, Compare, ToWord, ToDigit, Retrieve, Question }
     private static readonly (string Anchor, FieldIntent Intent)[] IntentAnchors =
-        { ("∘cmp", FieldIntent.Compare), ("∘tow", FieldIntent.ToWord), ("∘tod", FieldIntent.ToDigit), ("∘ret", FieldIntent.Retrieve) };
+        { ("∘cmp", FieldIntent.Compare), ("∘tow", FieldIntent.ToWord), ("∘tod", FieldIntent.ToDigit), ("∘ret", FieldIntent.Retrieve), ("∘qst", FieldIntent.Question) };
     // #2 de-hardcoded: a CATEGORY is recognised STRUCTURALLY (genesis Law S, reuse-as-target) — a concept many things
     // point to (high relation degree) — not by the kind/type/synonym word-list. An example whose answer is such a hub is
     // a category/synonym RETRIEVAL; its framing cue ("kind"/"synonym") is related to ∘ret and abstains elsewhere.
@@ -336,6 +336,23 @@ public sealed partial class GenesisInferenceEngine
         }
     }
 
+    /// <summary>LEARN the INTERROGATIVE cue — de-hardcoding the IsQuestionCue wh-list (what/who/where/…). A wh-question
+    /// RETRIEVES its answer (the output content is ABSENT from the input — an assertion STATES it) and is FRONTED by a
+    /// function-like glue token; that fronting word IS the interrogative, in ANY language. Relate it to ∘qst; resolve at
+    /// inference (abstain on competing). Mirrors LearnIntentCue/LearnArithmeticCue. Needs the warm function-word signal,
+    /// so a nonce/foreign question marker generalises while a content word never does. Training-time only.</summary>
+    public void LearnQuestionCue(string input, string output)
+    {
+        if (_memory is not DialecticalSpace ds || string.IsNullOrWhiteSpace(input) || string.IsNullOrWhiteSpace(output)) return;
+        var toks = TokenizeField(input);
+        var outToks = TokenizeField(output);
+        if (outToks.Count == 0 || !outToks.All(o => o.Length > 0 && o.All(char.IsLetter))) return; // answer is a content word
+        if (outToks.Any(o => toks.Contains(o))) return;                                            // answer present ⇒ assertion, not a question
+        var lead = toks.FirstOrDefault(IsLetterToken);                                             // the fronted token
+        if (lead is null || !ds.IsFunctionLike(lead)) return;                                      // …must read as glue, never content
+        ds.FineEditFromExample(new[] { lead }, new[] { "∘qst" }, isNegativeExample: false);
+    }
+
     // Reverse-lookup the LEARNED word for a comparison outcome anchor (∘gt/∘lt/∘eq) — the highest-confidence non-anchor
     // neighbour. ABSTAINS (false) until the comparison vocabulary has been taught.
     private static bool ResolveOutcomeWord(DialecticalSpace ds, string anchor, out string word)
@@ -362,6 +379,9 @@ public sealed partial class GenesisInferenceEngine
     private bool ToWordCue(string t) => LearnedCuesOnly ? ResolveLearnedIntent(t) == FieldIntent.ToWord : IsToWordCue(t);
     private bool ToDigitCue(string t) => LearnedCuesOnly ? ResolveLearnedIntent(t) == FieldIntent.ToDigit : IsToDigitCue(t);
     private bool CompareCue(string t) => LearnedCuesOnly ? ResolveLearnedIntent(t) == FieldIntent.Compare : IsCompareCue(t);
+    // The INTERROGATIVE predicate: LEARNED ∘qst when de-hardcoded, else the wh-list (byte-identical default). Replaces
+    // the per-token IsQuestionCue across the fact parse so a corpus-warmed (any-language) question marker drives routing.
+    private bool QuestionCue(string t) => LearnedCuesOnly ? ResolveLearnedIntent(t) == FieldIntent.Question : IsQuestionCue(t);
 
     // EXPERIMENT toggle (de-hardcoding #5): when true the engine's number-word ROUTES abstain — no hardcoded
     // NumberWordVocabulary codec — so number↔word must come from what the MODEL learned (its decoder / face geometry).
@@ -754,11 +774,11 @@ public sealed partial class GenesisInferenceEngine
     // interrogative floor in BOTH modes because it encodes a UNIVERSAL truth, not a routing decision: a question word is
     // never an ANSWER in any space, warm or cold — so it must never leak out as a subject/answer. (Per-token, so the
     // role head's sequence-level QUERY tag can't replace it here; the learned filler signal augments it once warm.)
-    private bool IsFiller(DialecticalSpace ds, string t) => IsQuestionCue(t) || ds.IsFunctionLike(t);
+    private bool IsFiller(DialecticalSpace ds, string t) => QuestionCue(t) || ds.IsFunctionLike(t);
 
     // #1: a question frame — the universal INTERROGATIVE FLOOR (a structural cross-language constant, not the gym
     // taxonomy). The 4-role NN's QUERY tag is GONE: it overfit and would not generalise (nova-grammar-role-regression).
-    private bool QuestionFrame(IReadOnlyList<string> toks) => toks.Any(IsQuestionCue);
+    private bool QuestionFrame(IReadOnlyList<string> toks) => toks.Any(QuestionCue);
     // #2: a retrieval/category frame — a token resolves to the LEARNED ∘ret cue (learned from category-HUB answers), not
     // a word-list (in cold/legacy mode the hardcoded marker list). Function words are excluded via the LEARNED centrality
     // signal (IsFunctionLike) so the shared copula "is" is never the marker. NO role head — the de-hardcode-#2 grammar-hub
@@ -800,18 +820,18 @@ public sealed partial class GenesisInferenceEngine
         // possessives/determiners) is bound in, so "my name" ≠ "your name" (the coreference the flat content-key lost)
         // and the subject can be ANY length. The copula is the function-word pivot (content on both sides). The VALUE
         // stays a readable content string (it is EMITTED). Question = the span after the copula; assertion = before it.
-        bool Content(int i) => IsContentWord(toks[i]) && !IsQuestionCue(toks[i]);
+        bool Content(int i) => IsContentWord(toks[i]) && !QuestionCue(toks[i]);
         var content = new List<int>();
         for (var i = 0; i < toks.Count; i++) if (Content(i)) content.Add(i);
         if (content.Count == 0) return FrameKind.None;
 
-        if (toks.Any(IsQuestionCue))
+        if (toks.Any(QuestionCue))
         {
-            var q = Enumerable.Range(0, toks.Count).First(i => IsQuestionCue(toks[i]));
+            var q = Enumerable.Range(0, toks.Count).First(i => QuestionCue(toks[i]));
             var copula = -1;
             for (var i = q + 1; i < toks.Count; i++)
                 if (IsLetterToken(toks[i]) && !IsContentWord(toks[i]) && content.Any(c => c > i)) { copula = i; break; }
-            subject = SpanKey(ds, toks, copula >= 0 ? copula + 1 : q + 1, toks.Count); // the queried KEY span as a Merge tree
+            subject = SpanKey(ds, toks, copula >= 0 ? copula + 1 : q + 1, toks.Count, QuestionCue); // the queried KEY span as a Merge tree
             return subject is not null ? FrameKind.Question : FrameKind.None;
         }
 
@@ -819,7 +839,7 @@ public sealed partial class GenesisInferenceEngine
         for (var i = last - 1; i >= 0; i--)
             if (IsLetterToken(toks[i]) && !IsContentWord(toks[i]) && content.Any(c => c < i)) // the copula pivot
             {
-                subject = SpanKey(ds, toks, 0, i);                                  // KEY = Merge tree over [start..copula)
+                subject = SpanKey(ds, toks, 0, i, QuestionCue);                     // KEY = Merge tree over [start..copula)
                 value = string.Join(" ", content.Where(c => c > i).Select(c => toks[c])); // VALUE = readable content after
                 break;
             }
@@ -832,11 +852,11 @@ public sealed partial class GenesisInferenceEngine
     // relation-elements over the span's letter tokens (possessives/determiners INCLUDED so "my name" ≠ "your name";
     // query cues excluded), so the whole phrase is ONE structured, recursive key of arbitrary length. Merge is
     // content-addressed/idempotent, so the assert and the recall build the SAME key → traversal matches.
-    private static string? SpanKey(DialecticalSpace ds, IReadOnlyList<string> toks, int from, int to)
+    private static string? SpanKey(DialecticalSpace ds, IReadOnlyList<string> toks, int from, int to, Func<string, bool> isQuestion)
     {
         var span = new List<string>();
         for (var i = from; i < to && i < toks.Count; i++)
-            if (IsLetterToken(toks[i]) && !IsQuestionCue(toks[i])) span.Add(toks[i]);
+            if (IsLetterToken(toks[i]) && !isQuestion(toks[i])) span.Add(toks[i]);
         if (span.Count == 0) return null;
         var acc = span[0];
         for (var i = 1; i < span.Count; i++) acc = ds.Merge(acc, span[i], "np");

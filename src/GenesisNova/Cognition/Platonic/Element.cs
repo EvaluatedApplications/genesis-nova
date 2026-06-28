@@ -67,4 +67,10 @@ public sealed class Element
 
     /// <summary>How many times this element has participated in an observation (drives plasticity / lifecycle).</summary>
     public long ObservationCount { get; set; }
+
+    /// <summary>The observation-step at which this element was last seen — its RECENCY. With <see cref="ObservationCount"/>
+    /// it drives relevance-decay: a barely-observed element that has gone stale (not seen for a long window) is DISCHARGED
+    /// as noise, while a reinforced or recently-active one is retained. Runtime signal — not persisted (decay restarts per
+    /// session). Distinct from a size cap: the space holds as much RELEVANT structure as exists; only noise is released.</summary>
+    public long LastSeenStep { get; set; }
 }

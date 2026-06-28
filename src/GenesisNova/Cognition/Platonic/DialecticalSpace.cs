@@ -49,6 +49,36 @@ public sealed class DialecticalSpace : IPlatonicSpace
     // related cluster and unrelated go orthogonal for free. The one guard below bounds the task-gradient/imprint paths.
     private const double MaxOrbitalNorm = 3.0;
 
+    // RELEVANCE-DECAY MAINTENANCE — a FORGETTING CURVE, not a size cap. The store only ever ADDS, so without decay an
+    // unbounded input stream (or a long run minting endless distinct phrases/facts) grows the active set without limit
+    // (we measured 182 MB / a pegged core). The fix is NOT an arbitrary ceiling (that churns reinforced structure and
+    // broke warming). Instead EVERY element decays: its survival GRACE grows with its UTILITY — chiefly how much it
+    // CONTRIBUTED TO CORRECT ANSWERS (relation SuccessCount, credited by ReinforceEvidence), with mere observation as a
+    // WEAK floor and failures as a penalty. An element is released only once it has gone STALE beyond the grace its
+    // utility earned. So a useful edge/concept is effectively immortal (it keeps earning answers long before the grace
+    // expires) while a merely-co-observed one decays out. "Helped answer" outranks "was seen often"; everything decays.
+    // No cap — the space holds exactly the relevant, recently-useful structure. (See DischargeIrrelevant / RelationUtility.)
+    // BASE grace (observation-steps); utility MULTIPLIES it. Sized to comfortably exceed the FocusedCurriculum ROTATION
+    // gap — a muscle/the foundation is only re-observed during its focus turn, so the gap between turns is large; if the
+    // grace is shorter than that gap, learned vocab decays BETWEEN turns (catastrophic forgetting — an overnight run
+    // measured 6000→523 nodes, foundation acc 0.70→0.08 at the old 8_192). A run does millions of observations, so this is
+    // deliberately large: reinforced/recurring structure survives the whole run; only genuinely-abandoned hapax decays.
+    public long DischargeStalenessWindow { get; set; } = 1_048_576;
+    public long DischargeInterval { get; set; } = 4_096;        // sweep once per ~this many observations
+    private long _observeStep;                                  // monotone observation clock (drives recency)
+    private long _lastDischargeStep;
+
+    // GENERATIVE ATOMS (gated, default OFF = legacy eager char-decomposition, byte-identical). When ON, a token is stored
+    // as its OWN biggest-chunk atom (Object) and is DECOMPOSED ON DEMAND (Decompose) into candidate sub-atoms — characters
+    // and short n-grams — which then COMPETE via relevance-decay: a sub-atom that recurs across tokens AND contributes to
+    // correct answers (a morpheme like "hel") survives, a one-off substring discharges. So useful granularity is DISCOVERED
+    // (and is language-agnostic — a CJK char is its own atom, a Latin word breaks down only where it earns its keep), rather
+    // than eagerly fixed at single chars. This is the first brick of the genesis create→decompose→select→store loop.
+    public bool GenerativeAtoms { get; set; }
+    private const int MaxDecomposeGram = 4;            // longest candidate n-gram (morpheme) generated per token
+    private const long DecomposeMinObservations = 3;   // only PROVEN tokens (reinforced) are decomposed — never noise
+    private readonly HashSet<string> _decomposed = new(StringComparer.Ordinal); // decompose each token at most once
+
     public DialecticalSpace(int faceDimension, int seed = 42)
     {
         _dim = Math.Max(4, faceDimension);
@@ -76,6 +106,7 @@ public sealed class DialecticalSpace : IPlatonicSpace
         public int SuccessCount;
         public int FailureCount;
         public long LastUsedStep;
+        public long LastSeenStep; // observation recency (drives relevance-decay discharge), distinct from inference LastUsedStep
         public double Strength => Math.Clamp(1.0 - Synthesis, 0.0, 1.0);
     }
 
@@ -88,7 +119,7 @@ public sealed class DialecticalSpace : IPlatonicSpace
     public bool DimensionalContradiction { get; set; } = true; // the new core is per-aspect by construction
     // Concept counts EXCLUDE atoms — atoms are reusable sub-lexical components, not user concepts (keeps NodeCount's
     // meaning identical to the legacy store while the atom layer lives underneath).
-    public int NodeCount => _concepts.All.Count(e => !e.Archived && e.Kind != ElementKind.Atom);
+    public int NodeCount => _concepts.ActiveConceptCount; // O(1), concurrency-safe (read live by /status during training)
     public int RelationCount => _relations.Count;
     public int ArchivedNodeCount => _concepts.TotalCount - _concepts.ActiveCount;
     public int ArchivedRelationCount => 0;
@@ -128,15 +159,21 @@ public sealed class DialecticalSpace : IPlatonicSpace
                 .Select(w => GetOrCreateConcept(w).Id).ToArray();
             kind = ElementKind.Composition;
         }
+        else if (GenerativeAtoms)
+        {
+            components = Array.Empty<int>();   // the token IS its own (biggest-chunk) atom — broken down on demand, not eagerly
+            kind = ElementKind.Object;
+        }
         else
         {
-            components = key.Select(c => GetOrCreateAtom(c).Id).ToArray();
+            components = key.Select(c => GetOrCreateAtom(c).Id).ToArray(); // legacy: eager char-composition (bounded reuse)
             kind = ElementKind.Composition;
         }
         // Born as its OWN token: a concept with no relations means just itself; meaning EMERGES as it accumulates
         // context (so even a single direct relation big↔large makes them cluster — they share each other's token).
         var created = _concepts.GetOrCreate(key, kind, () => FaceCodec.Token(key, _dim), components);
         _lattice.RegisterNode(key); // a new non-atom concept entered the active set
+        created.LastSeenStep = _observeStep; // born fresh — decays only if it never gets reinforced (see DischargeIrrelevant)
         return created;
     }
 
@@ -369,7 +406,9 @@ public sealed class DialecticalSpace : IPlatonicSpace
 
         var ea = GetOrCreateConcept(a);
         var eb = GetOrCreateConcept(b);
+        var now = ++_observeStep;                                 // advance the observation clock
         ea.ObservationCount++; eb.ObservationCount++;
+        ea.LastSeenStep = eb.LastSeenStep = now;                  // both endpoints are REINFORCED + made recent → kept
 
         var key = Key(a, b);
         if (!_relations.TryGetValue(key, out var rel))
@@ -382,6 +421,7 @@ public sealed class DialecticalSpace : IPlatonicSpace
         rel.LastObserved = Clamp01(observedContradiction);
         rel.Synthesis = rel.ObservationCount == 0 ? rel.LastObserved : 0.85 * rel.Synthesis + 0.15 * rel.LastObserved;
         rel.ObservationCount++;
+        rel.LastSeenStep = now;
 
         // DISTRIBUTIONAL MEANING (PLATONIC_NUCLEUS.md; validated in LargeFaceMeaningTests). A concept's large-face
         // cloud = token(self) + Σ over its relational context of affinity·token(neighbour) (agree adds, contradict
@@ -390,6 +430,161 @@ public sealed class DialecticalSpace : IPlatonicSpace
         // repulsion tuning. Both endpoints' neighbour sets just changed, so recompute both.
         RecomputeCloud(ea);
         RecomputeCloud(eb);
+        if (now - _lastDischargeStep >= DischargeInterval)
+        {
+            _lastDischargeStep = now;                 // set FIRST so re-entrant observes (from Decompose) don't re-trigger
+            DischargeIrrelevant();
+            if (GenerativeAtoms) DecomposeReinforced(); // break PROVEN tokens into candidate sub-atoms; they compete via decay
+        }
+    }
+
+    /// <summary>
+    /// DISCHARGE IRRELEVANCE (the live maintenance — NOT a size cap). Release concepts and relations that are NOISE: barely
+    /// observed (≤ <see cref="DischargeObservations"/>) AND gone stale (not seen for <see cref="DischargeStalenessWindow"/>
+    /// observation-steps). Anything reinforced (observed more) or recently active is ALWAYS kept, so reinforced signals like
+    /// the function-word geometry are never disturbed — that is what a numeric cap got wrong. Atoms (the bounded reusable
+    /// base) and structural ∘-anchors are never discharged; nor is a concept still referenced as a ▷-component of a retained
+    /// whole. A discharged element re-forms from observation if it ever recurs (it was only noise). O(active) but runs only
+    /// once per <see cref="DischargeInterval"/> observations, and the active set stays bounded by RELEVANCE, not fiat.
+    /// </summary>
+    private void DischargeIrrelevant()
+    {
+        var now = _observeStep;
+
+        // RELATIONS — release an edge only once it has gone STALE beyond the grace its UTILITY earned. Utility is led by
+        // SuccessCount (it contributed to correct answers), with observation as a weak floor and failures as a penalty.
+        // A useful edge keeps getting re-used/credited (LastUsedStep/LastSeenStep advance) long before its grace expires.
+        List<Relation>? deadRels = null;
+        foreach (var r in _relations.Values)
+        {
+            if (r.Left.StartsWith('∘') || r.Right.StartsWith('∘')) continue;     // structural ∘-type edges
+            var lastActive = Math.Max(r.LastSeenStep, r.LastUsedStep);
+            if (now - lastActive <= GraceFor(RelationUtility(r))) continue;       // still within earned grace
+            (deadRels ??= new()).Add(r);
+        }
+        if (deadRels is not null) foreach (var r in deadRels) DropRelation(r);
+
+        // CONCEPTS — a concept is RELEVANT to the degree its edges earned correct answers; observation is the floor.
+        // Its utility = the best SuccessCount among its relations (precomputed once) + a log-damped observation floor.
+        Dictionary<string, int>? bestSuccess = null;
+        HashSet<int>? referenced = null;
+        List<string>? deadConcepts = null;
+        foreach (var e in _concepts.All)
+        {
+            if (e.Archived || e.Kind == ElementKind.Atom || e.Symbol.StartsWith('∘')) continue;
+            bestSuccess ??= BuildBestRelationSuccess();
+            var succ = bestSuccess.TryGetValue(e.Symbol, out var s) ? s : 0;
+            var util = 2.0 * succ + Math.Log(1.0 + e.ObservationCount);
+            if (now - e.LastSeenStep <= GraceFor(util)) continue;                 // still within earned grace
+            referenced ??= BuildReferencedComponentIds();
+            if (referenced.Contains(e.Id)) continue;                             // a part of a retained whole (keeps ▷ / ById valid)
+            (deadConcepts ??= new()).Add(e.Symbol);
+        }
+        if (deadConcepts is not null) foreach (var s in deadConcepts) DischargeConcept(s);
+    }
+
+    // RELEVANCE = success-weighted contribution to CORRECT ANSWERS (strong), with log-damped observation as a weak floor
+    // and failures as a penalty. "Helped answer" outranks "was merely seen". Clamped ≥ 0.
+    private static double RelationUtility(Relation r)
+        => Math.Max(0.0, 2.0 * r.SuccessCount + Math.Log(1.0 + r.ObservationCount) - r.FailureCount);
+
+    // FORGETTING CURVE: the base staleness window, EXTENDED in proportion to utility. Utility 0 → one window of grace;
+    // high utility → many windows (effectively immortal while it keeps earning answers). Everything decays; utility buys grace.
+    private double GraceFor(double utility) => (long)(DischargeStalenessWindow * (1.0 + Math.Max(0.0, utility)));
+
+    // Best SuccessCount over each concept's incident relations — how much its edges have CONTRIBUTED TO CORRECT ANSWERS.
+    private Dictionary<string, int> BuildBestRelationSuccess()
+    {
+        var best = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var r in _relations.Values)
+        {
+            if (r.SuccessCount <= 0) continue;
+            if (!best.TryGetValue(r.Left, out var l) || r.SuccessCount > l) best[r.Left] = r.SuccessCount;
+            if (!best.TryGetValue(r.Right, out var rr) || r.SuccessCount > rr) best[r.Right] = r.SuccessCount;
+        }
+        return best;
+    }
+
+    // ── GENERATIVE DECOMPOSITION (the tick's break-down op, [[nova-nn-directed-generative-tick]]) ─────────────────────
+    /// <summary>
+    /// Break a token into candidate SUB-ATOMS — its characters and short adjacent n-grams — each created as a first-class
+    /// atom and OBSERVED against the parent (a ▷ "agrees-with-its-part" edge). The candidates then COMPETE via the relevance
+    /// decay: a sub-atom that RECURS across tokens and CONTRIBUTES TO CORRECT ANSWERS (a morpheme like "hel") accrues
+    /// utility and survives, while a one-off substring goes stale and discharges. So useful granularity is DISCOVERED, not
+    /// fixed at char. Idempotent (the SAME sub-atom across tokens is the same element — that's how it recurs and wins).
+    /// </summary>
+    public IReadOnlyList<string> Decompose(string symbol)
+    {
+        var key = Normalize(symbol);
+        if (key.Length < 2 || FaceCodec.IsNumeric(key) || key.StartsWith('∘') || HasWhitespace(key)) return Array.Empty<string>();
+        _decomposed.Add(key);
+        var parts = CandidateGrams(key);
+        foreach (var p in parts)
+            if (!string.Equals(p, key, StringComparison.Ordinal)) ObserveContradiction(key, p, 0.05); // token ▷ part (creates + tracks it)
+        return parts;
+    }
+
+    // The candidate sub-atoms of a token: its characters + adjacent n-grams up to MaxDecomposeGram (the candidate morphemes).
+    private static IReadOnlyList<string> CandidateGrams(string key)
+    {
+        var parts = new List<string>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        void Add(string s) { if (seen.Add(s)) parts.Add(s); }
+        foreach (var c in key) Add(c.ToString());
+        for (var n = 2; n <= Math.Min(MaxDecomposeGram, key.Length - 1); n++)
+            for (var i = 0; i + n <= key.Length; i++) Add(key.Substring(i, n));
+        return parts;
+    }
+
+    // The tick driver: decompose the PROVEN tokens (reinforced ≥ DecomposeMinObservations) not yet broken down. Collect
+    // first, then decompose — Decompose mutates the store, so we never decompose while iterating it. Budgeted per sweep.
+    private void DecomposeReinforced()
+    {
+        var budget = 32;
+        List<string>? todo = null;
+        foreach (var e in _concepts.All)
+        {
+            if (budget <= 0) break;
+            if (e.Archived || e.Kind == ElementKind.Atom || e.Symbol.Length < 2) continue;
+            if (e.ObservationCount < DecomposeMinObservations || _decomposed.Contains(e.Symbol)) continue;
+            if (FaceCodec.IsNumeric(e.Symbol) || e.Symbol.StartsWith('∘') || HasWhitespace(e.Symbol)) continue;
+            (todo ??= new()).Add(e.Symbol); budget--;
+        }
+        if (todo is not null) foreach (var s in todo) Decompose(s);
+    }
+
+    private HashSet<int> BuildReferencedComponentIds()
+    {
+        var set = new HashSet<int>();
+        foreach (var e in _concepts.All)
+            foreach (var c in e.Components) set.Add(c);
+        return set;
+    }
+
+    // Release a discharged (noise) concept: drop it from the store + spatial index + its dangling edges. No orbital is
+    // preserved — it was never reinforced enough to be a real distinction; it re-creates fresh from observation if it recurs.
+    private void DischargeConcept(string symbol)
+    {
+        if (_adjacency.TryGetValue(symbol, out var nbrs))
+        {
+            foreach (var n in nbrs.ToArray())
+            {
+                _relations.Remove(Key(symbol, n));
+                if (_adjacency.TryGetValue(n, out var back)) back.Remove(symbol);
+            }
+            _adjacency.Remove(symbol);
+        }
+        _lattice.UnregisterNode(symbol);
+        _concepts.Remove(symbol);
+    }
+
+    // Remove an edge from the active index (both the relation record and the symmetric adjacency). Unlike a concept, a
+    // pruned co-occurrence edge has no learned orbital to preserve — it simply re-forms if the pair is observed again.
+    private void DropRelation(Relation r)
+    {
+        _relations.Remove(Key(r.Left, r.Right));
+        if (_adjacency.TryGetValue(r.Left, out var sa)) sa.Remove(r.Right);
+        if (_adjacency.TryGetValue(r.Right, out var sb)) sb.Remove(r.Left);
     }
 
     /// <summary>
@@ -520,6 +715,7 @@ public sealed class DialecticalSpace : IPlatonicSpace
             var key = Key(Normalize(ev.Concept), Normalize(ev.RelatedConcept));
             if (!_relations.TryGetValue(key, out var rel)) continue;
             rel.UseCount++;
+            rel.LastUsedStep = _observeStep; // recency-of-USE — keeps a useful edge fresh (drives the relevance grace)
             if (success) { rel.SuccessCount++; rel.Synthesis = Clamp01(rel.Synthesis - 0.05); }
             else { rel.FailureCount++; rel.Synthesis = Clamp01(rel.Synthesis + 0.05); }
             rel.LastObserved = rel.Synthesis;
@@ -653,12 +849,26 @@ public sealed class DialecticalSpace : IPlatonicSpace
         exclude.Add(Normalize(query));
 
         var best = string.Empty; var bestSim = double.NegativeInfinity;
-        foreach (var e in _concepts.All)
+        void Consider(Element e)
         {
-            if (e.Archived || e.Kind == ElementKind.Atom || FaceCodec.IsNumeric(e.Symbol)) continue;
-            if (IsReservedConcept(e.Symbol) || IsOperationToken(e.Symbol) || exclude.Contains(e.Symbol)) continue;
+            if (e.Archived || e.Kind == ElementKind.Atom || FaceCodec.IsNumeric(e.Symbol)) return;
+            if (IsReservedConcept(e.Symbol) || IsOperationToken(e.Symbol) || exclude.Contains(e.Symbol)) return;
             var sim = Dot(target, CloudOf(e));
             if (sim > bestSim) { bestSim = sim; best = e.Symbol; }
+        }
+        // The analogy answer is the nearest concept to `target` in meaning space — a kNN query, so use the VP-tree
+        // (O(log N)) instead of scanning the whole space, then LIVE-rescore the harvested candidates (tree distances
+        // discarded). Same hybrid as GetNearestConcepts/Reason: below LatticeMinNodes the exact scan is cheap and fresh.
+        if (_concepts.ActiveCount >= LatticeMinNodes)
+        {
+            var tFull = new double[_dim];
+            for (var i = 0; i < _semLen && _semStart + i < _dim; i++) tFull[_semStart + i] = target[i];
+            foreach (var (sym, _) in _lattice.GetSemanticNeighbors(tFull, 64, null))
+                if (_concepts.TryGet(sym, out var e)) Consider(e);
+        }
+        else
+        {
+            foreach (var e in _concepts.All) Consider(e);
         }
         return new Thought(best, Math.Clamp(bestSim, 0.0, 1.0), bestSim >= settleThreshold, 1);
     }
@@ -754,6 +964,15 @@ public sealed class DialecticalSpace : IPlatonicSpace
         if (_concepts.ActiveCount < FnMinWarm) return false;
         var key = Normalize(concept);
         if (GetRelationDegree(key) < FnMinDegree) return false; // needs enough neighbours for a real diversity reading
+        if (DistributionalFnWord)
+        {
+            // DISTRIBUTIONAL signal (PMI): a function word co-occurs with everything BY FREQUENCY (weak associations,
+            // PMI≈0); content co-occurs SELECTIVELY with its cluster (a strong PMI). So a low strongest-association = a
+            // function word — degree-robust where the graph clustering estimator is noisy (e.g. possessives).
+            EnsureAssocStats();
+            if (!_assocReady || _assocStd < 1e-6) return false;
+            return AssociationStrength(key) <= _assocMean - AssocSigma * _assocStd; // a LOW-association outlier
+        }
         EnsureFunctionStats();
         if (!_fnReady || _fnStd < 1e-6) return false;
         var coh = NeighbourCoherence(key);
@@ -768,6 +987,63 @@ public sealed class DialecticalSpace : IPlatonicSpace
         EnsureFunctionStats();
         var key = Normalize(concept);
         return (NeighbourCoherence(key), _fnMean, _fnStd, _fnMean - FnSigma * _fnStd, FnCohCeil, _concepts.ActiveCount, GetRelationDegree(key));
+    }
+
+    // ── DISTRIBUTIONAL function-word signal (theory #2): PMI from the co-occurrence COUNTS, not graph topology ────────
+    // A function word co-occurs with everything roughly BY CHANCE (count(a,b) ≈ obs(a)·obs(b)/N ⇒ PMI ≈ 0); a content
+    // word co-occurs SELECTIVELY with its cluster (count ≫ chance ⇒ high PMI). So a concept's STRONGEST associations are
+    // weak for a function word, strong for content — degree-robust (PMI normalises by frequency), where the graph
+    // clustering estimator gets noisy on low-degree words (possessives). Gated by DistributionalFnWord (default off).
+    public bool DistributionalFnWord { get; set; }
+    private const double AssocSigma = 0.5; // function = a LOW strongest-association OUTLIER below the body's mean
+    private double _assocMean, _assocStd; private int _assocStamp = -1; private bool _assocReady;
+
+    /// <summary>The mean of a concept's TOP-3 PMI associations — how STRONGLY/selectively it co-occurs with its partners.
+    /// High = content (a real cluster bond); low = function (it co-occurs by frequency, no selective bond). 0 if too sparse.</summary>
+    public double AssociationStrength(string concept)
+    {
+        var key = Normalize(concept);
+        if (!_adjacency.TryGetValue(key, out var nbrs) || nbrs.Count < 2 || !_concepts.TryGet(key, out var ea)) return 0.0;
+        var n = (double)Math.Max(1, _observeStep);
+        var oa = (double)Math.Max(1, ea.ObservationCount);
+        var pmis = new List<double>(nbrs.Count);
+        foreach (var nb in nbrs)
+        {
+            if (!_relations.TryGetValue(Key(key, nb), out var r) || r.ObservationCount <= 0) continue;
+            if (!_concepts.TryGet(nb, out var eb)) continue;
+            pmis.Add(Math.Log((r.ObservationCount * n) / (oa * Math.Max(1, eb.ObservationCount)))); // PMI(a,b)
+        }
+        if (pmis.Count == 0) return 0.0;
+        pmis.Sort();
+        var k = Math.Min(3, pmis.Count);                          // the STRONGEST associations (robust max)
+        double s = 0; for (var i = pmis.Count - k; i < pmis.Count; i++) s += pmis[i];
+        return s / k;
+    }
+
+    /// <summary>DIAGNOSTIC (Inspect tab): a concept's strongest-association strength + the population threshold, so the
+    /// PMI verdict (function if Assoc ≤ Threshold) can be shown SIDE-BY-SIDE with the graph metric on the same space.</summary>
+    public (double Assoc, double Mean, double Std, double Threshold) AssociationStats(string concept)
+    {
+        EnsureAssocStats();
+        return (AssociationStrength(Normalize(concept)), _assocMean, _assocStd, _assocMean - AssocSigma * _assocStd);
+    }
+
+    private void EnsureAssocStats()
+    {
+        var count = _concepts.ActiveCount;
+        if (_assocReady && Math.Abs(count - _assocStamp) < Math.Max(16, count / 16)) return;
+        double sum = 0, sumSq = 0; var n = 0;
+        foreach (var e in _concepts.All)
+        {
+            if (e.Archived || e.Kind == ElementKind.Atom || FaceCodec.IsNumeric(e.Symbol)) continue;
+            if (GetRelationDegree(e.Symbol) < FnMinDegree) continue;
+            var a = AssociationStrength(e.Symbol);
+            sum += a; sumSq += a * a; n++;
+        }
+        var nn = Math.Max(1, n);
+        _assocMean = sum / nn;
+        _assocStd = Math.Sqrt(Math.Max(0.0, sumSq / nn - _assocMean * _assocMean));
+        _assocStamp = count; _assocReady = n > 0;
     }
 
     // ─────────────────────────────────────────────────────────────────────────────── Recognition hierarchy (M3)
@@ -791,9 +1067,31 @@ public sealed class DialecticalSpace : IPlatonicSpace
             return new Recognition(key, 1.0, WholeHit: true, existing.Components.Length, existing.Components.Length); // remembered whole
 
         var (known, total) = ComponentCoverage(key);
-        GetOrCreateConcept(key);   // compose-and-store: builds the hub over its components (and any novel parts)
+        var e = GetOrCreateConcept(key);   // compose-and-store: builds the hub over its components (and any novel parts)
+        if (GenerativeAtoms && !HasWhitespace(key) && known > 0)
+            ComposeMeaningFromKnownParts(key, e); // GENERALISE: position the novel token from its known morphemes
         var conf = total > 0 ? (double)known / total : 0.5;
         return new Recognition(key, conf, WholeHit: false, known, total);
+    }
+
+    // GENERALISATION (the payoff of generative atoms): a novel token's meaning is the BLEND of its KNOWN MORPHEMES' clouds,
+    // so "helix" lands near the words that share "hel" — recognised though never seen. Only reinforced multi-char morphemes
+    // contribute (single chars are near-centroid noise; the competition already filtered the useless chunks).
+    private void ComposeMeaningFromKnownParts(string key, Element e)
+    {
+        var acc = new double[_semLen]; var n = 0;
+        foreach (var g in CandidateGrams(key))
+        {
+            if (g.Length < 2 || string.Equals(g, key, StringComparison.Ordinal)) continue;
+            if (!_concepts.TryGet(g, out var part) || part.Archived || part.Kind == ElementKind.Atom) continue;
+            var c = CloudOf(part);
+            for (var i = 0; i < _semLen && i < c.Length; i++) acc[i] += c[i];
+            n++;
+        }
+        if (n == 0) return;
+        var dst = e.SemanticFace;
+        for (var i = 0; i < _semLen && i < dst.Length; i++) dst[i] = acc[i] / n;
+        _lattice.MarkEmbeddingsDirty();
     }
 
     /// <summary>How many of an input's ▷ components are already KNOWN (text→words, word→char atoms).</summary>
@@ -803,6 +1101,12 @@ public sealed class DialecticalSpace : IPlatonicSpace
         {
             var words = key.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
             return (words.Count(w => _concepts.Contains(w)), words.Length);
+        }
+        if (GenerativeAtoms)
+        {
+            // Coverage by KNOWN MORPHEMES (the surviving n-grams ≥2) — single chars are uninformative (near-centroid).
+            var grams = CandidateGrams(key).Where(g => g.Length >= 2).ToList();
+            return grams.Count == 0 ? (0, 0) : (grams.Count(_concepts.Contains), grams.Count);
         }
         return (key.Count(c => _concepts.Contains("atom:" + c)), key.Length);
     }
@@ -957,9 +1261,19 @@ public sealed class DialecticalSpace : IPlatonicSpace
             r.Mean, r.Min, r.Max, u.Mean, u.Min, u.Max);
     }
 
-    // ─────────────────────────────────────────────────────────────────────────────── Maintenance (G6) — M0 no-op
+    // ─────────────────────────────────────────────────────────────────────── Maintenance — discharge by relevance (no cap)
+    /// <summary>
+    /// The LIVE maintenance path: release stale noise by relevance-decay (see <see cref="DischargeIrrelevant"/>). It does
+    /// NOT contract the space to any cap — it only ever touches barely-observed, stale concepts, never a reinforced or
+    /// recently-active one, so an in-progress lesson (and the reinforced function-word geometry) is always safe.
+    /// </summary>
     public PlatonicSpaceMemory.SpaceMaintenanceResult ApplyMaintenance(PlatonicSpaceMemory.SpaceMaintenanceRequest request)
-        => new(0, 0, 0); // archival/eviction not needed for correctness; deepened later
+    {
+        var before = _concepts.ActiveCount;
+        DischargeIrrelevant();
+        _lastDischargeStep = _observeStep;
+        return new(0, Math.Max(0, before - _concepts.ActiveCount), 0);
+    }
 
     // ─────────────────────────────────────────────────────────────────────────────── Snapshots (checkpoint compat)
     public PlatonicMemorySnapshot ExportSnapshot()
@@ -969,8 +1283,12 @@ public sealed class DialecticalSpace : IPlatonicSpace
         // symbol and ▷-components are re-derived from the symbol, so storing the orbital + kind round-trips exactly.
         // Numeric elements are codec-exact and never relate, so they're recreated on demand (omitted). Nodes are left
         // EMPTY — Elements supersedes the old lossy full-face node path (which only ever restored the orbital anyway).
+        // Persist the ACTIVE set only — NOT archived (evicted) elements. In-session dormancy (G6 reactivation) keeps
+        // archived concepts in the live store, but serializing the evicted long tail would re-bloat the checkpoint
+        // unboundedly under corpus scale (the storage half of the blow-up) and defeat the eviction. An evicted concept
+        // that recurs after a reload is simply re-created from observation — exactly as it was first learned.
         var elements = _concepts.All
-            .Where(e => !FaceCodec.IsNumeric(e.Symbol))
+            .Where(e => !e.Archived && !FaceCodec.IsNumeric(e.Symbol))
             .Select(e => new DialecticalElementSnapshot(e.Symbol, (int)e.Kind, (double[])e.SemanticFace.Clone(), e.ObservationCount, e.Archived))
             .ToArray();
         var rels = _relations.Values.Select(r => new PlatonicRelationSnapshot(

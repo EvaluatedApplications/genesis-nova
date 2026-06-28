@@ -15,17 +15,28 @@ namespace GenesisNova.Cognition.Platonic;
 public sealed class ElementStore
 {
     private readonly Dictionary<string, Element> _bySymbol = new(System.StringComparer.Ordinal);
-    private readonly List<Element> _byId = new();
+    // Keyed by monotone Id (never reused), NOT a List, so deeply-dormant elements can be PURGED to keep the store bounded
+    // (see Remove). Ids stay dense-enough for ById; gaps from purges are fine (ById is a dictionary lookup).
+    private readonly Dictionary<int, Element> _byId = new();
     private int _nextId;
-    private int _activeCount; // tracked incrementally so ActiveCount is O(1) — it gates per-query hot paths
+    private int _activeCount;    // tracked incrementally so ActiveCount is O(1) — it gates per-query hot paths
+    private int _activeConcepts; // active elements that are NOT atoms (= NodeCount). O(1), and safe to read concurrently
+                                 // from /status without enumerating the live store (which races with training).
 
     /// <summary>Live (non-archived) element count. O(1) (maintained on create/reactivate/archive).</summary>
     public int ActiveCount => _activeCount;
 
-    /// <summary>Total elements ever created, including archived (G6 — the space only grows).</summary>
+    /// <summary>Live non-atom element count (= concept NodeCount). O(1) and concurrency-safe (a plain int read).</summary>
+    public int ActiveConceptCount => _activeConcepts;
+
+    /// <summary>Elements currently retained (active + archived-but-not-yet-purged). Bounded by the caller's archive budget.</summary>
     public int TotalCount => _byId.Count;
 
-    public IReadOnlyList<Element> All => _byId;
+    /// <summary>The next Id to be assigned — i.e. one past the highest Id ever created. Monotone; survives purges (unlike
+    /// <see cref="TotalCount"/>), so it is the correct basis for "most-recently-created" recency windows.</summary>
+    public int NextId => _nextId;
+
+    public IReadOnlyCollection<Element> All => _byId.Values;
 
     public bool TryGet(string symbol, out Element element) => _bySymbol.TryGetValue(symbol, out element!);
 
@@ -43,14 +54,15 @@ public sealed class ElementStore
     {
         if (_bySymbol.TryGetValue(symbol, out var existing))
         {
-            if (existing.Archived) { existing.Archived = false; _activeCount++; } // reactivate (G6)
+            if (existing.Archived) { existing.Archived = false; _activeCount++; if (existing.Kind != ElementKind.Atom) _activeConcepts++; } // reactivate (G6)
             return existing;
         }
 
         var element = new Element(_nextId++, kind, symbol, freshSemanticFace(), components);
         _bySymbol[symbol] = element;
-        _byId.Add(element);
+        _byId[element.Id] = element;
         _activeCount++;
+        if (kind != ElementKind.Atom) _activeConcepts++;
         return element;
     }
 
@@ -61,6 +73,23 @@ public sealed class ElementStore
         {
             e.Archived = true;
             _activeCount--;
+            if (e.Kind != ElementKind.Atom) _activeConcepts--;
         }
+    }
+
+    /// <summary>
+    /// PERMANENTLY forget a deeply-dormant element so the store stays bounded under corpus-scale churn. G6 keeps an
+    /// evicted distinction reactivatable, but an effectively-infinite stream of once-seen tokens would otherwise grow the
+    /// store (and every O(TotalCount) scan / the RAM footprint) without limit. The caller purges only the OLDEST archived
+    /// elements beyond an archive budget, and never one still referenced as a ▷-component — so this is the bounded tail of
+    /// dormancy, consistent with the checkpoint already persisting the active set only. A purged symbol re-creates fresh
+    /// from observation, exactly as first learned.
+    /// </summary>
+    public void Remove(string symbol)
+    {
+        if (!_bySymbol.TryGetValue(symbol, out var e)) return;
+        _bySymbol.Remove(symbol);
+        _byId.Remove(e.Id);
+        if (!e.Archived) { _activeCount--; if (e.Kind != ElementKind.Atom) _activeConcepts--; } // callers only purge archived; stay honest
     }
 }

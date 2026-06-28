@@ -72,6 +72,7 @@ public interface IPlatonicSpace
     // Core (PlatonicSpaceMemory.cs).
     bool UseInfoNceRepulsion { get; set; }
     bool DimensionalContradiction { get; set; }   // Phase 1 dialectic: per-dimension agreement/contradiction
+    bool GenerativeAtoms { get => false; set { } } // token-as-atom + decompose/recognise (default off; only DialecticalSpace implements)
     int NodeCount { get; }
     int RelationCount { get; }
     int ArchivedNodeCount { get; }

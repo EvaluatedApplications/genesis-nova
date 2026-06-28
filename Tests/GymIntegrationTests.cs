@@ -43,6 +43,8 @@ public sealed class GymIntegrationTests
             AutoResume: false,
             AutoPersist: true,
             LocalStateDirectory: tempDir).WithProductionMechanisms();
+        if (Environment.GetEnvironmentVariable("NOVA_BATCHED_GPU") == "1") config = config with { BatchedCloudGpu = true }; // verify the GPU cloud path under the full gym
+        _out.WriteLine($"BatchedCloudGpu = {config.BatchedCloudGpu}");
 
         var runtime = new GenesisEvalAppRuntime(config);
 

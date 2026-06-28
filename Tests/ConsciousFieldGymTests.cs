@@ -33,6 +33,7 @@ public sealed class ConsciousFieldGymTests
         var tok = new WhitespaceGenesisTokenizer();
         var model = new GenesisNeuralModel(config);
         var space = new DialecticalSpace(config.FaceDimension, seed: 7);
+        if (Environment.GetEnvironmentVariable("NOVA_BATCHED_GPU") == "1") space.BatchedCloudGpu = true; // A/B the GPU cloud path under the real gym
         var infer = new GenesisInferenceEngine(tok, model, space, null) { ConsciousField = true };
         GrammarWarmup.WarmOpCues(infer); // worded op-cues ("plus"/"product") are LEARNED, not hardcoded — teach them (fast, no GRU training)
 

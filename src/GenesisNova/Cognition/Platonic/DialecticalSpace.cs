@@ -1346,6 +1346,7 @@ public sealed class DialecticalSpace : IPlatonicSpace
     // ─────────────────────────────────────────────────────────────────────────────── Snapshots (checkpoint compat)
     public PlatonicMemorySnapshot ExportSnapshot()
     {
+        EnsureCloudsFresh(); // fold any deferred batched-GPU clouds into SemanticFace before snapshotting (else stale)
         // FAITHFUL: capture EVERY non-numeric element (INCLUDING atoms) with its learned ORBITAL + kind + lifecycle.
         // The orbital (semantic-face slice) is the ONLY mutable state; identity faces are codec-derived from the
         // symbol and ▷-components are re-derived from the symbol, so storing the orbital + kind round-trips exactly.

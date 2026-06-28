@@ -75,7 +75,10 @@ public sealed record GenesisNovaConfig(
     // large/word face (compose two meanings, analogy by relation-vector). Default false (byte-identical); the app
     // turns them on so the field REASONS over the substrate instead of only retrieving from it.
     bool FieldTicks = false,
-    bool MeaningOps = false)
+    bool MeaningOps = false,
+    // Substrate perf: deferred batched-GPU cloud recompute (Cloud = A·T on CUDA) replacing per-observation scalar
+    // RecomputeCloud. Default false (byte-identical scalar path); when on, observations defer + flush in batches.
+    bool BatchedCloudGpu = false)
 {
     /// <summary>
     /// Platonic face (embedding) width. By default equals the GRU width (HiddenSize); when

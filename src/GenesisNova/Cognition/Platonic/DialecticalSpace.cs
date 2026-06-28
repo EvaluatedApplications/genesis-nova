@@ -79,6 +79,18 @@ public sealed class DialecticalSpace : IPlatonicSpace
     private const long DecomposeMinObservations = 3;   // only PROVEN tokens (reinforced) are decomposed — never noise
     private readonly HashSet<string> _decomposed = new(StringComparer.Ordinal); // decompose each token at most once
 
+    // BATCHED-GPU CLOUD RECOMPUTE (gated, default OFF = per-observation scalar RecomputeCloud, byte-identical). When ON,
+    // ObserveContradiction does NOT recompute clouds inline; it marks both endpoints DIRTY and defers. Every CloudFlushInterval
+    // observations (or before any cloud read) the whole dirty set is recomputed in ONE batched op (GpuCloudBatcher, Cloud = A·T
+    // on CUDA). This both dedupes redundant recompute (a hub touched N×/flush → recomputed once) and moves the semLen-wide
+    // multiply-accumulate onto the GPU — the substrate's measured bottleneck (638 obs/s scalar). Clouds carry BOUNDED staleness
+    // between flushes; read paths flush first (EnsureCloudsFresh), so retrieval always sees current geometry.
+    public bool BatchedCloudGpu { get; set; }
+    public long CloudFlushInterval { get; set; } = 8_192;       // observations between batched flushes (larger = more dedup)
+    private GpuCloudBatcher? _batcher;
+    private readonly HashSet<string> _dirtyCloud = new(StringComparer.Ordinal);
+    private long _obsSinceFlush;
+
     public DialecticalSpace(int faceDimension, int seed = 42)
     {
         _dim = Math.Max(4, faceDimension);
@@ -295,6 +307,7 @@ public sealed class DialecticalSpace : IPlatonicSpace
 
     public bool TryGetConceptFace(string concept, out double[] positiveFace)
     {
+        EnsureCloudsFresh();
         var key = Normalize(concept);
         if (FaceCodec.IsNumeric(key))
         {
@@ -385,6 +398,7 @@ public sealed class DialecticalSpace : IPlatonicSpace
 
     public double[] ComputeRoutePerception(string anchor, double transformReliability = 0.0)
     {
+        EnsureCloudsFresh();
         var near = GetNearestConceptsFresh(anchor, seeds: null, maxNeighbors: 4);
         var hasNeighbour = near.Count > 0 ? 1.0 : 0.0;
         var nearestConf = near.Count > 0 ? 1.0 / (1.0 + Math.Max(0.0, near[0].Distance)) : 0.0;
@@ -428,8 +442,16 @@ public sealed class DialecticalSpace : IPlatonicSpace
         // subtracts) — computed PRESENCE-based (each neighbour once, NOT per-observation, so repeated training never
         // drowns the self-token). Related concepts share context → clouds overlap; unrelated go orthogonal, no
         // repulsion tuning. Both endpoints' neighbour sets just changed, so recompute both.
-        RecomputeCloud(ea);
-        RecomputeCloud(eb);
+        if (BatchedCloudGpu)
+        {
+            _dirtyCloud.Add(a); _dirtyCloud.Add(b);             // defer — recompute once per flush (dedup), on GPU
+            if (++_obsSinceFlush >= CloudFlushInterval) FlushClouds();
+        }
+        else
+        {
+            RecomputeCloud(ea);
+            RecomputeCloud(eb);
+        }
         if (now - _lastDischargeStep >= DischargeInterval)
         {
             _lastDischargeStep = now;                 // set FIRST so re-entrant observes (from Decompose) don't re-trigger
@@ -594,16 +616,23 @@ public sealed class DialecticalSpace : IPlatonicSpace
     /// pairs (big↔large) going orthogonal. Agree (low κ) adds the neighbour's token (clouds overlap); contradict (high
     /// κ) subtracts it. Drift-free: always reflects the current relation set. The arithmetic face is untouched.
     /// </summary>
+    // The deterministic identity token of a concept (FaceCodec.Token), MEMOIZED on the element. Pure function of
+    // (symbol, dim) → caching is bit-identical. The returned array is SHARED/read-only — clone before mutating.
+    private double[] TokenOf(Element e) => e.TokenVector ??= FaceCodec.Token(e.Symbol, _dim);
+
+    private double[] TokenOf(string symbol)
+        => _concepts.TryGet(symbol, out var e) ? TokenOf(e) : FaceCodec.Token(symbol, _dim);
+
     private void RecomputeCloud(Element e)
     {
-        var cloud = FaceCodec.Token(e.Symbol, _dim); // self-token, weight 1
+        var cloud = (double[])TokenOf(e).Clone(); // self-token, weight 1 (clone — the cached token is shared/read-only)
         if (_adjacency.TryGetValue(e.Symbol, out var nbrs))
         {
             foreach (var n in nbrs)
             {
                 var aff = 1.0 - 2.0 * Clamp01(GetContradiction(e.Symbol, n));
                 if (Math.Abs(aff) < 1e-9) continue;
-                var t = FaceCodec.Token(n, _dim);
+                var t = TokenOf(n);                 // cached deterministic token (bit-identical to FaceCodec.Token)
                 for (var i = 0; i < _semLen; i++) cloud[i] += aff * t[i];
             }
         }
@@ -611,6 +640,43 @@ public sealed class DialecticalSpace : IPlatonicSpace
         for (var i = 0; i < _semLen && i < cloud.Length && i < dst.Length; i++) dst[i] = cloud[i];
         _lattice.MarkEmbeddingsDirty(); // the semantic face moved → drift toward a VP-tree rebuild
     }
+
+    // BATCHED-GPU PATH (BatchedCloudGpu). Recompute every DIRTY concept's cloud in one GpuCloudBatcher op, writing the raw
+    // (unnormalized) cloud back into each element's SemanticFace — identical to RecomputeCloud's definition up to float32.
+    private void FlushClouds()
+    {
+        _obsSinceFlush = 0;
+        if (_dirtyCloud.Count == 0) return;
+        _batcher ??= new GpuCloudBatcher(_semLen, preferCuda: true);
+        var selves = new List<string>(_dirtyCloud.Count);
+        foreach (var s in _dirtyCloud)
+            if (_concepts.TryGet(s, out var e) && !e.Archived) selves.Add(s);
+        _dirtyCloud.Clear();
+        if (selves.Count == 0) return;
+        _batcher.Flush(selves, TokenOf, EntriesFor, (r, cloud) =>
+        {
+            if (!_concepts.TryGet(selves[r], out var e)) return;
+            var dst = e.SemanticFace;
+            for (var i = 0; i < _semLen && i < cloud.Length && i < dst.Length; i++) dst[i] = cloud[i];
+        });
+        _lattice.MarkEmbeddingsDirty();
+    }
+
+    // A concept's neighbour entries for the batched recompute: (neighbour, affinity) — the SAME affinity the scalar path uses.
+    private IReadOnlyList<(string nbr, double weight)> EntriesFor(string self)
+    {
+        if (!_adjacency.TryGetValue(self, out var nbrs) || nbrs.Count == 0) return Array.Empty<(string, double)>();
+        var list = new List<(string, double)>(nbrs.Count);
+        foreach (var n in nbrs) list.Add((n, 1.0 - 2.0 * Clamp01(GetContradiction(self, n))));
+        return list;
+    }
+
+    // Read paths call this first so retrieval/relaxation never sees a stale deferred cloud.
+    private void EnsureCloudsFresh() { if (BatchedCloudGpu && _dirtyCloud.Count > 0) FlushClouds(); }
+
+    /// <summary>Force any deferred (batched-GPU) cloud recomputes to complete now — call before a checkpoint/inspect snapshot,
+    /// or to fold the final partial batch into a measurement. No-op unless <see cref="BatchedCloudGpu"/> is on with work pending.</summary>
+    public void FlushCloudBatch() => EnsureCloudsFresh();
 
     private static void ClampNorm(double[] v)
     {
@@ -738,6 +804,7 @@ public sealed class DialecticalSpace : IPlatonicSpace
     public Thought Reason(IReadOnlyList<string> anchors, int maxCandidates = 64, double beta = 12.0, int steps = 8, double settleThreshold = 0.3,
         double[]? selfContext = null, double selfWeight = 0.0)
     {
+        EnsureCloudsFresh();
         var anchorSet = new HashSet<string>(StringComparer.Ordinal);
         var q = new double[_semLen];
         foreach (var a in anchors ?? Array.Empty<string>())
@@ -891,6 +958,7 @@ public sealed class DialecticalSpace : IPlatonicSpace
     /// sense OF. Public so the MIND (the inference engine) can accumulate a persistent self from what it attends to.</summary>
     public double[]? SemanticVectorOf(string concept)
     {
+        EnsureCloudsFresh();
         var key = Normalize(concept);
         if (IsOperationToken(key) || FaceCodec.IsNumeric(key)) return null;
         return _concepts.TryGet(key, out var e) && !e.Archived && e.Kind != ElementKind.Atom ? CloudOf(e) : null;

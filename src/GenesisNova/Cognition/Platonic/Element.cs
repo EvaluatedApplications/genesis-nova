@@ -73,4 +73,12 @@ public sealed class Element
     /// as noise, while a reinforced or recently-active one is retained. Runtime signal — not persisted (decay restarts per
     /// session). Distinct from a size cap: the space holds as much RELEVANT structure as exists; only noise is released.</summary>
     public long LastSeenStep { get; set; }
+
+    /// <summary>Cached deterministic identity token — <c>FaceCodec.Token(Symbol)</c> over the semantic length. The token is a
+    /// pure function of (Symbol, dim) (a seeded hash + normalize), so caching is BIT-IDENTICAL; it is this element's
+    /// CONTRIBUTION row to every neighbour's cloud (the distributional sum Cloud = A·T). Recomputed before every observation
+    /// in the old hot loop — memoizing it here removes a hash+alloc+normalize per neighbour per observation. Dropped with the
+    /// element on discharge (bounded by the active set); not persisted (recomputed deterministically on first use). Treat as
+    /// READ-ONLY — never mutate the shared array (clone before accumulating into it).</summary>
+    public double[]? TokenVector;
 }

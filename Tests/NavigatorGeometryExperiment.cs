@@ -17,7 +17,7 @@ namespace GenesisNova.Tests;
 /// NAVIGABLE for the learned navigator? (PLATONIC_NAVIGATOR.md §7; nova-distributional-large-face.)
 ///
 /// HYPOTHESIS (first principles): the navigator reads MEANING differentials (candFace − goalFace). Meaning lives in
-/// the orbital cloud [OrbitalStart=416, 512); the frozen address [0,416) is random spelling/identity (noise for
+/// the orbital cloud [OrbitalStart=416, dim); the frozen address [0,416) is random spelling/identity (noise for
 /// navigation). By Law D a concept's orbital cloud = superposition of its relational context. If that geometry
 /// reflects graph structure, a goal-ward gradient EXISTS and the navigator should generalise better.
 ///
@@ -29,7 +29,7 @@ public sealed class NavigatorGeometryExperiment
     private readonly ITestOutputHelper _out;
     public NavigatorGeometryExperiment(ITestOutputHelper o) => _out = o;
 
-    private const int Dim = 512;
+    private const int Dim = 1024; // production face: orbital [416,1024) = 608 learned meaning dims
     private const int Hidden = 2048;
     private const int K = 16;
     private const int BcEpochs = 30;
@@ -122,7 +122,7 @@ public sealed class NavigatorGeometryExperiment
     private static IEnumerable<string[]> StarChains(IEnumerable<(string Category, string[] Entities)> stars)
         => stars.SelectMany(s => s.Entities.Select(e => new[] { e, s.Category }));
 
-    // The orbital region [416,512) of a concept's assembled face (unit-normalised by NormalizeSemantic).
+    // The orbital region [416,dim) of a concept's assembled face (unit-normalised by NormalizeSemantic).
     private static double[]? Orbital(DialecticalSpace space, string c)
     {
         if (!space.TryGetConceptFace(c, out var face) || face.Length < Dim) return null;
@@ -264,7 +264,7 @@ public sealed class NavigatorGeometryExperiment
             }
         }
 
-        _out.WriteLine("=== STEP 2 GEOMETRY vs GRAPH STRUCTURE (orbital region [416,512), unit-norm) ===");
+        _out.WriteLine($"=== STEP 2 GEOMETRY vs GRAPH STRUCTURE (orbital region [{OrbStart},{Dim}), unit-norm) ===");
         foreach (var hop in byHopEuclid.Keys.OrderBy(h => h))
             _out.WriteLine($"   hop {hop}: n={byHopEuclid[hop].Count,6} | mean orbital-dist={byHopEuclid[hop].Average():F3} | mean cos={byHopCos[hop].Average():F3}");
         _out.WriteLine($"   disconnected (different component): n={disconnEuclid.Count,6} | mean orbital-dist={(disconnEuclid.Count > 0 ? disconnEuclid.Average() : double.NaN):F3} | mean cos={(disconnCos.Count > 0 ? disconnCos.Average() : double.NaN):F3}");

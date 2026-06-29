@@ -18,7 +18,7 @@ public sealed class FlowFieldOracleTests
     private readonly ITestOutputHelper _out;
     public FlowFieldOracleTests(ITestOutputHelper o) => _out = o;
 
-    private const int Dim = 512;
+    private const int Dim = 1024; // production face: address-space layout active, orbital [416,1024) = 608 learned dims
 
     // Plant a relation edge a↔b (contradiction 0 → strength 1.0). Relations index both endpoints, so the edge is
     // traversable in reverse — exactly what backward Dijkstra needs.

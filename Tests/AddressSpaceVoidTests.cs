@@ -16,7 +16,7 @@ namespace GenesisNova.Tests;
 /// </summary>
 public sealed class AddressSpaceVoidTests
 {
-    private const int Dim = 512; // address-space layout active only at dim >= 512
+    private const int Dim = 1024; // production face: address-space layout active (dim >= 512), orbital [416,1024)=608
     private readonly ITestOutputHelper _out;
     public AddressSpaceVoidTests(ITestOutputHelper o) => _out = o;
 

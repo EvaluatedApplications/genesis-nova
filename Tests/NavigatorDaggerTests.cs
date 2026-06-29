@@ -26,7 +26,7 @@ public sealed class NavigatorDaggerTests
     private readonly ITestOutputHelper _out;
     public NavigatorDaggerTests(ITestOutputHelper o) => _out = o;
 
-    private const int Dim = 512;        // FaceDimension (the decodable address space)
+    private const int Dim = 1024;       // production FaceDimension (decodable address space; orbital [416,1024)=608)
     private const int Hidden = 2048;    // production HiddenSize — the thin trunk width
     private const int K = 16;           // egocentric candidate fan-out
     // Deliberately LIGHT BC warm-start: enough to orient the net, NOT enough to solve the training graph — so the net

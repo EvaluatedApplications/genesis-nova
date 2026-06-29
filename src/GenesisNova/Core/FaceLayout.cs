@@ -125,7 +125,8 @@ public static class FaceLayout
     //   spelling  [48,208)   16 char-slots × 10 dims; slot i = deterministic atom of s[i] (decodable)
     //   structure [208,400)  6 child-slots × 32 = (child-digest 24 + role/label 8)
     //   op        [400,416)  16-dim deterministic op code
-    //   orbital   [416,512)  LEARNED meaning tail — the ONLY mutable region
+    //   orbital   [416,dim)  LEARNED meaning tail — the ONLY mutable region. At the production face dim 1024
+    //                        this is [416,1024) = 608 dims (the frozen address bands ≤416 are fixed regardless of dim).
     // ============================================================================================
 
     /// <summary>Production dimension at which the fixed-offset address-space layout activates.</summary>

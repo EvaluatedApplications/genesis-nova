@@ -20,7 +20,7 @@ public sealed class NavigatorWalkTests
     private readonly ITestOutputHelper _out;
     public NavigatorWalkTests(ITestOutputHelper o) => _out = o;
 
-    private const int Dim = 512;
+    private const int Dim = 1024; // production face: address space active, orbital [416,1024) = 608 learned dims
 
     private static void Relate(DialecticalSpace s, string a, string b) => s.ObserveContradiction(a, b, 0.0);
 

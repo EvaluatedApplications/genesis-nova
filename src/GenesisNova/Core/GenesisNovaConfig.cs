@@ -30,12 +30,13 @@ public sealed record GenesisNovaConfig(
     int MaxPlatonicNodes = 100_000,
     int MaxPlatonicRelations = 500_000,
     double L2RegularizationCoefficient = 0.0,
-    // DECOUPLED platonic face width. 0 (default) = track HiddenSize (legacy behaviour). When > 0, the
-    // platonic substrate width is FIXED to this value INDEPENDENT of the GRU controller width — because
-    // the model has zero face-dimension-sized parameters (face↔GRU bridge is by NAME, not vector
-    // alignment, see FaceDimension), so the substrate (and its exact homomorphism) can stay full-size
-    // while the controller (HiddenSize) shrinks. This is the "fixed substrate, variable controller" knob.
-    int FaceDimensionOverride = 0,
+    // DECOUPLED platonic face width. 1024 (default) = the PRODUCTION substrate width: frozen address bands
+    // [0,416) + a 608-dim learned orbital tail [416,1024) (see FaceLayout). Set 0 to track HiddenSize (legacy
+    // behaviour); any other >0 pins a fixed width. The width is INDEPENDENT of the GRU controller width because
+    // the model has zero face-dimension-sized parameters (face↔GRU bridge is by NAME, not vector alignment, see
+    // FaceDimension), so the substrate (and its exact homomorphism) stays full-size while the controller
+    // (HiddenSize) is chosen separately. This is the "fixed substrate, variable controller" knob.
+    int FaceDimensionOverride = 1024,
     // EDGE-FOLLOWING RETRIEVAL at inference. true (default) = the full route ladder (relation-first edge +
     // multi-hop concept-chain walk) is available below proximity kNN. false = retrieval is proximity-kNN ONLY
     // (geometric "position IS identity"); relation edges are still observed/trained (attraction+repulsion shape

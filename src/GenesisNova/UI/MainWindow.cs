@@ -68,7 +68,8 @@ public class MainWindow : Form
         }
         catch { /* seeding is best-effort — a missing/torn starter just means a fresh empty brain */ }
 
-        // Production gym standard: 2048 GRU controller + decoupled 512 substrate face-dim, fixed (no autoscale).
+        // Production gym standard: 2048 GRU controller + decoupled 1024 substrate face-dim, fixed (no autoscale).
+        // The 1024 face gives the learned-meaning orbital [416,1024) = 608 dims (the frozen address bands ≤416 are fixed).
         // The ARCHITECTURE (conscious field, dialectical core, keep-core, the meaning-space self, function gradient)
         // is defined ONCE in GenesisNovaConfig.WithProductionMechanisms() — shared with the RaceBench benchmark so the
         // race always runs the same brain. Here we set only the deployment INFRA (dims, dirs, backend, persistence).
@@ -76,7 +77,7 @@ public class MainWindow : Form
         {
             Backend = ComputeBackend.Gpu,
             HiddenSize = 2048,
-            FaceDimensionOverride = 512,
+            FaceDimensionOverride = 1024,
             AutoPersist = true,
             AutoResume = true,
             LocalStateDirectory = _gymStateDir,

@@ -15,8 +15,14 @@ namespace GenesisNova.Cognition.Platonic;
 /// </summary>
 public static class FaceCodec
 {
-    /// <summary>Start of the mutable semantic (orbital) region — the word face [WordFaceStart, dim).</summary>
-    public static int SemanticStart(int dim) => FaceLayout.WordFaceStart(dim);
+    /// <summary>
+    /// Start of the mutable semantic (orbital) region. At address-space dims (≥512) this is the fixed
+    /// orbital tail <see cref="FaceLayout.OrbitalStart"/> (416) — the ONLY mutable region; everything
+    /// below it is frozen, decodable address. Below 512 it falls back to the legacy word face
+    /// <see cref="FaceLayout.WordFaceStart"/> so small-dim callers/tests are unaffected.
+    /// </summary>
+    public static int SemanticStart(int dim)
+        => FaceLayout.IsAddressSpace(dim) ? FaceLayout.OrbitalStart : FaceLayout.WordFaceStart(dim);
 
     /// <summary>Width of the semantic orbital an element stores.</summary>
     public static int SemanticLength(int dim) => System.Math.Max(0, dim - SemanticStart(dim));

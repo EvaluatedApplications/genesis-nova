@@ -111,4 +111,75 @@ public static class FaceLayout
         var slot = WordSlotDims(wordDims);
         return slot > 0 ? Math.Max(0, wordDims / slot) : 0;
     }
+
+    // ============================================================================================
+    // ADDRESS-SPACE LAYOUT (PLATONIC_NUCLEUS.md §1, PLATONIC_THEORY.md §9.4) — FIXED offsets,
+    // active ONLY when dim >= AddressSpaceDim (512). Below that, the legacy CharFace/WordFace layout
+    // above remains in force so small-dim callers/tests are unaffected. The whole region
+    // [0, OrbitalStart) is a FROZEN, codec-derived, invertible address; only [OrbitalStart, dim) is
+    // the learned, materialised-only meaning tail.
+    //
+    //   poly      [0,21)     number value (add/sub) — byte-identical to the legacy numeric face
+    //   log       [21,42)    number value (mul/div) — byte-identical
+    //   kind      [42,48)    6-dim deterministic kind code
+    //   spelling  [48,208)   16 char-slots × 10 dims; slot i = deterministic atom of s[i] (decodable)
+    //   structure [208,400)  6 child-slots × 32 = (child-digest 24 + role/label 8)
+    //   op        [400,416)  16-dim deterministic op code
+    //   orbital   [416,512)  LEARNED meaning tail — the ONLY mutable region
+    // ============================================================================================
+
+    /// <summary>Production dimension at which the fixed-offset address-space layout activates.</summary>
+    public const int AddressSpaceDim = 512;
+
+    /// <summary>True when the fixed-offset address-space band layout is in force (dim ≥ 512).</summary>
+    public static bool IsAddressSpace(int dim) => dim >= AddressSpaceDim;
+
+    /// <summary>Start of the kind band; 6-dim deterministic per-kind code.</summary>
+    public const int KindStart = 42;
+    /// <summary>Width of the kind band.</summary>
+    public const int KindDims = 6;
+
+    /// <summary>Start of the spelling band — the authoritative, decodable identity for text.</summary>
+    public const int SpellingStart = 48;
+    /// <summary>Number of character slots in the spelling band.</summary>
+    public const int SpellingSlots = 16;
+    /// <summary>Dimensions per spelling char-slot.</summary>
+    public const int SpellingSlotDims = 10;
+    /// <summary>Total spelling band width (16 × 10 = 160) → [48,208).</summary>
+    public const int SpellingDims = SpellingSlots * SpellingSlotDims;
+
+    /// <summary>Start of the structure band — ordered child digests + role/label codes.</summary>
+    public const int StructureStart = 208;
+    /// <summary>Number of child slots in the structure band.</summary>
+    public const int StructureSlots = 6;
+    /// <summary>Dimensions per structure child-slot (24 child-digest + 8 role/label).</summary>
+    public const int StructureSlotDims = 32;
+    /// <summary>Dimensions of the child digest within a structure slot.</summary>
+    public const int StructureChildDigestDims = 24;
+    /// <summary>Dimensions of the role/label code within a structure slot.</summary>
+    public const int StructureRoleDims = 8;
+    /// <summary>Total structure band width (6 × 32 = 192) → [208,400).</summary>
+    public const int StructureDims = StructureSlots * StructureSlotDims;
+
+    /// <summary>Start of the op band; 16-dim deterministic op code.</summary>
+    public const int OpStart = 400;
+    /// <summary>Width of the op band.</summary>
+    public const int OpDims = 16;
+
+    /// <summary>Start of the learned orbital tail and one-past-the-end of the frozen address.</summary>
+    public const int OrbitalStart = 416;
+}
+
+/// <summary>
+/// Deterministic kind code written into the address-space <see cref="FaceLayout.KindStart"/> band.
+/// <c>None</c> (numbers, read off poly/log) is the all-zero code; every other kind is one-hot.
+/// </summary>
+public enum PlatonicKind
+{
+    None = 0,
+    Atom = 1,
+    Object = 2,
+    Relation = 3,
+    Function = 4,
+    Composition = 5
 }

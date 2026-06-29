@@ -114,6 +114,18 @@ and the additive composite satisfies **π(a) ⊕ π(b) = π(a ⊕ b)** *exactly*
 and S with |Atoms| = O(1) for the *infinite* set of numbers, and generalizes to unseen operands with zero
 per-instance storage. The model's claim is simply: **φ for words/text is the same kind of object as φ for numbers.**
 
+**Law A (Address space — φ is an invertible codec).** The position map π restricted to the *frozen* faces is
+**deterministic and decodable**: π(e) is a pure function of e's symbol, and a decoder φ⁻¹ recovers the element from
+the coordinate (`v = poly[0]·10` for numbers; nearest-atom-per-slot for spelling; recurse-on-children for
+composites). Therefore **every coordinate in the frozen subspace already *is* a well-defined element, whether or not
+it has been instantiated** — the unoccupied "void" is latent structure, not absence. A consequence for storage:
+an element need never be materialised merely to be *named* or to be a routing *target*; it is materialised only when
+it carries non-derivable state (a learned meaning tail, or an incident observed edge). The number homomorphism is the
+realised witness (a result like `141` decodes from the void with zero storage); `PLATONIC_NUCLEUS.md` is the full
+band layout and the per-kind encode/decode. The mobile, learned region (the meaning tail) is the *only* part of π
+that is not codec-derived, and it is non-zero **only on materialised elements** — which is what keeps identity kNN
+exact (frozen, drift-free, latent coordinates included) and quarantines semantic drift to the realised tail.
+
 ---
 
 ## 5. The axioms as laws (the soundness contract)
@@ -204,6 +216,11 @@ invokes it. `DialecticalSpace` is the default core (`GenesisNovaConfig.UseDialec
 7. **[G2] Consistency.** No resolved synthesis agrees (κ=0) with both `b` and `¬b`.
 8. **[Closure] Algebra closed.** `Observe`/`Compose` only add to E and maintain ¬; `Synthesize`/`Recognize` are
    read-only over the synthesis. Every result is again a valid Π.
+9. **[Law A] Address space — frozen faces decode.** π on the frozen subspace is a deterministic, invertible codec:
+   a coordinate decodes to its element with no stored node (numbers exact today; spelling/structure are the build
+   target). The learned meaning tail is non-zero **only on materialised elements**; latent coordinates carry the
+   frozen address and a zero tail. Identity kNN over frozen faces is drift-free and admits latent neighbours; semantic
+   kNN reads only the realised tail. See `PLATONIC_NUCLEUS.md`.
 
 ### 9.2 Interface members by operation
 
@@ -229,3 +246,24 @@ The number fragment is the homomorphism and is held exact (names are the durable
 `PlatonicFaceDecoder.DecodeNumericFromPrediction` (the exact inverse), and the `Core/FaceLayout.cs` region
 boundaries: `PolyFaceMax=42`; `NumericDims=min(dim/2,21)`; poly `[0..ND)`, log `[ND..2ND)`;
 `CharFaceStart=min(42,dim/2)`; `WordFaceStart = dim>202 ? 202 : dim`.
+
+### 9.4 Address-space layout (target — realises Law A)
+
+The current `FaceLayout` keeps the high face `[202,dim)` as one big *learned* region on every element; the
+address-space model (Law A, `PLATONIC_NUCLEUS.md`) reallocates it so the frozen, decodable address dominates and the
+learned tail is small and materialised-only. Proposed bands at `dim=512` (poly/log unchanged; *tunable* widths marked):
+
+| band | dims | encodes / decode | frozen? |
+|---|---|---|---|
+| poly | `[0,21)` | number value; `v = e[0]·10` | ✅ (unchanged) |
+| log | `[21,42)` | number value; `v = exp(e[0]·10)` | ✅ (unchanged) |
+| kind | `[42,48)` | kind code (numbers read off poly/log) | ✅ |
+| spelling | `[48,208)` *(16 char-slots × 10)* | the token; nearest-char-per-slot → string (needs `CharSlotDecode`) | ✅ |
+| structure | `[208,400)` *(6 child-slots × 32)* | ordered child coordinates + label; recurse-decode | ✅ |
+| op | `[400,416)` | which operation (a route over addresses) | ✅ |
+| orbital | `[416,512)` | learned meaning; **non-zero only on materialised elements** | ❌ |
+
+Build order: (1) `FaceLayout` reallocation; (2) `CharSlotDecode` (the missing spelling inverse — numeric and
+word-slot inverses already exist in `PlatonicFaceDecoder`); (3) `structure` band recursive child-coordinate encoding
+with the arity/width budget that bounds how deep the void stays free; (4) routing/retrieval read frozen address bands
+for identity and the orbital tail only for similarity, abstaining on undecodable-void-with-no-edge.

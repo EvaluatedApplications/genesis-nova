@@ -55,7 +55,18 @@ public sealed record PlatonicMemorySnapshot(
     DialecticalElementSnapshot[]? Elements = null,
     // The LEARNED number-word lexicon atoms (de-hardcoding #5) — word↔value, so the de-hardcoded number-words survive
     // reload instead of re-bootstrapping from the gym. Optional → backward-compatible with pre-lexicon checkpoints.
-    NumberWordAtomSnapshot[]? NumberWords = null);
+    NumberWordAtomSnapshot[]? NumberWords = null,
+    // ADDRESS-SPACE LAYOUT VERSION (L2 substrate). Bumped when the frozen band layout / the orbital width changes.
+    // Absent in old checkpoints → deserializes to 0 (< CurrentLayoutVersion), so ImportSnapshot REJECTS their
+    // layout-dependent element orbitals (the orbital tail moved + shrank 310→96 at dim 512) rather than writing
+    // mismatched-width data into the relocated tail. BREAKING: fresh train, no migration. 2 = address-space tail.
+    int LayoutVersion = 0)
+{
+    /// <summary>Current on-disk layout version (address-space orbital tail at [OrbitalStart,dim)). Exports stamp
+    /// this; imports stamped below it drop element orbitals — only layout-independent data (relations / chunks /
+    /// op-tokens / number-words / element identity+counters) is restored, the learned tail is re-learned fresh.</summary>
+    public const int CurrentLayoutVersion = 2;
+}
 
 /// <summary>One learned number-word atom (word↔value) for the checkpoint.</summary>
 public sealed record NumberWordAtomSnapshot(string Word, long Value);

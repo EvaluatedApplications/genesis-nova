@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text;
 
 namespace GenesisNova.Core;
@@ -249,6 +250,174 @@ internal static class PlatonicFaceDecoder
         }
 
         return string.Join(' ', decoded);
+    }
+
+    // ============================================================================================
+    // ADDRESS-SPACE DECODERS (active when dim ≥ 512) — exact inverses of the encoders in
+    // PlatonicFaceComposer. Each regenerates candidate codes from the same deterministic generators.
+    // ============================================================================================
+
+    /// <summary>
+    /// The missing spelling inverse: decode the token from the spelling band [48,208) by reading each
+    /// char-slot back to its nearest char in <see cref="CharVocab"/>, stopping at the first empty slot.
+    /// Exact inverse of <see cref="PlatonicFaceComposer.GetCharComposedEmbedding"/> at address-space dims
+    /// (e.g. encode("cat",512) then CharSlotDecode → "cat"). Empty string below address-space dims.
+    /// </summary>
+    public static string CharSlotDecode(double[] face, int dim)
+    {
+        if (face is null || !FaceLayout.IsAddressSpace(dim))
+            return string.Empty;
+        var sb = new StringBuilder();
+        for (var i = 0; i < FaceLayout.SpellingSlots; i++)
+        {
+            var slotStart = FaceLayout.SpellingStart + (i * FaceLayout.SpellingSlotDims);
+            if (RangeNorm(face, slotStart, slotStart + FaceLayout.SpellingSlotDims) < 1e-6)
+                break; // first empty slot ends the token
+            sb.Append(NearestChar(face, slotStart));
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>Nearest char in <see cref="CharVocab"/> for the 10-dim slot at <paramref name="slotStart"/>.</summary>
+    private static char NearestChar(double[] face, int slotStart)
+    {
+        var best = '\0';
+        var bestDist = double.MaxValue;
+        foreach (var c in CharVocab)
+        {
+            var atom = PlatonicFaceComposer.SpellingCharAtom(c);
+            var dist = 0.0;
+            for (var k = 0; k < FaceLayout.SpellingSlotDims && slotStart + k < face.Length; k++)
+            {
+                var diff = face[slotStart + k] - atom[k];
+                dist += diff * diff;
+            }
+            if (dist < bestDist) { bestDist = dist; best = c; }
+        }
+        return best;
+    }
+
+    /// <summary>
+    /// Decode the kind band [42,48): the one-hot dim with the largest magnitude, or
+    /// <see cref="PlatonicKind.None"/> if nothing rises above 0.25 (the all-zero "number" code).
+    /// Inverse of <see cref="PlatonicFaceComposer.EncodeKind"/>.
+    /// </summary>
+    public static PlatonicKind DecodeKind(double[] face, int dim)
+    {
+        if (face is null || !FaceLayout.IsAddressSpace(dim))
+            return PlatonicKind.None;
+        var bestIdx = -1;
+        var bestVal = 0.0;
+        for (var k = 0; k < FaceLayout.KindDims && FaceLayout.KindStart + k < face.Length; k++)
+        {
+            var v = Math.Abs(face[FaceLayout.KindStart + k]);
+            if (v > bestVal) { bestVal = v; bestIdx = k; }
+        }
+        if (bestIdx < 0 || bestVal < 0.25)
+            return PlatonicKind.None;
+        return (PlatonicKind)(bestIdx + 1);
+    }
+
+    /// <summary>
+    /// Decode the op band [400,416) to the nearest operation token in <paramref name="opVocab"/>.
+    /// Empty string when the band is ~zero (no op) or the vocab is empty. Inverse of
+    /// <see cref="PlatonicFaceComposer.EncodeOp"/>.
+    /// </summary>
+    public static string DecodeOp(double[] face, int dim, IReadOnlyCollection<string> opVocab)
+    {
+        if (face is null || !FaceLayout.IsAddressSpace(dim) || opVocab is null || opVocab.Count == 0)
+            return string.Empty;
+        if (RangeNorm(face, FaceLayout.OpStart, FaceLayout.OpStart + FaceLayout.OpDims) < 1e-6)
+            return string.Empty;
+        var best = string.Empty;
+        var bestDist = double.MaxValue;
+        foreach (var op in opVocab)
+        {
+            if (string.IsNullOrEmpty(op)) continue;
+            var code = PlatonicFaceComposer.OpCode(op);
+            var dist = 0.0;
+            for (var k = 0; k < FaceLayout.OpDims && FaceLayout.OpStart + k < face.Length; k++)
+            {
+                var diff = face[FaceLayout.OpStart + k] - code[k];
+                dist += diff * diff;
+            }
+            if (dist < bestDist) { bestDist = dist; best = op; }
+        }
+        return best;
+    }
+
+    /// <summary>Decoded structure: a shared role/label (when a vocab is supplied) and the ordered children.</summary>
+    public readonly record struct StructureDecode(string Label, IReadOnlyList<string> Children);
+
+    /// <summary>
+    /// Decode the structure band [208,400): ordered child digests + a role/label. Per slot, a non-zero
+    /// numeric head decodes a child VALUE exactly (v = digest[0]·10); otherwise the first 2 spelling
+    /// digest-slots decode the child's leading chars. Decoding stops at the first empty slot. The label
+    /// is resolved (nearest in <paramref name="labelVocab"/>) only when a vocab is supplied.
+    /// <b>Boundary:</b> children longer than 2 chars resolve only to this digest here — the substrate
+    /// layer disambiguates them against realised coordinates. Inverse of
+    /// <see cref="PlatonicFaceComposer.EncodeStructure"/>.
+    /// </summary>
+    public static StructureDecode DecodeStructure(
+        double[] face, int dim, IReadOnlyCollection<string>? labelVocab = null)
+    {
+        var children = new List<string>();
+        var label = string.Empty;
+        if (face is null || !FaceLayout.IsAddressSpace(dim))
+            return new StructureDecode(label, children);
+
+        for (var i = 0; i < FaceLayout.StructureSlots; i++)
+        {
+            var slotStart = FaceLayout.StructureStart + (i * FaceLayout.StructureSlotDims);
+            if (RangeNorm(face, slotStart, slotStart + FaceLayout.StructureChildDigestDims) < 1e-9)
+                break; // first empty child slot ends the list
+
+            string child;
+            var polyHead = slotStart < face.Length ? face[slotStart] : 0.0;
+            if (Math.Abs(polyHead) > 1e-12)
+                child = (polyHead * 10.0).ToString("0.####", CultureInfo.InvariantCulture);
+            else
+                child = DecodeDigestSpelling(face, slotStart + 4);
+            children.Add(child);
+
+            if (i == 0 && labelVocab is { Count: > 0 })
+                label = NearestLabel(face, slotStart + FaceLayout.StructureChildDigestDims, labelVocab);
+        }
+        return new StructureDecode(label, children);
+    }
+
+    /// <summary>Decode up to 2 spelling digest-slots (20 dims) starting at <paramref name="start"/>.</summary>
+    private static string DecodeDigestSpelling(double[] face, int start)
+    {
+        var sb = new StringBuilder();
+        for (var s = 0; s < 2; s++)
+        {
+            var ss = start + (s * FaceLayout.SpellingSlotDims);
+            if (RangeNorm(face, ss, ss + FaceLayout.SpellingSlotDims) < 1e-6)
+                break;
+            sb.Append(NearestChar(face, ss));
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>Nearest role/label in <paramref name="vocab"/> for the 8-dim code at <paramref name="roleStart"/>.</summary>
+    private static string NearestLabel(double[] face, int roleStart, IReadOnlyCollection<string> vocab)
+    {
+        var best = string.Empty;
+        var bestDist = double.MaxValue;
+        foreach (var cand in vocab)
+        {
+            if (string.IsNullOrEmpty(cand)) continue;
+            var code = PlatonicFaceComposer.LabelCode(cand);
+            var dist = 0.0;
+            for (var k = 0; k < FaceLayout.StructureRoleDims && roleStart + k < face.Length; k++)
+            {
+                var diff = face[roleStart + k] - code[k];
+                dist += diff * diff;
+            }
+            if (dist < bestDist) { bestDist = dist; best = cand; }
+        }
+        return best;
     }
 
     private static double SlotDistance(

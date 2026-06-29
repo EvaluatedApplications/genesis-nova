@@ -1,21 +1,30 @@
-# The Nucleus & the Cloud: how an element stores data across its dimensions
+# The Address Space: every coordinate is an element, realised or latent
 
-> Every element is a single vector, but its dimensions are not equal. Some are a **frozen nucleus**, the element's
-> exact, immutable *identity*. The rest are a **free electron cloud**, where *meaning* lives and moves. Identity is
-> re-derived from the symbol via the codec rather than stored, so it cannot drift; the only mutable region is the
-> word face `[202,dim)`. An element can drift, cluster, and relate in that free region all it likes, and its
-> identity never moves.
+> The platonic space is not a container you fill with elements. It is a **deterministic address space** in which
+> **every coordinate already *is* a specific, fully-defined element** — whether or not anything has been instantiated
+> there. The frozen faces of a vector are an **invertible codec**: given a coordinate you can *decode* which element
+> it is; given an element you can *compute* its coordinate. So the "empty void" between the points we have placed is
+> not absence — it is **structure not yet realised**, latent forms with addresses we can compute but have not visited.
 >
-> This is the genesis dual-face (`research/03-SYMMETRY-BRIDGE` Corr. 7): the **arithmetic face is *like* the
-> proton/nucleus** (crisp, conserved, exact), and the **semantic face is *like* the electron orbital** (distributed,
-> probabilistic, mobile).
-> Companions: `PLATONIC_THEORY.md` (the formal model), `PLATONIC_CONSCIOUSNESS.md`.
+> This is the generalisation of the one fragment that already works. `84 + 57` routes to coordinate `141` — which was
+> **never stored**, decodes deterministically (`poly[0]×10`), and is a perfectly real element the instant you look.
+> Arithmetic is *zero stored facts* because the answer lives in the void and the homomorphism is the route into it.
+> Everything below extends that single behaviour — make the char, structure, and op faces decode like the number face
+> already does — to the whole space.
+>
+> The consequence is the architecture: **a realised element only ever needs to route to (a) another realised element,
+> or (b) a blank coordinate the codec will decode when touched.** You never store a point merely to *name* it or to be
+> a routing *target*. You store a point only when it carries something **non-derivable** — learned meaning, or an
+> observed edge. The store collapses to *realised meaning + edges*; identity and addressing are free.
+>
+> Companions: `PLATONIC_THEORY.md` (the formal model — this realises §4 Composition and §9.3 layout),
+> `PLATONIC_CONSCIOUSNESS.md`.
 
-> **On the physics language (read this first).** "Nucleus", "orbital", "proton/electron", "conservation" are an
-> **inspiration, a generative metaphor**, not a claim that the system models physics. A platonic space is a space
-> of *ideas*; we are free to choose its rules as long as they satisfy the axioms (G1-G6, `PLATONIC_THEORY.md`). The
-> literal content is mundane and checkable: some vector dimensions are an exact, never-mutated *identity* region;
-> the rest are a learnable *meaning* region. Read the physics words as a vivid name for that split, nothing more.
+> **On the physics / "nucleus / orbital" language (read this first).** A platonic space is a space of *ideas*; its
+> rules are ours to choose so long as they stay sound under the axioms (G1-G6, `PLATONIC_THEORY.md`). The literal,
+> checkable content is mundane: most of a vector's dimensions are a **frozen, invertible address** (an exact identity
+> you can decode); a small tail is a **learnable meaning** region that only *realised* elements populate. "Nucleus",
+> "orbital", "void", "potentiality" are vivid names for that split, nothing more.
 
 ---
 
@@ -27,167 +36,174 @@ level up:
 | face (named for slots) | slots hold… | …so the face actually represents | composition |
 |---|---|---|---|
 | numeric (poly/log) | digit place-values | a **NUMBER** (its value) | digits → number |
-| **"char"** `[42,202)` | characters | a **WORD** (its identity) | chars → **word** |
-| **"word"** `[202,dim)` | words | a **SENTENCE / phrase** | words → **sentence** |
+| **spelling** | characters | a **WORD** (its identity) | chars → **word** |
+| **structure** | element coordinates | a **RELATION / FACT / PHRASE** | elements → **composite** |
 
-So: the char face stores a **word**, and the word face stores a **sentence** (a whole phrase of words). The names
-are off by one level. Each is named for its atoms, but holds the thing those atoms compose.
-
-```mermaid
-flowchart LR
-  ch["characters"] -->|compose| wd["a WORD<br/>(lives in the 'char' face [42,202))"]
-  wd -->|compose| se["a SENTENCE / phrase<br/>(lives in the 'word' face [202,dim))"]
-  dg["digit place-values"] -->|compose| nu["a NUMBER's value<br/>(lives in the numeric face [0,42))"]
-  classDef comp fill:#1a5276,color:#ffffff,stroke:#85c1e9,stroke-width:2px;
-  classDef atom fill:#566573,color:#ffffff,stroke:#aeb6bf,stroke-width:1px;
-  class wd,se,nu comp;
-  class ch,dg atom;
-```
+Each is named for its atoms but holds the thing those atoms compose — and in every case the composition is a
+**reversible** encode: you can read the slots back out and recover what was composed.
 
 ---
 
-## 1. One vector, two kinds of dimension
+## 1. One vector = one address; the bands decode to the element
 
-A concept is a vector of width `dim` (production 512). Reading left→right is reading from the crisp **nucleus** to
-the diffuse **cloud**. The boundaries are fixed in `Core/FaceLayout.cs` (`PolyFaceMax = 42`,
-`FaceLayout.cs:29`; `CharFaceStart = 42`, `FaceLayout.cs:58`; `WordFaceStart = 202`, `FaceLayout.cs:64`):
+A coordinate is a vector of width `dim` (proposed 512). Reading left→right is reading from the crisp, low-entropy
+**identity nucleus** to the diffuse **meaning tail**. The frozen bands `[0, OrbitalStart)` are a pure function of the
+*symbol* and are **identical for a blank coordinate and a realised one** — that is what makes them an address. Only
+the orbital tail differs between "latent" and "realised".
 
 ```mermaid
 flowchart LR
-  subgraph V["one element = one vector (dim 512)"]
+  subgraph V["one coordinate = one vector (dim 512)"]
     direction LR
-    P["poly · [0,21)<br/>value · 10⁻ⁱ&nbsp;(add/sub)"]
-    L["log · [21,42)<br/>ln│v│ · 10⁻ⁱ&nbsp;(mul/div)"]
-    C["'char' face · [42,202)<br/><b>a WORD</b><br/>(slots = characters)"]
-    W["'word' face · [202,512)<br/><b>a SENTENCE / phrase</b><br/>(slots = words): the big face"]
-    P --- L --- C --- W
+    P["poly · [0,21)<br/>number (add/sub)"]
+    L["log · [21,42)<br/>number (mul/div)"]
+    K["kind · [42,48)"]
+    B["spelling · [48,208)<br/><b>a WORD</b> (char slots)"]
+    S["structure · [208,400)<br/><b>a COMPOSITE</b> (child coords)"]
+    O["op · [400,416)"]
+    E["orbital · [416,512)<br/>LEARNED meaning"]
+    P --- L --- K --- B --- S --- O --- E
   end
   classDef nuc fill:#922b21,color:#ffffff,stroke:#f1948a,stroke-width:2px;
   classDef free fill:#1a5276,color:#ffffff,stroke:#85c1e9,stroke-width:2px;
-  class P,L,C nuc;
-  class W free;
+  class P,L,K,B,S,O nuc;
+  class E free;
 ```
 
-- **Low end: small, crisp, structured.** 42 dims of pure algebra: a number's value, encoded so that
-  `embed(a)+embed(b) = embed(a+b)`. Exact, generalizes to unseen operands, zero stored facts.
-- **Middle: a word's identity.** The "char" face holds a word (composed from its characters): its fixed lexical
-  fingerprint.
-- **High end: large, diffuse, relational.** 310 dims (≈60% of the vector). The "word" face holds a **sentence /
-  phrase of words**, and this is where a concept's meaning lives as a *cloud*: a superposition of the words and
-  phrases it appears with. Ambiguity lives here, since a two-sense word is near *both* senses at once.
+| band | dims | encodes | which kinds | frozen? |
+|---|---|---|---|---|
+| **poly** | `[0,21)` | number value, `e[i]=v·10^-(i+1)` | numeric atom | ✅ |
+| **log** | `[21,42)` | number value, `e[i]=ln\|v\|·10^-(i+1)` | numeric atom | ✅ |
+| **kind** | `[42,48)` | deterministic code per kind | all non-numeric (numbers are read off poly/log) | ✅ |
+| **spelling** | `[48,208)` *(tunable: 16 char-slots × 10)* | the literal token, slot *i* = atom of `s[i]` | char atom, word | ✅ |
+| **structure** | `[208,400)` *(tunable: 6 child-slots × 32 = digest 24 + role 8)* | ordered child coordinates + label | composition, relation, fact | ✅ |
+| **op** | `[400,416)` | which operation (a route over the address space) | function | ✅ |
+| **orbital** | `[416,512)` | **learned meaning** (the distributional cloud) | **materialised elements only** | ❌ |
 
-The **poly + log + char faces are the identity nucleus** (frozen, codec-derived); the **word face `[202,dim)` is
-the single mutable region** for every element.
+The whole region `[0, 416)` is **frozen, codec-derived, invertible address**; only `[416, dim)` is the mobile,
+learned tail. The number bands `[0,42)` stay **byte-identical** to today's `FaceLayout` — the homomorphism is sacred,
+and it is the existence proof that the rest of this layout is buildable.
 
 ---
 
-## 2. Identity is codec-derived, never stored
+## 2. The codec is invertible: encode/decode per kind
 
-An element stores **only** its learnable orbital (the word face `[202,dim)`) plus its structural part-of edges
-(`Element.cs:25-29`). The whole identity nucleus (the arithmetic poly/log faces and the char face) is **recomputed
-from the symbol via the codec on demand** (`FaceCodec.AssemblePositiveFace`, `FaceCodec.cs:79-99`), so it *cannot*
-drift. The mutable region begins at `FaceCodec.SemanticStart = FaceLayout.WordFaceStart` (`FaceCodec.cs:18-19`),
-the same offset for **both** numbers and words.
+Every frozen band has an exact (or near-exact, small-vocabulary) inverse. This is what lets a coordinate *be* an
+element with no stored node.
 
-So a number's identity is its *value* (read off the poly/log face), and a word's identity is the *word itself* (its
-char-composed form). Both are reconstructed from the symbol, never mutated. Only the word/sentence face `[202,dim)`
-actually moves:
+- **Number** → poly/log only; rest zero. **Decode:** `v = poly[0]×10` (or `v = exp(log[0]×10)` on the mul/div face).
+  Exact, for any number whether stored or not. *Realised today:* `GetFreshNumericEmbedding` ↔
+  `DecodeNumericFromPrediction` (the exact inverse).
+- **Char atom** → `kind` + one spelling slot. **Decode:** nearest char-atom in the ~95-char vocab → the char.
+  Deterministic.
+- **Word** → `kind` + spelling slots = its letters. **Decode:** read each slot back to a char → the string. **No more
+  random word-identity hash** — spelling *is* the identity, and it is invertible. *Build target:* `CharSlotDecode`,
+  the inverse of `GetCharComposedEmbedding` (we already ship the numeric and word-slot inverses; the char inverse is
+  the missing one).
+- **Function / op** → `kind` + op-code. **Decode:** nearest op-code → which operation. The op is then a *route*
+  (coordinate → coordinate), exactly like `+`: a function **encodes information** by mapping addresses, not by storing
+  outputs.
+- **Composition / Relation / Fact** → `structure` band holds the ordered child *coordinates* + a label. **Decode:**
+  recurse into each child coordinate (bottoming out at atoms, which decode exactly) + read the label. A fact between
+  two short atoms decodes from the void with no storage.
+
+---
+
+## 3. Materialised vs latent — and why kNN comes back
+
+A coordinate is **latent** until something non-derivable is written there. The distinction is sharp:
+
+| | frozen bands `[0,416)` | orbital tail `[416,dim)` |
+|---|---|---|
+| **latent (blank) coordinate** | computed from the codec (the address) | **zero** |
+| **realised element** | identical codec address | learned meaning cloud |
+
+So the store holds **only realised points** (those with a learned orbital or an incident edge), and an edge may point
+at a *latent* coordinate that the codec will decode on demand. The vocabulary no longer bloats the store — only
+*knowledge* does (the learned tails + the edges).
+
+This is what brings back **kNN at scale**, which hub-dilution had killed:
+
+- **Identity / addressing kNN** runs over the frozen bands. They are deterministic and drift-free, so neighbours are
+  exact and stable — and **latent coordinates are first-class neighbours** (their address is computable without being
+  stored). "Nearest decodable point" is just what addressing should be.
+- **Semantic kNN** runs over the orbital tail — and **only materialised elements have a non-zero tail.** The drift and
+  hub-dilution that blurred everything are now quarantined to a small region that only meaning-bearing points populate;
+  it can no longer pollute addressing.
+
+> The thing that killed kNN was *every* element carrying a learned, drifting cloud across the whole high face. Now the
+> wiggle is a 96-dim tail on realised points only; the rest is frozen coordinate. Only the materialised elements have
+> the unused faces left free to move.
+
+---
+
+## 4. The void is dense for atoms, budget-bounded for composites
+
+Potentiality is **total** in `[0,208)` (numbers, chars, words): every coordinate there decodes exactly, so you can
+route freely into the blank and the codec always answers. It is **budget-bounded** in the `structure` band `[208,400)`.
+
+A child-slot digest (24 dims) decodes a **numeric child exactly** (a 3-dim poly/log digest recovers the value) and a
+**short atom child** (a few char-slots), but it cannot hold a long word inline. Therefore:
+
+- Shallow composites of atom children → **fully latent**: decode from the void, never stored (an arithmetic result; a
+  fact between short tokens).
+- Composites whose children exceed the digest → the structure band addresses the child as a **realised point** (clean
+  up against its full spelling band). I.e. deep/rich composites **materialise**; the void stays dense exactly where it
+  is cheap.
+
+This is the one honest boundary: the address space is infinite and free for leaves and shallow structure, and you pay
+storage only for depth. The `structure` arity and the `spelling` width are the two dimension knobs that set how deep
+"free" reaches before a composite must materialise.
 
 ```mermaid
 flowchart TB
-  subgraph NUM["a NUMBER: e.g. 5"]
-    direction LR
-    n1["🔒 identity&nbsp; [0,202)<br/><b>EXACT VALUE</b> (poly/log) + char form<br/>codec-derived: never stored"]
-    n2["☁️ word face&nbsp; [202,512)<br/>FREE: settles near 'five', into phrases & meaning"]
-    n1 --- n2
-  end
-  subgraph TXT["a WORD: e.g. five, cat"]
-    direction LR
-    t1["🔒 identity&nbsp; [0,202)<br/><b>THE WORD ITSELF</b> (char face)<br/>codec-derived: never stored"]
-    t2["☁️ word face&nbsp; [202,512)<br/>FREE: the phrases/sentences it lives in (meaning)"]
-    t1 --- t2
-  end
-  classDef nuc fill:#922b21,color:#ffffff,stroke:#f1948a,stroke-width:2px;
-  classDef free fill:#1a5276,color:#ffffff,stroke:#85c1e9,stroke-width:2px;
-  class n1,t1 nuc;
-  class n2,t2 free;
+  q["query / route lands on a coordinate"] --> d{decodable?}
+  d -->|"atom / number / shallow (in [0,400) budget)"| dec["decode from the void<br/>(no storage)"]
+  d -->|"deep composite beyond budget"| mat["resolve as a realised point<br/>(materialise / clean-up)"]
+  d -->|"undecodable + no incident edge"| ab["ABSTAIN<br/>(structural 'I don't know')"]
+  classDef ok fill:#1a5276,color:#fff,stroke:#85c1e9;
+  classDef no fill:#922b21,color:#fff,stroke:#f1948a;
+  class dec,mat ok; class ab no;
 ```
 
-| element | frozen nucleus (identity, `[0,202)`) | free cloud (meaning, `[202,dim)`) |
-|---|---|---|
-| number `5` | numeric `[0,42)`, the exact value | settles near `five`, gains meaning |
-| word `five` / `cat` | the "char" face `[42,202)`, **the word itself** | the phrases / sentences it appears in |
-| sentence / phrase | composed from its word-slots in the "word" face `[202,dim)` | (its meaning cloud) |
-
-A number is routed through the homomorphism and carries no stored orbital for arithmetic, but it still gets a
-semantic position written into the word face (so `5` can settle near `five`) *without* touching its exact
-arithmetic face `[0,42)` (`FaceCodec.cs:91-98`).
+Abstention falls out for free: "I don't know" is **the route landed in undecodable void with no supporting edge** — a
+structural criterion, not a tuned confidence threshold.
 
 ---
 
-## 3. The nucleus is the pivot: identity holds still while meaning moves
+## 5. Why this is the right way to store data
 
-This is the whole point. Two elements can have **completely different nuclei** yet let their **clouds overlap**, and
-that overlap *is* "they're related / they mean the same." The fixed nuclei are the reference frame the relational
-geometry pivots off of; the clouds (the sentence-level "word" face) are where all the moving happens.
-
-```mermaid
-flowchart LR
-  subgraph A["atom: 5"]
-    A_n["🔒 nucleus<br/>value = 5<br/>(frozen, exact)"]
-    A_c["☁️ cloud<br/>(free, mobile)"]
-    A_n -. anchors .- A_c
-  end
-  subgraph B["atom: five"]
-    B_n["🔒 nucleus<br/>the word 'five'<br/>(frozen)"]
-    B_c["☁️ cloud<br/>(free, mobile)"]
-    B_n -. anchors .- B_c
-  end
-  A_c <==>|"clouds overlap → related<br/>(5 means five)"| B_c
-  classDef nuc fill:#922b21,color:#ffffff,stroke:#f1948a,stroke-width:2px;
-  classDef free fill:#1a5276,color:#ffffff,stroke:#85c1e9,stroke-width:2px;
-  class A_n,B_n nuc;
-  class A_c,B_c free;
-```
-
-`5` and `five` will never be confused: their nuclei (exact value vs the exact word) are fixed and distinct forever.
-But their *meaning clouds* drift together until they overlap, so retrieval treats them as the same thing. Identity
-and meaning are stored in **different dimensions**, so you get both: permanent identity *and* fluid, shared,
-ambiguous meaning.
-
-### Why the cloud can move without ever corrupting identity
-
-Every relational update touches only the free word-face dimensions; the nucleus is never *stored*, so it cannot
-drift (it is re-derived from the symbol via the codec). Learning is *all* in the cloud, and the complement
-(`¬e = −e`, G4) is re-enforced on the assembled face (`FaceCodec.Negate`, `FaceCodec.cs:101-108`). See below:
-
-```mermaid
-sequenceDiagram
-  participant E as element
-  participant Obs as observe(a, b, κ)
-  Obs->>E: move the FREE word-face orbital toward (agree) / away (contradict) the neighbour
-  Obs->>E: identity stays exact (codec-derived: never stored)
-  Obs->>E: enforce ¬e = −e (G4 conservation)
-  Note over E: only meaning moved: value & the word itself are untouched
-```
+- **Identity is permanent, free, and never needs a node.** Every coordinate decodes to exactly one element; no amount
+  of relational learning can corrupt what a thing *is*, because identity is *computed*, not stored.
+- **The store shrinks to its irreducible floor.** You stop paying for vocabulary. Only realised meaning (orbital tails)
+  and observed edges persist; the millions of merely-named or merely-targeted points stay latent.
+- **Exact computation rides the frozen address.** Arithmetic reads straight off the numeric bands
+  (`embed(a)+embed(b)=embed(a+b)`); a function is a *route* over addresses, so it generalises to unseen inputs with no
+  stored table.
+- **Meaning stays large, distributed, ambiguous — but contained.** The orbital tail still holds meaning as a
+  superposition of contexts (related cluster, a two-sense word sits near both), but it is a *tail on realised points*,
+  not a property of every coordinate. Ambiguity lives there; identity never does.
+- **kNN is exact again.** Addressing runs over frozen, drift-free bands; semantic similarity over a small materialised
+  tail. The two never contaminate each other.
+- **It is one composition ladder, reversible at every rung.** digits → number, chars → word, elements → composite —
+  each band holds the composite of the level below *and can be read back into its parts*. Growth is reuse; recall is
+  decode.
 
 ---
 
-## 4. Why this structure is the right way to store data
+## Status: realised vs build target
 
-- **Identity is permanent and free of charge.** Identity is codec-derived and never stored, so it can't drift: an
-  element can be pushed anywhere in the cloud and still decode to exactly itself (its value, or the word it is). No
-  amount of relational learning can corrupt what a thing *is*.
-- **The nucleus is a fixed coordinate frame.** Relations don't float in a vacuum; they pivot off the stable
-  nuclei. You always know *what* two elements are; learning only settles *how they relate*.
-- **Exact computation rides the frozen nucleus.** Arithmetic is read straight off the numeric nucleus
-  (`embed(a)+embed(b)=embed(a+b)`), exact and generalizing, regardless of whatever the cloud is doing.
-- **Meaning is large, distributed, and ambiguous, on purpose.** The big "word" face holds meaning as a
-  *superposition of the phrases a concept appears in* (a sentence is literally a phrase of words), so related
-  concepts cluster, unrelated ones go orthogonal, and a word with two senses sits near both at once. A single point
-  couldn't do that; a cloud can.
-- **The whole thing is a composition ladder.** digits → number, characters → word, words → sentence: each face
-  holds the composite of the level below, and growth is *reuse* of the shared parts beneath it.
-- **The two ends mirror each other.** Crisp quantity at the low end (the metaphorical "proton"), diffuse meaning at
-  the high end (the metaphorical "orbital"), bound by the G4 conservation rule. Quantity is exact and singular;
-  meaning is rich and plural. The layout puts each where it belongs.
+- **Realised today (the existence proof):** the number bands `[0,42)` and their exact inverse
+  (`PlatonicFaceComposer.GetFreshNumericEmbedding` ↔ `PlatonicFaceDecoder.DecodeNumericFromPrediction`). A latent
+  number coordinate already decodes with zero storage.
+- **Build target (this document is the spec):**
+  1. `FaceLayout` reallocation to the bands in §1 (shrink the learned region to the `[416,dim)` tail; reclaim the high
+     dims as frozen `kind` / `spelling` / `structure` / `op` address).
+  2. `CharSlotDecode` — the missing inverse of the spelling band (§2), so words decode from the void like numbers do.
+  3. The `structure` band as recursive child-coordinate encoding (§4), with the arity/width budget that bounds how
+     deep the void stays free.
+  4. Routing + retrieval read the frozen address bands for identity (latent coordinates are valid targets) and the
+     orbital tail only for learned similarity; abstain on undecodable-void-with-no-edge.
+
+The number fragment proves the pattern; the work is to make the other frozen bands decode the same way, so the whole
+space becomes the deterministic field of potentiality this document describes.

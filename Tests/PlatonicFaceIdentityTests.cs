@@ -40,7 +40,7 @@ public sealed class PlatonicFaceIdentityTests
         return (na < 1e-12 || nb < 1e-12) ? 0.0 : dot / (Math.Sqrt(na) * Math.Sqrt(nb));
     }
 
-    [Fact] // Every concept (single or multi word) registers a DISTINCT word element with a UNIT word-face identity.
+    [Fact(Skip = "address-space: word-face identity (Model B) is superseded by the spelling band [48,208) as the authoritative decodable identity; AddWordIdentity is intentionally a no-op at dim>=512, so the word element no longer carries a unit word-face identity. See ADDRESS_SPACE_IMPL.md / PLATONIC_NUCLEUS.md.")] // Every concept (single or multi word) registers a DISTINCT word element with a UNIT word-face identity.
     public void RegisterWordElement_CreatesDistinctElement_WithUnitWordIdentity()
     {
         Assert.True(Dim > 202, "test requires a real word face (production dim)");

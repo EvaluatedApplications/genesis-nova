@@ -28,6 +28,9 @@ public sealed class DialecticalSpace : IPlatonicSpace
     private readonly HashSet<string> _operationTokens = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Dictionary<string, int>> _chunks = new(StringComparer.Ordinal);
     private readonly FunctionElementRegistry _functions;
+    // Distinct Merge LABELS seen this session (seeded with the fact label "is") — the candidate role/label vocab the
+    // address-space structure decoder (TryDecodeStructure / TryDecodeCoordinate) resolves a slot's role code against.
+    private readonly HashSet<string> _mergeLabels = new(StringComparer.Ordinal) { "is" };
 
     /// <summary>The LEARNED number-word lexicon (de-hardcoding #5). Lives on the SPACE (not the engine) so it is SHARED
     /// between the training engine and the inference engine and persists with the substrate snapshot. A word→value
@@ -212,7 +215,7 @@ public sealed class DialecticalSpace : IPlatonicSpace
         var ca = CloudOf(ea); var cb = CloudOf(eb);
         var m = _concepts.GetOrCreate(sym, ElementKind.Relation, () => FaceCodec.Token(sym, _dim), new[] { ea.Id, eb.Id });
         _lattice.RegisterNode(sym);
-        if (!string.IsNullOrWhiteSpace(label)) ObserveContradiction(sym, "∘" + Normalize(label), 0.0); // TYPE the bind (agreement)
+        if (!string.IsNullOrWhiteSpace(label)) { ObserveContradiction(sym, "∘" + Normalize(label), 0.0); _mergeLabels.Add(Normalize(label)); } // TYPE the bind + remember the label as decode vocab
         // POSITION written LAST: a Merge's meaning is the BLEND of its parts (Laws C/S — "position derived from its
         // parts"), authoritative over the token-cloud that GetOrCreate/ObserveContradiction's RecomputeCloud would set.
         var dst = m.SemanticFace;
@@ -290,7 +293,76 @@ public sealed class DialecticalSpace : IPlatonicSpace
             ?? (FaceCodec.IsNumeric(symbol) ? new double[_semLen] : FaceCodec.Token(symbol, _dim));
         var face = FaceCodec.AssemblePositiveFace(symbol, orbital, _dim);
         NormalizeSemantic(face);
+        // ADDRESS SPACE (A): a COMPOSITE (Merge ⟨a·label·b⟩) carries a DECODABLE identity in the FROZEN structure band
+        // [208,400) — the ordered child coordinates + label. AssemblePositiveFace only overlays the orbital onto the
+        // tail [OrbitalStart,dim), so it never clobbers the structure band; we mirror the element's ▷ children into it
+        // here so the composite decodes from its frozen face (TryDecodeStructure), not just its symbol/lossy orbital.
+        // The band lies OUTSIDE FaceAwareDistance's [_semStart,dim) tail, so semantic retrieval is unaffected.
+        if (element is not null) WriteStructureBand(face, element);
         return face;
+    }
+
+    /// <summary>
+    /// (A) Mirror a COMPOSITE's ▷ children into the FROZEN structure band [208,400) of its assembled face via
+    /// <see cref="PlatonicFaceComposer.EncodeStructure"/>, so the composite's identity is decodable from the
+    /// coordinate itself. Only Merge composites (⟨…⟩) are mirrored — atoms / words / numbers carry no structure.
+    /// The structure band lies BELOW the orbital tail, so the learned orbital never clobbers it. No-op below
+    /// address-space dims (legacy faces have no structure band).
+    /// </summary>
+    private void WriteStructureBand(double[] face, Element e)
+    {
+        if (!Core.FaceLayout.IsAddressSpace(_dim) || e.Components.Length == 0
+            || !e.Symbol.StartsWith("⟨", StringComparison.Ordinal)) return;
+        var childCoords = new double[e.Components.Length][];
+        for (var i = 0; i < e.Components.Length; i++)
+        {
+            var ce = _concepts.ById(e.Components[i]);
+            childCoords[i] = FullFace(ce.Symbol, ce); // recurse: a child may itself be a Merge (bounded by nesting depth)
+        }
+        PlatonicFaceComposer.EncodeStructure(face, childCoords, MergeLabelOf(e), _dim);
+    }
+
+    /// <summary>Recover a Merge's LABEL from its content-addressed symbol ⟨a·label·b⟩, using the authoritative ▷
+    /// component symbols (a, b) to strip the surrounding parts — robust to nested ⟨…⟩ children. Empty when unlabeled.</summary>
+    private string MergeLabelOf(Element e)
+    {
+        if (e.Components.Length < 2 || !e.Symbol.StartsWith("⟨", StringComparison.Ordinal)
+            || !e.Symbol.EndsWith("⟩", StringComparison.Ordinal)) return string.Empty;
+        var inner = e.Symbol.Substring(1, e.Symbol.Length - 2); // strip ⟨ ⟩
+        var aSym = _concepts.ById(e.Components[0]).Symbol;
+        var bSym = _concepts.ById(e.Components[1]).Symbol;
+        if (inner.StartsWith(aSym + "·", StringComparison.Ordinal)) inner = inner.Substring(aSym.Length + 1);
+        if (inner.EndsWith(bSym, StringComparison.Ordinal)) inner = inner.Substring(0, inner.Length - bSym.Length);
+        return inner.Trim('·');
+    }
+
+    /// <summary>
+    /// (A) Read a COMPOSITE's identity back from its FROZEN structure band — the face-level mirror of its ▷ children —
+    /// via <see cref="PlatonicFaceDecoder.DecodeStructure"/>. The L1 child digest only holds a child's numeric head +
+    /// first 2 spelling chars, so a long/non-numeric child decodes only to a DIGEST; we CLEAN IT UP against the
+    /// element's authoritative ▷ <see cref="Element.Components"/> symbol (the realised child we hold). The Components
+    /// int[] stays authoritative; the structure band is the decodable face-level mirror. False for a non-composite,
+    /// an absent/archived symbol, or below address-space dims.
+    /// </summary>
+    public bool TryDecodeStructure(string symbol, out string label, out IReadOnlyList<string> children)
+    {
+        label = string.Empty;
+        children = Array.Empty<string>();
+        if (!Core.FaceLayout.IsAddressSpace(_dim)) return false;
+        var key = Normalize(symbol);
+        if (!_concepts.TryGet(key, out var e) || e.Archived || e.Components.Length == 0
+            || !key.StartsWith("⟨", StringComparison.Ordinal)) return false;
+        var face = FullFace(key, e);
+        var decoded = PlatonicFaceDecoder.DecodeStructure(face, _dim, _mergeLabels);
+        var compSyms = new List<string>(e.Components.Length);
+        foreach (var cid in e.Components) compSyms.Add(_concepts.ById(cid).Symbol);
+        var n = Math.Max(decoded.Children.Count, compSyms.Count);
+        var cleaned = new List<string>(n);
+        for (var i = 0; i < n; i++)
+            cleaned.Add(i < compSyms.Count ? compSyms[i] : decoded.Children[i]); // authoritative ▷ child; digest fallback
+        children = cleaned;
+        label = string.IsNullOrEmpty(decoded.Label) ? MergeLabelOf(e) : decoded.Label;
+        return cleaned.Count > 0;
     }
 
     /// <summary>Normalize the large-face region [_semStart, dim) of an assembled face to unit (leaves the frozen
@@ -335,6 +407,21 @@ public sealed class DialecticalSpace : IPlatonicSpace
         return Math.Min(semantic, RangeDistance(q, c, 0, arithEnd));
     }
 
+    // IDENTITY / ADDRESSING distance (D) over the FROZEN address bands [KindStart,OrbitalStart) = kind+spelling+
+    // structure+op. These dims are a drift-free, codec-derived pure function of the symbol, so two coordinates with
+    // the SAME identity are exactly equal here regardless of how their learned tails wandered. Used only as a
+    // TIE-BREAK behind the semantic-tail distance (keeps exact-identity matches stable). Zero below address-space
+    // dims (no frozen address bands there → no secondary signal, legacy ordering preserved).
+    private double FrozenIdentityDistance(IReadOnlyList<double> q, IReadOnlyList<double> c)
+        => Core.FaceLayout.IsAddressSpace(_dim)
+            ? RangeDistance(q, c, Core.FaceLayout.KindStart, Core.FaceLayout.OrbitalStart)
+            : 0.0;
+    private const double FrozenTieEpsilon = 1e-6; // tail distances within this are TIES → broken by frozen identity
+
+    // The pure-codec FROZEN identity face of a symbol (kind+spelling+arith, zero orbital, NO structure band) — the
+    // address to score an arbitrary/decoded coordinate against (TryDecodeCoordinate confidence).
+    private double[] FrozenAddressOf(string symbol) => FaceCodec.AssemblePositiveFace(symbol, new double[_semLen], _dim);
+
     private static double RangeDistance(IReadOnlyList<double> a, IReadOnlyList<double> b, int start, int end)
     {
         var n = Math.Min(Math.Min(a.Count, b.Count), end);
@@ -363,14 +450,28 @@ public sealed class DialecticalSpace : IPlatonicSpace
         else
             pool = _concepts.All.Where(e => !e.Archived && e.Kind != ElementKind.Atom).Select(e => e.Symbol);
 
-        var scored = new List<(string, double)>();
+        var scored = new List<(string Sym, double Tail, double Frozen)>();
         foreach (var cand in pool)
         {
             if (cand.Equals(self, StringComparison.Ordinal)) continue;
             if (!_concepts.TryGet(cand, out var ce) || ce.Archived || ce.Kind == ElementKind.Atom) continue;
-            scored.Add((cand, FaceAwareDistance(q, FullFace(cand, ce))));
+            var cf = FullFace(cand, ce);
+            scored.Add((cand, FaceAwareDistance(q, cf), FrozenIdentityDistance(q, cf)));
         }
-        return scored.OrderBy(x => x.Item2).Take(limit).ToArray();
+        // PRIMARY ordering = the semantic-tail distance (unchanged, routing degraded-by-design). At address-space dims
+        // add the IDENTITY/ADDRESSING tie-break (D): when two candidates are within FrozenTieEpsilon on the tail, the
+        // one whose FROZEN address [42,416) is closer to the query wins, so exact-identity matches stay stable and
+        // drift-free. Below address-space dims keep the stable OrderBy (byte-identical legacy ordering).
+        if (!Core.FaceLayout.IsAddressSpace(_dim))
+            return scored.OrderBy(x => x.Tail).Take(limit).Select(x => (x.Sym, x.Tail)).ToArray();
+        scored.Sort((x, y) =>
+        {
+            var d = x.Tail - y.Tail;
+            if (d > FrozenTieEpsilon) return 1;
+            if (d < -FrozenTieEpsilon) return -1;
+            return x.Frozen.CompareTo(y.Frozen);
+        });
+        return scored.Take(limit).Select(x => (x.Sym, x.Tail)).ToArray();
     }
 
     public IReadOnlyList<(string Symbol, double Distance)> GetNearestConceptsFresh(
@@ -395,6 +496,73 @@ public sealed class DialecticalSpace : IPlatonicSpace
         names.Remove(self);
         return names.Count == 0 ? Array.Empty<(string, double)>() : GetNearestConcepts(concept, names, maxNeighbors);
     }
+
+    // ──────────────────────────────────────────────────────── Navigation SEAMS for the NN-navigator (C; do NOT build a
+    //   navigator here). Reasoning-as-a-situated-walk ([[nova-nn-navigator-vision]]) is an ENGINE-layer concern: the
+    //   SELF-object the walker carries, the HALT action, and the STEP policy all live in the navigator, NOT in the space.
+    //   The space only ever provides two primitives a walker steps through: (1) decode an arbitrary POSITION (realised OR
+    //   latent void) to the element it addresses, and (2) report the egocentric NEIGHBOURHOOD ("what is around me").
+
+    /// <summary>
+    /// (C·1) Decode an ARBITRARY coordinate — realised OR latent void, with NO stored Element — to the element it
+    /// addresses, proving "every coordinate is an element". Pure function of the face + the L1 decoders: numeric
+    /// (poly/log, zero-storage) → composite (structure band) → spelling (char slots), selected by the kind code /
+    /// numeric signal. Below address-space dims there is no decodable address → false.
+    /// </summary>
+    public bool TryDecodeCoordinate(double[] face, out PlatonicKind kind, out string symbol, out double confidence)
+    {
+        kind = PlatonicKind.None; symbol = string.Empty; confidence = 0.0;
+        if (face is null || face.Length == 0 || !Core.FaceLayout.IsAddressSpace(_dim)) return false;
+        kind = PlatonicFaceDecoder.DecodeKind(face, _dim);
+        // (1) NUMBER — read straight off the poly/log bands (exact, zero storage). Numbers carry the all-zero kind code.
+        if (kind == PlatonicKind.None)
+        {
+            var (val, q, faceSel) = PlatonicFaceDecoder.DecodeNumericFromPrediction(face, _dim);
+            if (faceSel != "none" && q > 0.3)
+            {
+                symbol = val.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture);
+                confidence = q;
+                return true;
+            }
+        }
+        // (2) COMPOSITE — decode the ordered child digests + label from the structure band (a best-effort symbol; a
+        // realised composite is cleaned up exactly by TryDecodeStructure, which has the authoritative ▷ children).
+        if (kind is PlatonicKind.Relation or PlatonicKind.Composition)
+        {
+            var dec = PlatonicFaceDecoder.DecodeStructure(face, _dim, _mergeLabels);
+            if (dec.Children.Count > 0)
+            {
+                var parts = new List<string>();
+                if (dec.Label.Length > 0) parts.Add(dec.Label);
+                parts.AddRange(dec.Children);
+                symbol = "⟨" + string.Join("·", parts) + "⟩";
+                confidence = 0.5 + 0.5 * Math.Min(1.0, dec.Children.Count / (double)Core.FaceLayout.StructureSlots);
+                return true;
+            }
+        }
+        // (3) WORD / ATOM — read the spelling band back to its token; confidence = how exactly the decoded symbol's
+        // frozen address re-matches the coordinate (1 for an on-address point, lower out in the void).
+        var spelled = PlatonicFaceDecoder.CharSlotDecode(face, _dim);
+        if (!string.IsNullOrEmpty(spelled))
+        {
+            symbol = spelled;
+            confidence = 1.0 / (1.0 + FrozenIdentityDistance(face, FrozenAddressOf(spelled)));
+            if (kind == PlatonicKind.None) kind = PlatonicFaceComposer.KindForSymbol(spelled);
+            return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// (C·2) The egocentric "what is around me" sensor: the nearest concepts to <paramref name="atSymbol"/> (via the
+    /// existing fresh lattice/scan), each annotated with its relation DEGREE so the walker can spot hub / landmark
+    /// nodes. A thin wrapper over <see cref="GetNearestConceptsFresh"/> + <see cref="GetRelationDegree"/>; carries no
+    /// policy of its own (the navigator decides where to step).
+    /// </summary>
+    public IReadOnlyList<(string Symbol, double Distance, int Degree)> Neighborhood(string atSymbol, int k)
+        => GetNearestConceptsFresh(atSymbol, seeds: null, maxNeighbors: Math.Clamp(k, 1, 32))
+            .Select(n => (n.Symbol, n.Distance, GetRelationDegree(n.Symbol)))
+            .ToArray();
 
     public double[] ComputeRoutePerception(string anchor, double transformReliability = 0.0)
     {
@@ -1364,12 +1532,19 @@ public sealed class DialecticalSpace : IPlatonicSpace
             r.Left, r.Right, r.Thesis, r.LastObserved, r.Synthesis, r.ObservationCount, r.UseCount, r.SuccessCount, r.FailureCount, r.LastUsedStep)).ToArray();
         var chunks = _chunks.SelectMany(t => t.Value.Select(c => new PlatonicChunkSnapshot(t.Key, c.Key, c.Value))).ToArray();
         var numberWords = NumberWords.Export().Select(a => new NumberWordAtomSnapshot(a.Word, a.Value)).ToArray();
-        return new PlatonicMemorySnapshot(_dim, Array.Empty<PlatonicNodeSnapshot>(), rels, chunks, _operationTokens.ToArray(), elements, numberWords);
+        return new PlatonicMemorySnapshot(_dim, Array.Empty<PlatonicNodeSnapshot>(), rels, chunks, _operationTokens.ToArray(),
+            elements, numberWords, PlatonicMemorySnapshot.CurrentLayoutVersion); // stamp the address-space layout version (L2)
     }
 
     public void ImportSnapshot(PlatonicMemorySnapshot snapshot)
     {
         if (snapshot == null) return;
+        // LAYOUT VERSION GATE (B, BREAKING — fresh train, no migration). The orbital tail moved + shrank (310→96 at
+        // dim 512), so a checkpoint stamped below CurrentLayoutVersion (old/absent = 0) holds layout-INCOMPATIBLE
+        // element orbitals — writing them into the relocated [OrbitalStart,dim) tail would be mismatched garbage. When
+        // incompatible we SKIP element orbitals (re-learned fresh) but still restore the layout-INDEPENDENT data
+        // (element identity + counters, relations, chunks, op-tokens, number-words). No migration is attempted.
+        var layoutCompatible = snapshot.LayoutVersion >= PlatonicMemorySnapshot.CurrentLayoutVersion;
         if (snapshot.Elements is { Length: > 0 })
         {
             // FAITHFUL path: recreate each element through the SAME creation φ the live space uses (so kind + ▷-
@@ -1382,7 +1557,9 @@ public sealed class DialecticalSpace : IPlatonicSpace
                 var e = (ElementKind)el.Kind == ElementKind.Atom
                     ? _concepts.GetOrCreate(el.Symbol, ElementKind.Atom, () => new double[_semLen])
                     : GetOrCreateConcept(el.Symbol);
-                if (el.Orbital is { Length: > 0 })
+                // Orbital is the ONLY layout-dependent state — copy it ONLY when the checkpoint's layout matches the
+                // current band layout AND the stored width matches this dim's SemanticLength (defensive); else ignore it.
+                if (layoutCompatible && el.Orbital is { Length: > 0 } && el.Orbital.Length == _semLen)
                     for (var i = 0; i < _semLen && i < el.Orbital.Length && i < e.SemanticFace.Length; i++)
                         e.SemanticFace[i] = el.Orbital[i];
                 e.ObservationCount = el.ObservationCount;
@@ -1394,7 +1571,9 @@ public sealed class DialecticalSpace : IPlatonicSpace
             if (FaceCodec.IsNumeric(Normalize(n.Name))) continue;
             var e = GetOrCreateConcept(n.Name);
             e.ObservationCount = n.ObservationCount;
-            if (n.PositiveFace is { Length: > 0 }) // restore the orbital slice
+            // The full-face slice is layout-dependent (it was sliced at the OLD SemanticStart); restore it only when
+            // the layout matches — legacy node checkpoints are always pre-address-space (version 0) → orbital dropped.
+            if (layoutCompatible && n.PositiveFace is { Length: > 0 }) // restore the orbital slice
                 for (var i = 0; i < _semLen && _semStart + i < n.PositiveFace.Length; i++)
                     e.SemanticFace[i] = n.PositiveFace[_semStart + i];
         }

@@ -45,6 +45,13 @@ internal static class PlatonicFaceComposer
         if (string.IsNullOrWhiteSpace(input))
             return new double[dim];
 
+        // ADDRESS-SPACE (dim ≥ 512): the spelling band IS the authoritative, decodable identity — no
+        // random AddWordIdentity stamp. GetFreshEmbedding writes the numeric (poly/log) face OR the
+        // spelling+kind identity (single OR multi-word: the whole trimmed string up to 16 chars), plus
+        // the orbital spawn-seed. Frozen bands [0,416) stay a pure function of the symbol.
+        if (FaceLayout.IsAddressSpace(dim))
+            return GetFreshEmbedding(input.Trim(), dim);
+
         var tokens = input.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         // GEOMETRIC START (getting back to position-as-identity): a non-numeric concept's SEMANTIC face is a
         // NEUTRAL, whole-string-seeded small start (via SeedLearnableDims) — NOT a lexical chunk-hash — so the
@@ -80,6 +87,12 @@ internal static class PlatonicFaceComposer
     /// </summary>
     public static void AddWordIdentity(double[] embedding, string concept, int dim)
     {
+        // ADDRESS-SPACE: disabled. The spelling band [48,208) is the authoritative, decodable identity
+        // now, so no random unit-vector is stamped into the (re-purposed) high face — that would corrupt
+        // the frozen structure/op/orbital bands. Kept live only for the legacy small-dim layout.
+        if (FaceLayout.IsAddressSpace(dim))
+            return;
+
         var wordStart = FaceLayout.WordFaceStart(dim);
         var wordDims = FaceLayout.WordFaceDims(dim);
         if (wordDims <= 0 || string.IsNullOrEmpty(concept))
@@ -152,6 +165,13 @@ internal static class PlatonicFaceComposer
     /// </summary>
     public static double[] GetCharComposedEmbedding(string symbol, int dim)
     {
+        // ADDRESS-SPACE: write the AUTHORITATIVE, decodable spelling band [48,208) — 16 char-slots × 10
+        // dims, slot i = deterministic atom of s[i] — plus a best-effort kind code. This is the inverse
+        // partner of PlatonicFaceDecoder.CharSlotDecode. The legacy hash-seeded char face is used only
+        // for small dims (< 512).
+        if (FaceLayout.IsAddressSpace(dim))
+            return GetSpellingEmbedding(symbol, dim);
+
         var charStart = FaceLayout.CharFaceStart(dim);
         var charDims = FaceLayout.CharFaceDims(dim);
         var slotDims = FaceLayout.SlotDims(charDims);
@@ -302,6 +322,21 @@ internal static class PlatonicFaceComposer
     /// </summary>
     public static void SeedLearnableDims(double[] embedding, string symbol, int dim)
     {
+        // ADDRESS-SPACE: the frozen address [0,OrbitalStart) is pure codec and must NOT be perturbed
+        // (invariant: identical for a blank and a realised coordinate). Only the orbital tail gets the
+        // symbol-stable spawn-spread that breaks symmetry for the learned region.
+        if (FaceLayout.IsAddressSpace(dim))
+        {
+            var rngTail = new Random(unchecked((int)StableHash(symbol)));
+            const double tailScale = 0.01;
+            for (var d = FaceLayout.OrbitalStart; d < dim && d < embedding.Length; d++)
+            {
+                if (Math.Abs(embedding[d]) > 1e-12) continue;
+                embedding[d] = ((rngTail.NextDouble() * 2.0) - 1.0) * tailScale;
+            }
+            return;
+        }
+
         var isNumeric = double.TryParse(symbol, NumericStyle, CultureInfo.InvariantCulture, out _);
         int identityStart, identityEnd;
         if (isNumeric)
@@ -323,6 +358,153 @@ internal static class PlatonicFaceComposer
             if (d >= identityStart && d < identityEnd) continue;
             if (Math.Abs(embedding[d]) > 1e-12) continue;
             embedding[d] = ((rng.NextDouble() * 2.0) - 1.0) * scale;
+        }
+    }
+
+    // ============================================================================================
+    // ADDRESS-SPACE ENCODERS (active when dim ≥ 512). Each frozen band is written here and read back
+    // by the matching decoder in PlatonicFaceDecoder. These generators are the SOURCE OF TRUTH for the
+    // deterministic per-kind / per-char / per-op / per-label codes; the decoder regenerates candidates
+    // from the same functions (exactly like WordSlotDecode regenerates GetChunkComposedEmbedding).
+    // ============================================================================================
+
+    /// <summary>
+    /// Best-effort kind from the raw symbol (precise kind stamping is a later layer's job):
+    /// numeric → None (read off poly/log); a ⟨…⟩-bracketed symbol → Composition; anything else → Object.
+    /// </summary>
+    public static PlatonicKind KindForSymbol(string symbol)
+    {
+        if (string.IsNullOrEmpty(symbol))
+            return PlatonicKind.None;
+        if (double.TryParse(symbol, NumericStyle, CultureInfo.InvariantCulture, out _))
+            return PlatonicKind.None;
+        if (symbol[0] == '⟨')
+            return PlatonicKind.Composition;
+        return PlatonicKind.Object;
+    }
+
+    /// <summary>
+    /// Write the 6-dim deterministic kind code into the kind band [42,48). None is the all-zero code;
+    /// every other kind is one-hot. No-op below address-space dims. Inverse: <c>DecodeKind</c>.
+    /// </summary>
+    public static void EncodeKind(double[] face, PlatonicKind kind, int dim)
+    {
+        if (face is null || !FaceLayout.IsAddressSpace(dim))
+            return;
+        for (var k = 0; k < FaceLayout.KindDims && FaceLayout.KindStart + k < face.Length; k++)
+            face[FaceLayout.KindStart + k] = 0.0;
+        if (kind == PlatonicKind.None)
+            return;
+        var idx = (int)kind - 1; // Atom→0 … Composition→4
+        if (idx >= 0 && idx < FaceLayout.KindDims && FaceLayout.KindStart + idx < face.Length)
+            face[FaceLayout.KindStart + idx] = 1.0;
+    }
+
+    /// <summary>
+    /// Address-space identity face: best-effort kind code + the decodable spelling band (16 char-slots ×
+    /// 10 dims, slot i = atom of s[i]). The whole frozen [0,416) region is a pure function of the symbol.
+    /// </summary>
+    private static double[] GetSpellingEmbedding(string symbol, int dim)
+    {
+        var result = new double[dim];
+        EncodeKind(result, KindForSymbol(symbol), dim);
+        if (string.IsNullOrEmpty(symbol))
+            return result;
+        var chars = Math.Min(symbol.Length, FaceLayout.SpellingSlots);
+        for (var i = 0; i < chars; i++)
+        {
+            var atom = SpellingCharAtom(symbol[i]);
+            var slotStart = FaceLayout.SpellingStart + (i * FaceLayout.SpellingSlotDims);
+            for (var k = 0; k < FaceLayout.SpellingSlotDims && slotStart + k < dim; k++)
+                result[slotStart + k] = atom[k];
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Deterministic unit atom (length <see cref="FaceLayout.SpellingSlotDims"/>) for a character — the
+    /// per-slot code the spelling band writes and <c>CharSlotDecode</c> matches against. Public so the
+    /// decoder regenerates the exact same atom.
+    /// </summary>
+    public static double[] SpellingCharAtom(char c)
+        => DeterministicUnit(c.ToString(), FaceLayout.SpellingSlotDims, 0xC0DEC0DEu);
+
+    /// <summary>16-dim deterministic op code for an operation token (e.g. "+","-","mul"). Inverse: <c>DecodeOp</c>.</summary>
+    public static double[] OpCode(string op)
+        => DeterministicUnit(op ?? string.Empty, FaceLayout.OpDims, 0x0F0F0F0Fu);
+
+    /// <summary>8-dim deterministic role/label code for a structure slot. Empty label → all-zero code.</summary>
+    public static double[] LabelCode(string label)
+        => DeterministicUnit(label ?? string.Empty, FaceLayout.StructureRoleDims, 0x5A5A5A5Au);
+
+    /// <summary>
+    /// Deterministic, symbol-stable unit vector of the given length, namespaced by <paramref name="salt"/>
+    /// so codes from different bands (chars / ops / labels) never collide. Empty key → all zeros.
+    /// </summary>
+    public static double[] DeterministicUnit(string key, int len, uint salt)
+    {
+        var v = new double[Math.Max(0, len)];
+        if (string.IsNullOrEmpty(key) || len <= 0)
+            return v;
+        var rng = new Random(unchecked((int)(StableHash(key) ^ salt)));
+        var sum = 0.0;
+        for (var i = 0; i < len; i++) { v[i] = (rng.NextDouble() * 2.0) - 1.0; sum += v[i] * v[i]; }
+        var inv = sum > 1e-12 ? 1.0 / Math.Sqrt(sum) : 0.0;
+        for (var i = 0; i < len; i++) v[i] *= inv;
+        return v;
+    }
+
+    /// <summary>
+    /// Write the 16-dim op code into the op band [400,416). No-op below address-space dims.
+    /// Inverse: <c>PlatonicFaceDecoder.DecodeOp</c>.
+    /// </summary>
+    public static void EncodeOp(double[] face, string op, int dim)
+    {
+        if (face is null || !FaceLayout.IsAddressSpace(dim))
+            return;
+        var code = OpCode(op);
+        for (var k = 0; k < FaceLayout.OpDims && FaceLayout.OpStart + k < face.Length; k++)
+            face[FaceLayout.OpStart + k] = code[k];
+    }
+
+    /// <summary>
+    /// Encode an ordered list of child coordinates (+ a shared role/label) into the structure band
+    /// [208,400): up to 6 slots × 32 dims = (child-digest 24 + role/label 8). The child digest stores
+    /// the child's numeric head (poly[0..1]+log[0..1], 4 dims) so a NUMERIC child decodes its value
+    /// EXACTLY, followed by the child's first 2 spelling slots (20 dims) so a SHORT atom child decodes
+    /// its first 2 chars. <b>Boundary:</b> a child longer than 2 chars only resolves to this digest here;
+    /// the substrate layer cleans it up against the child's realised coordinate. Inverse: <c>DecodeStructure</c>.
+    /// </summary>
+    public static void EncodeStructure(double[] face, IReadOnlyList<double[]> childCoords, string label, int dim)
+    {
+        if (face is null || !FaceLayout.IsAddressSpace(dim) || childCoords is null)
+            return;
+        var labelCode = LabelCode(label);
+        var n = Math.Min(childCoords.Count, FaceLayout.StructureSlots);
+        var logStart = FaceLayout.LogFaceStart(dim);
+        for (var i = 0; i < n; i++)
+        {
+            var child = childCoords[i];
+            var slotStart = FaceLayout.StructureStart + (i * FaceLayout.StructureSlotDims);
+            if (child is not null && child.Length > 0)
+            {
+                // Numeric head (4 dims): poly[0],poly[1],log[0],log[1].
+                if (FaceLayout.PolyFaceStart < child.Length) face[slotStart + 0] = child[FaceLayout.PolyFaceStart];
+                if (FaceLayout.PolyFaceStart + 1 < child.Length) face[slotStart + 1] = child[FaceLayout.PolyFaceStart + 1];
+                if (logStart < child.Length) face[slotStart + 2] = child[logStart];
+                if (logStart + 1 < child.Length) face[slotStart + 3] = child[logStart + 1];
+                // First 2 spelling slots (20 dims) so a short atom child decodes its leading chars.
+                var spellDigest = 2 * FaceLayout.SpellingSlotDims;
+                for (var k = 0; k < spellDigest; k++)
+                {
+                    var src = FaceLayout.SpellingStart + k;
+                    if (src < child.Length && slotStart + 4 + k < face.Length)
+                        face[slotStart + 4 + k] = child[src];
+                }
+            }
+            // Role/label code (8 dims) at the tail of the slot.
+            for (var k = 0; k < FaceLayout.StructureRoleDims && slotStart + FaceLayout.StructureChildDigestDims + k < face.Length; k++)
+                face[slotStart + FaceLayout.StructureChildDigestDims + k] = labelCode[k];
         }
     }
 

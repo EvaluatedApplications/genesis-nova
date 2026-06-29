@@ -564,6 +564,152 @@ public sealed class DialecticalSpace : IPlatonicSpace
             .Select(n => (n.Symbol, n.Distance, GetRelationDegree(n.Symbol)))
             .ToArray();
 
+    // ──────────────────────────────────────── NAVIGATOR MOTION PRIMITIVES (STEP 1, PLATONIC_NAVIGATOR.md §5.1/§5.2/§9).
+    //   The substrate seams a future NN walker STEPS WITH — no NN, no policy, no training here; just the moves. Every
+    //   navigator action (STEP-near / FOLLOW-edge / COMPUTE-jump / TOWARD-landmark) reduces to ONE primitive: emit a
+    //   target coordinate, then let the lattice LAND the foot on the nearest decodable coordinate (TryLand). The walk
+    //   may also WRITE — a useful passed-through latent coordinate is committed (Materialise, the genesis tick). And the
+    //   walker SENSES over the FROZEN ADDRESS (NavNeighborhood / Landmarks), the drift-free identity, not the live tail.
+
+    // Tunables for the motion primitives (kept local — these are substrate seams, not policy).
+    private const double LandDecodeConfidence = 0.55; // below this the target is "between addresses" → SNAP to a real concept
+    private const int    LandSnapPool = 64;           // lattice harvest size for the snap rescore
+    private const int    NavHarvestPool = 64;         // lattice harvest size for the frozen-address neighbourhood
+    private const int    LandmarkHarvestPool = 96;     // lattice harvest size for the landmark (hub) scan
+
+    /// <summary>
+    /// (NAV·1) MOTION PRIMITIVE — "the lattice lands the step" (§5.1). Every action emits/computes a target coordinate;
+    /// this resolves where the foot actually falls — the nearest DECODABLE coordinate (realised OR latent). Two regimes:
+    ///   (a) DECODE-FIRST (O(1), zero index cost): if the target IS already a decodable address (TryDecodeCoordinate
+    ///       fires confidently), the foot lands EXACTLY there. A COMPUTE-jump to GetFreshNumericEmbedding(141) lands on
+    ///       "141" with NO lattice query, even though "141" was never stored — the void is on-address terrain.
+    ///   (b) SNAP: otherwise the target is off-address ("between" addresses); harvest a candidate pool from the lattice
+    ///       (rides-the-lattice-for-speed) and RESCORE by <see cref="FrozenIdentityDistance"/> — the drift-free address
+    ///       distance — returning the nearest REAL concept. "Head this direction, snap to the nearest decodable coord."
+    /// <paramref name="landedFace"/> is the canonical codec face of the landing (so the walker can re-sense from it).
+    /// </summary>
+    public bool TryLand(double[] targetFace, out string symbol, out PlatonicKind kind, out double[] landedFace, out double confidence)
+    {
+        symbol = string.Empty; kind = PlatonicKind.None; landedFace = Array.Empty<double>(); confidence = 0.0;
+        if (targetFace is null || targetFace.Length == 0 || !Core.FaceLayout.IsAddressSpace(_dim)) return false;
+
+        // (a) DECODE-FIRST — a clean address (realised or latent void) lands exactly, no index cost.
+        if (TryDecodeCoordinate(targetFace, out kind, out symbol, out confidence)
+            && confidence >= LandDecodeConfidence && !string.IsNullOrEmpty(symbol))
+        {
+            landedFace = CanonicalFace(symbol);
+            return true;
+        }
+
+        // (b) SNAP — off-address target → nearest REAL decodable concept by FROZEN-address distance (rides the lattice).
+        EnsureCloudsFresh();
+        string? best = null; var bestDist = double.PositiveInfinity;
+        foreach (var cand in HarvestCandidates(targetFace, LandSnapPool))
+        {
+            if (!_concepts.TryGet(cand, out var ce) || ce.Archived || ce.Kind == ElementKind.Atom) continue;
+            var d = FrozenIdentityDistance(targetFace, FullFace(cand, ce));
+            if (d < bestDist) { bestDist = d; best = cand; }
+        }
+        if (best is null) { symbol = string.Empty; kind = PlatonicKind.None; confidence = 0.0; return false; }
+        symbol = best;
+        kind = PlatonicFaceComposer.KindForSymbol(best);
+        landedFace = CanonicalFace(best);
+        confidence = 1.0 / (1.0 + bestDist);
+        return true;
+    }
+
+    /// <summary>
+    /// (NAV·2) GENESIS-TICK WRITE-PATH (§5.2). Materialise a passed-through LATENT coordinate: decode it to its symbol
+    /// and commit a REALISED element (an orbital is born). A no-op if the coord does not decode. After the call the
+    /// symbol is realised (<see cref="ContainsConcept"/> true). LastSeenStep is bumped so relevance-decay keeps it ONLY
+    /// if the walk later reinforces it — trails that never pay off decay back to latent. Navigation is not read-only.
+    /// </summary>
+    public void Materialise(double[] coord)
+    {
+        if (coord is null || coord.Length == 0) return;
+        if (!TryDecodeCoordinate(coord, out _, out var symbol, out _) || string.IsNullOrEmpty(symbol)) return;
+        Materialise(symbol);
+    }
+
+    /// <summary>(NAV·2, overload) Materialise a symbol directly (the decoded landing): realise the element and bump its
+    /// recency so relevance-decay keeps it only if reinforced. Idempotent (re-materialising just refreshes recency).</summary>
+    public Element Materialise(string symbol)
+    {
+        var e = GetOrCreateConcept(symbol);
+        e.LastSeenStep = _observeStep; // bump recency — kept by decay only if the walk keeps re-touching it
+        return e;
+    }
+
+    /// <summary>
+    /// (NAV·3) THE NAVIGATION SENSOR — egocentric neighbourhood ranked over the FROZEN ADDRESS (stable identity), NOT
+    /// the drifting orbital tail. The walker needs frozen-address proximity because that is the drift-free signal a
+    /// "land near coordinate X" step resolves against (§5.1) and the dense, stable reward gradient a learned walk
+    /// descends (§1) — the live semantic tail shifts under each footfall, the frozen address does not. Harvests a
+    /// generous pool via the lattice, then rescores by <see cref="FrozenIdentityDistance"/>; each neighbour carries its
+    /// relation DEGREE (landmark-ness). (The existing tail-based <see cref="Neighborhood"/> is left in place for the
+    /// semantic-retrieval callers; this is the navigation-specific one.)
+    /// </summary>
+    public IReadOnlyList<(string Symbol, double Distance, int Degree)> NavNeighborhood(string atSymbol, int k)
+    {
+        var limit = Math.Clamp(k, 1, 64);
+        if (!TryGetConceptFace(atSymbol, out var q) || q.Length == 0)
+            return Array.Empty<(string, double, int)>();
+        var self = Normalize(atSymbol);
+        var scored = new List<(string Sym, double Dist)>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var cand in HarvestCandidates(q, Math.Max(limit * 4, NavHarvestPool)))
+        {
+            if (cand.Equals(self, StringComparison.Ordinal) || !seen.Add(cand)) continue;
+            if (!_concepts.TryGet(cand, out var ce) || ce.Archived || ce.Kind == ElementKind.Atom) continue;
+            scored.Add((cand, FrozenIdentityDistance(q, FullFace(cand, ce))));
+        }
+        scored.Sort((x, y) => x.Dist.CompareTo(y.Dist));
+        return scored.Take(limit).Select(x => (x.Sym, x.Dist, GetRelationDegree(x.Sym))).ToArray();
+    }
+
+    /// <summary>
+    /// (NAV·4) TOWARD-LANDMARK targets (§5): the k highest-relation-DEGREE active concepts near <paramref name="nearSymbol"/>
+    /// — hubs are the landmarks / category centroids the walker heads toward to reach a region, not just a point. First
+    /// cut: harvest a pool via the lattice and rank by degree. (A true CENTROID index is the later refinement, §9 — degree
+    /// is the proxy today; and at scale the SEMANTIC harvest may miss a frozen-near hub, see HarvestCandidates.)
+    /// </summary>
+    public IReadOnlyList<(string Symbol, int Degree)> Landmarks(string nearSymbol, int k)
+    {
+        var limit = Math.Clamp(k, 1, 64);
+        if (!TryGetConceptFace(nearSymbol, out var q) || q.Length == 0)
+            return Array.Empty<(string, int)>();
+        var self = Normalize(nearSymbol);
+        var cands = new List<(string Sym, int Deg)>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var cand in HarvestCandidates(q, Math.Max(limit * 8, LandmarkHarvestPool)))
+        {
+            if (cand.Equals(self, StringComparison.Ordinal) || !seen.Add(cand)) continue;
+            if (!_concepts.TryGet(cand, out var ce) || ce.Archived || ce.Kind == ElementKind.Atom) continue;
+            cands.Add((cand, GetRelationDegree(cand)));
+        }
+        cands.Sort((x, y) => y.Deg.CompareTo(x.Deg)); // highest degree (most landmark-like) first
+        return cands.Take(limit).ToArray();
+    }
+
+    // The canonical (codec) face of a decoded symbol: a realised concept carries its learned cloud; a latent symbol
+    // (never stored — a computed number or an unseen word) gets its pure address face. Either decodes back to itself.
+    private double[] CanonicalFace(string symbol)
+    {
+        var key = Normalize(symbol);
+        return _concepts.TryGet(key, out var e) && !e.Archived ? FullFace(key, e) : FullFace(key, null);
+    }
+
+    // RIDES-THE-LATTICE-FOR-SPEED harvest: below LatticeMinNodes the exact scan over all active concepts is cheap AND
+    // always fresh; at scale the VP-tree harvests a bounded near pool in O(log N). LIMITATION (PLATONIC_NAVIGATOR.md §9):
+    // the lattice ranks by the SEMANTIC tail, so at scale a frozen-near concept whose cloud differs can be MISSED from
+    // the pool — the harvest only BOUNDS which candidates we then rescore (always by FrozenIdentityDistance), it never
+    // changes HOW they score. A dedicated FROZEN-ADDRESS VP-tree is the future optimization; rescoring a lattice-
+    // harvested pool by FrozenIdentityDistance is the correct first cut (exact at the <384-node test scale).
+    private IEnumerable<string> HarvestCandidates(double[] queryFace, int poolSize)
+        => _concepts.ActiveCount >= LatticeMinNodes
+            ? _lattice.GetSemanticNeighbors(queryFace, Math.Clamp(poolSize, 16, 512), null).Select(n => n.Name)
+            : _concepts.All.Where(e => !e.Archived && e.Kind != ElementKind.Atom).Select(e => e.Symbol);
+
     public double[] ComputeRoutePerception(string anchor, double transformReliability = 0.0)
     {
         EnsureCloudsFresh();

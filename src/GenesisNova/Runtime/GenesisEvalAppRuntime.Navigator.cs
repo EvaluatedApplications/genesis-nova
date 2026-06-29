@@ -18,6 +18,23 @@ public readonly record struct NavTrainCycleResult(double Loss, int Queries, doub
     public static NavTrainCycleResult Empty => new(0.0, 0, 0.0, 0.0);
 }
 
+/// <summary>The outcome of ONE observational navigator walk (the REPL `/nav` command). <see cref="Answer"/> is the
+/// emergent landing concept the query relaxed to; <see cref="Reached"/> = a confident halt (vs an abstain); <see
+/// cref="Trajectory"/> is the path of concepts walked; <see cref="SelfConditioned"/> = the live engine self was
+/// non-empty and tilted the walk; <see cref="Message"/> carries an unknown-concept / dead-net note when it can't walk.</summary>
+public readonly record struct NavWalkObservation(
+    string Anchor, NavCue Cue, string Answer, bool Reached, bool SelfConditioned,
+    IReadOnlyList<string> Trajectory, string Message);
+
+/// <summary>A snapshot of the navigator's observable state for the Inspect panel (see
+/// <see cref="GenesisEvalAppRuntime.GetNavigatorDiagnostics"/>): last-cycle training vitals, the running resolve%, the
+/// engine self's magnitude + whether it conditions cognition, the live concepts nearest the self ("what the mind is
+/// dwelling on"), and the most recent `/nav` walk (null until one has run).</summary>
+public readonly record struct NavigatorDiagnostics(
+    double LastLoss, int LastQueries, double LastResolvePct, double LastAbstainPct,
+    double RunningResolvePct, double SelfMagnitude, bool SelfConditions,
+    IReadOnlyList<(string Concept, double Similarity)> SelfFocus, NavWalkObservation? LastWalk);
+
 // ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 //  PER-CYCLE NAVIGATOR TRAINING ON THE LIVE SPACE  (PLATONIC_NAVIGATOR.md §7; the gym loop calls this once per cycle so
 //  the shared query-conditioned policy net accumulates overnight, alongside the gym's model training).
@@ -212,6 +229,123 @@ public sealed partial class GenesisEvalAppRuntime
             catch { /* a single bad walk must never crash the gym */ }
         }
         return ((double)resolved / evalCount, (double)abstained / evalCount);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+    //  READ-ONLY OBSERVATION SURFACES (the REPL `/nav` walk + the Inspect "Navigator" panel). These NEVER train or
+    //  persist — they run the ALREADY-trained shared net (State.Navigator) as a query walk and read the live engine
+    //  self, all under the SAME model gate the predict path uses, so the UI thread never touches torch off-gate.
+    // ─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+    private NavWalkObservation? _lastNavWalk; // the most recent `/nav` walk (for the Inspect panel) — gate-guarded
+
+    /// <summary>Walk the trained navigator LIVE from <paramref name="concept"/> with the given target-aspect cue (parsed
+    /// from <paramref name="cue"/>: genus|domain|root, default GENUS), reading the engine's persistent self so the answer
+    /// reflects what the mind has been dwelling on. PURELY OBSERVATIONAL — no training, no persistence, and (unlike the
+    /// gym's evaluate-and-fold) it does NOT write the traversal back into the self. Gated like a predict. Returns where
+    /// the query relaxed to, whether it confidently halted (reached) vs abstained, the trajectory, and whether the self
+    /// conditioned the walk. Unknown concept / non-dialectical space / empty net all return a clear message, never throw.</summary>
+    public NavWalkObservation WalkNavigator(string concept, string? cue = null)
+        => WithModelGate(() =>
+        {
+            var w = WalkNavigatorLocked(concept, cue);
+            _lastNavWalk = w;
+            return w;
+        });
+
+    private static NavCue ParseCue(string? cue) => (cue?.Trim().ToLowerInvariant()) switch
+    {
+        "domain" => NavCue.Domain,
+        "root" => NavCue.Root,
+        _ => NavCue.Genus, // default + unknown → the immediate kind
+    };
+
+    private NavWalkObservation WalkNavigatorLocked(string concept, string? cue)
+    {
+        var nav = ParseCue(cue);
+        var anchorSym = (concept ?? string.Empty).Trim();
+        if (anchorSym.Length == 0)
+            return new NavWalkObservation(anchorSym, nav, anchorSym, false, false, new[] { anchorSym }, "no concept given");
+
+        if (_state.Memory is not DialecticalSpace ds)
+            return new NavWalkObservation(anchorSym, nav, anchorSym, false, false, new[] { anchorSym },
+                "navigator needs the dialectical core (UseDialecticalCore)");
+
+        if (!ds.TryGetConceptFace(anchorSym, out var anchor))
+            return new NavWalkObservation(anchorSym, nav, anchorSym, false, false, new[] { anchorSym },
+                $"'{anchorSym}' is not a live concept in the space");
+
+        // Read the LIVE engine self (null when self-conditioning is off, or before the mind has dwelt on anything).
+        double[]? self = null;
+        if (_state.Inference.SelfConditionsCognition)
+        {
+            var sf = _state.Inference.SelfField;
+            if (sf.Count > 0) { self = new double[sf.Count]; for (var i = 0; i < sf.Count; i++) self[i] = sf[i]; }
+        }
+
+        // The thin controller rests on CPU between gym cycles; run the walk on whatever device its weights are on so the
+        // tensors the policy builds match the net's params (no cross-device Step).
+        var device = _state.Navigator.parameters().FirstOrDefault()?.device ?? CPU;
+
+        try
+        {
+            using var policy = new QueryNavPolicy(_state.Navigator, ds, anchor, (int)nav, device, NavK, 0.0, 0.5, self);
+            var res = new NavigatorWalk().Walk(ds, anchorSym, anchor, null, policy, new NavWalkOptions(MaxSteps: NavMaxSteps));
+            var reached = policy.LastHalt; // a confident halt = relaxed to an answer; no halt in the budget = structural abstain
+            return new NavWalkObservation(anchorSym, nav, res.FinalSymbol, reached, self is not null, res.Trajectory,
+                reached ? "resolved" : "abstained (no confident halt in the step budget)");
+        }
+        catch (Exception ex)
+        {
+            return new NavWalkObservation(anchorSym, nav, anchorSym, false, self is not null, new[] { anchorSym },
+                $"walk failed: {ex.GetType().Name}");
+        }
+    }
+
+    /// <summary>Cheap, gate-guarded read of the navigator's observable state for the Inspect panel: the last training
+    /// cycle's metrics, the running resolve%, the engine self's magnitude + whether it conditions cognition, the few
+    /// live concepts NEAREST the self vector ("what the mind is dwelling on"), and the most recent <see
+    /// cref="WalkNavigator"/> result. All plain CPU reads — no torch on the caller's thread.</summary>
+    public NavigatorDiagnostics GetNavigatorDiagnostics(int topFocus = 6)
+    {
+        return WithModelGate(() =>
+        {
+            var t = _lastNavTrain;
+            var sf = _state.Inference.SelfField;
+            double mag = 0.0; for (var i = 0; i < sf.Count; i++) mag += sf[i] * sf[i]; mag = Math.Sqrt(mag);
+
+            IReadOnlyList<(string Concept, double Similarity)> focus = Array.Empty<(string, double)>();
+            if (sf.Count > 0 && _state.Memory is DialecticalSpace ds)
+                focus = NearestToSelf(ds, sf, Math.Max(1, topFocus));
+
+            return new NavigatorDiagnostics(
+                LastLoss: t.Loss, LastQueries: t.Queries, LastResolvePct: t.ResolvePct, LastAbstainPct: t.AbstainPct,
+                RunningResolvePct: _navResolveEma, SelfMagnitude: mag,
+                SelfConditions: _state.Inference.SelfConditionsCognition,
+                SelfFocus: focus, LastWalk: _lastNavWalk);
+        });
+    }
+
+    // The top concepts whose meaning-cloud points most along the self vector — the LivingSelf made visible. Bounded scan
+    // (the self is unit-normalised, so this is a cosine against each cloud); skips numbers/atoms via SemanticVectorOf.
+    private static IReadOnlyList<(string Concept, double Similarity)> NearestToSelf(
+        DialecticalSpace ds, IReadOnlyList<double> self, int top)
+    {
+        const int MaxScan = 6000; // keep the timer-driven read cheap even on a large overnight space
+        var scored = new List<(string, double)>();
+        var scanned = 0;
+        foreach (var c in ds.ActiveConcepts)
+        {
+            if (scanned++ >= MaxScan) break;
+            var v = ds.SemanticVectorOf(c);
+            if (v is null) continue;
+            double dot = 0, nv = 0;
+            var n = Math.Min(v.Length, self.Count);
+            for (var i = 0; i < n; i++) { dot += v[i] * self[i]; nv += v[i] * v[i]; }
+            if (nv <= 1e-12) continue;
+            scored.Add((c, dot / Math.Sqrt(nv))); // self is already unit-length
+        }
+        return scored.OrderByDescending(x => x.Item2).Take(top).ToArray();
     }
 
     private static bool IsGpuMemoryError(Exception ex)

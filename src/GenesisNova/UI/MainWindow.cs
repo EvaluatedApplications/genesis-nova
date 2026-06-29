@@ -448,6 +448,22 @@ public class MainWindow : Form
 
                 return $"Trace mode: {(_replTraceEnabled ? "ON" : "OFF")}";
             }
+            if (trimmed.StartsWith("/nav", StringComparison.OrdinalIgnoreCase))
+            {
+                var parts = trimmed.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                if (parts.Length < 2)
+                    return "Usage: /nav <concept> [genus|domain|root]   (walk the platonic navigator from <concept>)";
+                // An optional trailing cue keyword; everything between is the concept anchor.
+                var last = parts[^1].ToLowerInvariant();
+                var hasCue = last is "genus" or "domain" or "root";
+                var cue = hasCue ? last : null;
+                var concept = string.Join(' ', parts.Skip(1).Take(parts.Length - 1 - (hasCue ? 1 : 0)));
+                if (concept.Length == 0)
+                    return "Usage: /nav <concept> [genus|domain|root]   (walk the platonic navigator from <concept>)";
+                // GATED like a predict (the walk runs torch under the model gate); never touches torch on this thread.
+                var obs = await Task.Run(() => _runtime.WalkNavigator(concept, cue));
+                return FormatNavWalk(obs);
+            }
             if (trimmed.Equals("/stats", StringComparison.OrdinalIgnoreCase))
             {
                 var checkpointPath = _runtime.AutoCheckpointPath;
@@ -527,8 +543,24 @@ public class MainWindow : Form
   /context                   - Shows context disabled status
   /stats                     - Show model stats
   /trace [on|off]            - Toggle stage-by-stage inference trace
+  /nav <concept> [cue]       - Walk the platonic navigator from <concept> (cue=genus|domain|root, default genus)
   /trainfile <path> [epochs] - Train from file
   /help                      - Show this message";
+    }
+
+    // Render an observational navigator walk (the `/nav` command) — the emergent answer, reached-vs-abstained, the
+    // trajectory of concepts, the cue, and whether the live engine self conditioned the walk.
+    private static string FormatNavWalk(GenesisNova.Runtime.NavWalkObservation o)
+    {
+        var traj = o.Trajectory is { Count: > 0 } ? string.Join(" → ", o.Trajectory) : "(none)";
+        var status = o.Reached ? "reached" : "abstained";
+        var selfNote = o.SelfConditioned ? "active (conditioned the walk)" : "empty (no dwelling context yet)";
+        return
+            $"[nav] '{o.Anchor}'  cue={o.Cue}\n" +
+            $"  answer:     {o.Answer}  ({status})\n" +
+            $"  trajectory: {traj}\n" +
+            $"  self:       {selfNote}\n" +
+            $"  note:       {o.Message}";
     }
 
     private string BuildReplTrace(string input, GenesisNova.Infer.GenerationResult result, string output)
@@ -1742,7 +1774,20 @@ public class MainWindow : Form
         right.Controls.Add(probeOut, 0, 2);
         root.Controls.Add(right, 1, 1);
 
-        tab.Controls.Add(root);
+        // Host the existing SPACE view + a NAVIGATOR view as two sub-tabs inside Inspect (read-only observation surfaces).
+        var inner = new TabControl { Dock = DockStyle.Fill };
+        var spaceTab = new TabPage("Space") { BackColor = Color.FromArgb(18, 18, 22) };
+        spaceTab.Controls.Add(root);
+        inner.TabPages.Add(spaceTab);
+
+        var navTab = new TabPage("Navigator") { BackColor = Color.FromArgb(18, 18, 22) };
+        var navBox = new TextBox { Name = "InspNav", Dock = DockStyle.Fill, Multiline = true, ReadOnly = true,
+            ScrollBars = ScrollBars.Vertical, Font = InspMono, BackColor = Color.FromArgb(24, 24, 28), ForeColor = Color.Gainsboro,
+            Text = "The platonic navigator (gym-trained, read live). Run /nav <concept> [genus|domain|root] in the REPL to walk a query." };
+        navTab.Controls.Add(navBox);
+        inner.TabPages.Add(navTab);
+
+        tab.Controls.Add(inner);
         _inspectTimer = new System.Windows.Forms.Timer { Interval = 1500 };
         _inspectTimer.Tick += (s, e) => RefreshInspect();
         _inspectTimer.Start();
@@ -1760,10 +1805,13 @@ public class MainWindow : Form
             try
             {
                 var (vitals, func) = BuildInspectStrings(space);
+                string nav;
+                try { nav = BuildNavString(_runtime.GetNavigatorDiagnostics()); } catch { nav = string.Empty; }
                 BeginInvoke(new Action(() =>
                 {
                     var v = GetControl<Label>("InspVitals"); if (v != null && vitals.Length > 0) v.Text = vitals;
                     var f = GetControl<TextBox>("InspFunc"); if (f != null && func.Length > 0) f.Text = func;
+                    var n = GetControl<TextBox>("InspNav"); if (n != null && nav.Length > 0) n.Text = nav;
                 }));
             }
             catch { /* best-effort live read — skip this tick */ }
@@ -1807,6 +1855,39 @@ public class MainWindow : Form
         sb.AppendLine();
         sb.Append(rows);
         return (vitals, sb.ToString());
+    }
+
+    // The NAVIGATOR sub-panel: vitals (last nav-train loss / running resolve% / last-cycle queries+abstain% / ‖SelfField‖),
+    // the self FOCUS (live concepts nearest the self — what the mind is dwelling on), and the LAST /nav walk. All from the
+    // gated GetNavigatorDiagnostics read, so this never touches torch on the UI/timer thread.
+    private static string BuildNavString(GenesisNova.Runtime.NavigatorDiagnostics d)
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine("NAVIGATOR   the platonic query-walker (gym-trained, read live)");
+        sb.AppendLine(new string('─', 60));
+        sb.AppendLine("VITALS");
+        sb.AppendLine($"  last cycle   loss {d.LastLoss:F3}   queries {d.LastQueries}   resolve {d.LastResolvePct:P0}   abstain {d.LastAbstainPct:P0}");
+        sb.AppendLine($"  running      resolve {d.RunningResolvePct:P0}");
+        sb.AppendLine($"  self         ‖SelfField‖ {d.SelfMagnitude:F3}   conditioning {(d.SelfConditions ? "ON" : "OFF")}");
+        sb.AppendLine();
+        sb.AppendLine("SELF FOCUS   live concepts nearest the self (what the mind is dwelling on)");
+        if (d.SelfFocus.Count == 0)
+            sb.AppendLine("  (the self is empty — the mind has not dwelt on anything yet)");
+        else
+            foreach (var (c, sim) in d.SelfFocus)
+                sb.AppendLine($"    {c,-22}{sim,7:F3}");
+        sb.AppendLine();
+        sb.AppendLine("LAST WALK   most recent /nav");
+        if (d.LastWalk is { } w)
+        {
+            var traj = w.Trajectory is { Count: > 0 } ? string.Join(" → ", w.Trajectory) : "(none)";
+            sb.AppendLine($"  '{w.Anchor}'  cue={w.Cue}  →  {w.Answer}  ({(w.Reached ? "reached" : "abstained")})");
+            sb.AppendLine($"  trajectory: {traj}");
+            sb.AppendLine($"  self {(w.SelfConditioned ? "conditioned the walk" : "was empty")}   ·   {w.Message}");
+        }
+        else
+            sb.AppendLine("  (run /nav <concept> [genus|domain|root] in the REPL)");
+        return sb.ToString();
     }
 
     // Both verdicts computed DIRECTLY from the stats (not IsFunctionLike) so the panel shows graph-clustering vs the PMI

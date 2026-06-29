@@ -165,22 +165,35 @@ Keep the NN **thin** — a *recogniser/controller*, never a store (`[[nova-nn-re
 
 ---
 
-## 7. Training: imitation first, then reinforcement
+## 7. Training: the flow-field oracle (reverse Dijkstra), then reinforcement
 
-The space is enormous; a from-scratch random walk never hits the answer. Cold-start by **imitation**, then improve.
+The space is enormous; a from-scratch random walk never hits the answer. Cold-start by **imitating an oracle** — and
+the right oracle is **not** A\* (one path) and **not** the degraded old routes (a weak teacher). It is a **backward
+Dijkstra from the answer** — a *flow field* — adapted from the proven NavPathfinder primitive
+(`NavMeshFlowField.Compute` → `(cost[], next[])`; we lift the ~30-line algorithm, not the navmesh geometry).
 
-- **Phase 0 — behavioural cloning from teacher trajectories.** Today's heuristic routes + relaxation already answer
-  many training queries and *touch a path* doing it (query concept → relation neighbour → answer). Convert those into
-  target trajectories; train `π_θ` to reproduce the teacher's next step. (This is why we did **not** delete the old
-  routing — it is the teacher.)
-- **Phase 1 — DAgger / RL fine-tune.** Reward reaching the answer in few hops; when the walker strays, query the
-  teacher for the correct next step (DAgger) and add it to the data. Let it then **beat** the teacher — discover
-  shorter paths and compositional routes (math + fact in one walk) the fixed ladder never could.
-- **Dense shaping from the address space:** reward each step that *decreases frozen-address distance to the target
-  coordinate*. This dense signal — the thing a learned walk needs — exists **only because identity is decodable**
-  (§1). Sparse "hit/miss" alone would not train.
-- **Self-supervised surprise:** predict the next coordinate / predict whether a step reduces goal-surprise — the
-  free-energy framing of `PLATONIC_MIND.md`, now *per step* instead of per global settle.
+**The oracle = one backward Dijkstra from the answer coordinate over the action-graph.** Nodes are
+concepts/coordinates; edges are the action menu reversed (FOLLOW-edge → relations reversed `category ← entity`;
+STEP-near → symmetric lattice neighbours; COMPUTE-jump → reversible ops, handled specially). It fills:
+- **`cost[node]`** — the exact optimal cost-to-answer from *every* node → the **dense reward field**, defined
+  everywhere (not just along one path);
+- **`next[node]`** — the optimal next action from *every* node → the **expert policy, everywhere**.
+
+Computed **once per answer**, cached, shared across every query to that answer (the NavPathfinder amortisation).
+
+Why a flow field beats A\* *as a teacher*: A\* labels one trajectory; the flow field labels the **whole reachable
+graph** with the expert action. So when the learner strays off the optimal path, the field **already** has the
+correct next move there — **DAgger for free**, no teacher re-query — and `cost[]` gives a dense distance-to-goal
+reward at every state the learner could occupy.
+
+- **Phase 0 — behavioural cloning on the flow field.** For each training `(query, known-answer)`, compute the
+  oracle field once; train `π_θ` to reproduce `next[node]` at every reachable node (not one path). The dense
+  `cost[]`-gradient supervises the value head.
+- **Phase 1 — RL fine-tune.** Let the walker **beat** the oracle on the real action menu — discover shorter and
+  compositional routes (math + fact in one walk) the per-goal field can't pre-bake — using `cost[]` as the dense
+  reward and the frozen-address distance as a fallback heuristic where no field exists (inference, answer unknown).
+- **Self-supervised surprise:** predict the next coordinate / whether a step reduces goal-surprise — the free-energy
+  framing of `PLATONIC_MIND.md`, now *per step* instead of per global settle.
 
 ---
 
@@ -237,11 +250,22 @@ The space is enormous; a from-scratch random walk never hits the answer. Cold-st
 
 ---
 
-## 11. Build order (once §10 is settled)
+## 11. Build order (§10 settled)
 
-1. **Teacher trace** — wrap the current routes to emit `(query, trajectory, answer)` records.
-2. **Action seams** — COMPUTE-jump / FOLLOW-edge / TOWARD-landmark + centroid accessor on the substrate.
-3. **Walk loop + policy/value net** — the navigator; behavioural cloning on the teacher traces (Phase 0).
-4. **DAgger/RL fine-tune** — dense address-distance reward; let it beat the teacher (Phase 1).
-5. **Cut over** — `GenerateFromField` calls the navigator; old ladder demoted to teacher/fallback; re-earn the
-   skipped routing tests (`MeaningTick`, `FringeAssociation`) as *navigation* outcomes.
+1. **Flow-field oracle** *(done partly — motion seams landed: `TryLand`/`Materialise`/`NavNeighborhood`/`Landmarks`)*.
+   Port the backward-Dijkstra pattern (`NavMeshFlowField.Compute`, ~30 lines, **not** the navmesh geometry) over the
+   platonic **action-graph**: from a known answer coordinate, fill `cost[node]` (dense reward) + `next[node]` (expert
+   action) over the reachable graph. Compute once per answer, cache. Handle the reverse-graph (relations reversed,
+   lattice steps symmetric, compute-jumps special).
+2. **Action seams** — COMPUTE-jump / FOLLOW-edge / TOWARD-landmark as target-producers (landing via the lattice, §5.1).
+3. **Walk loop + thin policy/value net** — behavioural cloning on the oracle field (`next[]` everywhere; `cost[]`
+   supervises the value head). Phase 0.
+4. **RL fine-tune** — dense `cost[]` reward; let it beat the oracle on the live action menu; frozen-address distance
+   as the inference-time heuristic where no field exists. Phase 1.
+5. **Cut over** — `GenerateFromField` calls the navigator; old ladder demoted to fallback; re-earn the skipped routing
+   tests (`MeaningTick`, `FringeAssociation`) as *navigation* outcomes.
+
+> **Reusable from NavPathfinder / EvalApp (the genesis-nova lineage):** the flow-field algorithm (step 1, primary);
+> and as **secondary, later** reuse — the `EvalApp` `AdaptiveTuner` (Bayesian/hill-climb self-tuning) to auto-size the
+> **step budget** / walk hyperparameters (§8), and the `IStep`/`Pipeline` + `WindowBudgetPressure` framework to host
+> the per-hop **tick loop** under a frame/compute budget. Lift the algorithms, not the navmesh domain glue.

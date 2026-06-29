@@ -52,14 +52,35 @@ public sealed record GenesisCheckpoint(
     // source. Null on older checkpoints (the learner re-warms from training on load). Persisted so the role head's
     // supervision survives a reload instead of resetting to empty (which desyncs the head and sticks the loss).
     GrammarRoleSnapshot[]? GrammarRoles = null,
+    // THE PLATONIC NAVIGATOR policy net (NavQueryPolicyNet) weights — the trained query-conditioned controller that
+    // walks the substrate. Null on pre-navigator checkpoints (then the runtime keeps its freshly-initialised navigator).
+    // The big parameter tensors are stored as a SEPARATE f64 shard (see GenesisShardedCheckpointStore), like the model
+    // NN — so an overnight-trained navigator survives an app restart. Persisted so the navigator isn't reset to
+    // untrained on every load (the same drop-on-load gap previously fixed for the GRU/route/role heads).
+    NavigatorSnapshot? Navigator = null,
+    // THE PERSISTENT SELF (GenesisInferenceEngine._selfField) — the decaying meaning-space standing wave the mind
+    // reasons from (PLATONIC_CONSCIOUSNESS.md). Small (608 doubles at the production face width); rides in meta JSON.
+    // Null on pre-self / pre-first-perception checkpoints (then the engine resumes self-less, the fresh state).
+    double[]? NavigatorSelfField = null,
     int Version = 0)
 {
-    public const int CurrentVersion = 6;
+    // 7: navigator policy-net weights + persistent self added. Older (≤6) checkpoints simply lack both (Navigator /
+    // NavigatorSelfField null) → the runtime keeps a fresh navigator and a self-less engine — they still load.
+    public const int CurrentVersion = 7;
 }
 
 /// <summary>One learned grammar tally row. AsCopula is carried (it discriminates a copula from a recall-frame subject)
 /// — see GrammarRoleLearner.Export.</summary>
 public sealed record GrammarRoleSnapshot(string Token, int Present, int Absent, int AsAnswer, int AsCopula);
+
+/// <summary>Serializable weights of the navigator policy net (<see cref="GenesisNova.Cognition.Navigator.NavQueryPolicyNet"/>).
+/// <see cref="Parameters"/> are the net's named tensors (flattened, row-major) — concatenated into one f64 shard on save;
+/// the architecture dims let load reject a shape-mismatched (re-architected) navigator and stay fresh rather than throw.</summary>
+public sealed record NavigatorSnapshot(int Dim, int Hidden, int CueCount, int SelfLength, NavParameterSnapshot[] Parameters);
+
+/// <summary>One named navigator parameter tensor: its module path <see cref="Name"/>, its <see cref="Shape"/>, and its
+/// row-major <see cref="Values"/> (emptied in the manifest's meta JSON — the bytes live in the concatenated f64 shard).</summary>
+public sealed record NavParameterSnapshot(string Name, long[] Shape, double[] Values);
 
 public sealed record MatrixSnapshot(int Rows, int Cols, double[] Values)
 {

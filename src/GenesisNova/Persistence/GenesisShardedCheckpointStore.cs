@@ -51,6 +51,11 @@ public static class GenesisShardedCheckpointStore
             QueryOperandWeights = Strip(nn.QueryOperandWeights),
             PlanWeights = Strip(nn.PlanWeights),
             TrunkWeights = Strip(nn.TrunkWeights),
+            // Navigator: keep the param NAMES + SHAPES (and arch dims) in meta, but EMPTY the values — the bytes go to
+            // the concatenated "navigator" f64 shard below (the big tensors, like the model's, don't bloat the meta JSON).
+            Navigator = nn.Navigator is null
+                ? null
+                : nn.Navigator with { Parameters = nn.Navigator.Parameters.Select(p => p with { Values = Array.Empty<double>() }).ToArray() },
             PlatonicSpace = null,
         };
         AddJson(sections, shardsDir, "meta", meta);
@@ -66,6 +71,17 @@ public static class GenesisShardedCheckpointStore
         AddF64(sections, shardsDir, "queryOperandWeights", nn.QueryOperandWeights);
         AddF64(sections, shardsDir, "planWeights", nn.PlanWeights);
         AddF64(sections, shardsDir, "trunkWeights", nn.TrunkWeights);
+
+        // NAVIGATOR policy-net weights: concatenate every param tensor (row-major, in the meta's param order) into ONE
+        // f64 shard. Optional — pre-navigator checkpoints (Navigator null) write nothing here, so they stay loadable.
+        if (nn.Navigator is { Parameters.Length: > 0 } nav)
+        {
+            var total = nav.Parameters.Sum(p => (long)p.Values.Length);
+            var blob = new double[total];
+            long off = 0;
+            foreach (var p in nav.Parameters) { Array.Copy(p.Values, 0L, blob, off, p.Values.Length); off += p.Values.Length; }
+            AddF64Raw(sections, shardsDir, "navigator", blob);
+        }
 
         WriteManifest(modelDir, shardsDir, nn.Version, sections, generation);
     }
@@ -104,6 +120,25 @@ public static class GenesisShardedCheckpointStore
             cp = cp with { PlanWeights = cp.PlanWeights with { Values = ReadF64(manifest, shardsDir, "planWeights") } };
         if (manifest.Sections.ContainsKey("trunkWeights") && cp.TrunkWeights is not null)
             cp = cp with { TrunkWeights = cp.TrunkWeights with { Values = ReadF64(manifest, shardsDir, "trunkWeights") } };
+
+        // NAVIGATOR weights: split the one concatenated f64 shard back into the per-param tensors by their (meta) shapes.
+        // Absent for pre-navigator checkpoints (cp.Navigator null / no "navigator" section) → leave it null (fresh net).
+        if (cp.Navigator is { Parameters.Length: > 0 } nav && manifest.Sections.ContainsKey("navigator"))
+        {
+            var blob = ReadF64(manifest, shardsDir, "navigator");
+            var restored = new NavParameterSnapshot[nav.Parameters.Length];
+            long off = 0;
+            for (var i = 0; i < nav.Parameters.Length; i++)
+            {
+                var p = nav.Parameters[i];
+                var len = p.Shape.Aggregate(1L, (a, b) => a * b);
+                var vals = new double[len];
+                if (off + len <= blob.LongLength) Array.Copy(blob, off, vals, 0L, len);
+                off += len;
+                restored[i] = p with { Values = vals };
+            }
+            cp = cp with { Navigator = nav with { Parameters = restored } };
+        }
         return cp;
     }
 
@@ -211,6 +246,14 @@ public static class GenesisShardedCheckpointStore
         var bytes = new byte[(long)m.Values.Length * sizeof(double)];
         Buffer.BlockCopy(m.Values, 0, bytes, 0, bytes.Length);
         sections[name] = new Section("f64", bytes.LongLength, m.Rows, m.Cols, ChunkAndWrite(shardsDir, bytes));
+    }
+
+    // A raw f64 vector section (no Rows/Cols semantics — used for the concatenated navigator weight blob).
+    private static void AddF64Raw(IDictionary<string, Section> sections, string shardsDir, string name, double[] values)
+    {
+        var bytes = new byte[(long)values.Length * sizeof(double)];
+        Buffer.BlockCopy(values, 0, bytes, 0, bytes.Length);
+        sections[name] = new Section("f64", bytes.LongLength, values.Length, 1, ChunkAndWrite(shardsDir, bytes));
     }
 
     private static void AddJson<T>(IDictionary<string, Section> sections, string shardsDir, string name, T value)

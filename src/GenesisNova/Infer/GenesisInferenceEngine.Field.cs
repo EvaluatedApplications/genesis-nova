@@ -1041,6 +1041,13 @@ public sealed partial class GenesisInferenceEngine
         if (_memory is DialecticalSpace ds) PerceiveIntoSelfField(ds, concept);
     }
 
+    /// <summary>RESTORE the persistent self (<see cref="_selfField"/>) verbatim from a checkpoint — so the mind resumes
+    /// from WHO IT HAD BECOME across an app restart (the vital loop survives a reload, not just the substrate/weights).
+    /// A null/empty argument leaves the engine self-less (fresh — the pre-first-perception state), so an OLD checkpoint
+    /// without a stored self loads cleanly. Stores a CLONE (the caller's array is not aliased into the live self).</summary>
+    public void RestoreSelfField(double[]? self)
+        => _selfField = self is { Length: > 0 } ? (double[])self.Clone() : null;
+
     // ── RELAX: recall what the mind HOLDS about the subject. RELATION-FIRST (follow the explicit association — robust
     //    to hub dilution at scale, where a populous category's distributional cloud washes out a member's signal),
     //    context-disambiguated, falling back to semantic relaxation over the clouds when there is no held association. ─

@@ -5,6 +5,7 @@ using GenesisNova.Infer;
 using GenesisNova.Model;
 using GenesisNova.Persistence;
 using GenesisNova.Cognition;
+using GenesisNova.Cognition.Navigator;
 using GenesisNova.Tokenization;
 using GenesisNova.Train;
 
@@ -31,6 +32,7 @@ public sealed class GenesisRuntimeState
             foldPathDiscovery: Trainer.FoldPathDiscovery);
         NovaConfig.FromLegacy(config).ApplyTo(Model, Memory, Inference, Trainer); // ONE place for every mechanism toggle
         Trainer.SetInferencePolicy(Inference);
+        Navigator = CreateNavigator(config);
     }
 
     public GenesisNovaConfig Config { get; private set; }
@@ -42,6 +44,15 @@ public sealed class GenesisRuntimeState
     public GenesisTrainingOrchestrator Orchestrator { get; private set; }
     public GenesisInferenceEngine Inference { get; private set; }
 
+    /// <summary>THE PLATONIC NAVIGATOR — one shared query-conditioned policy net (gym trains it; REPL/inspect read it).
+    /// Built at <c>config.FaceDimension</c> (production 1024 ⇒ self length 608), hidden 2048, the {GENUS,DOMAIN,ROOT}
+    /// cue table. Its weights + the engine's persistent self are checkpointed together so an overnight-trained navigator
+    /// survives an app restart (a load restores them via <see cref="Replace"/>; an old checkpoint keeps this fresh net).</summary>
+    public NavQueryPolicyNet Navigator { get; private set; }
+
+    private static NavQueryPolicyNet CreateNavigator(GenesisNovaConfig config)
+        => new(config.FaceDimension, NavQueryFeatures.CueCount, hidden: 2048);
+
     public void Replace(
         GenesisNovaConfig config,
         WhitespaceGenesisTokenizer tokenizer,
@@ -49,7 +60,9 @@ public sealed class GenesisRuntimeState
         PlatonicMemorySnapshot? platonicSpaceSnapshot = null,
         GenesisConversationSnapshot? conversationSnapshot = null,
         string? trainerLearningStateJson = null,
-        GrammarRoleSnapshot[]? grammarRoles = null)
+        GrammarRoleSnapshot[]? grammarRoles = null,
+        NavigatorSnapshot? navigator = null,
+        double[]? navigatorSelfField = null)
     {
         ConfigureCpuThreadPool(config);
         Config = config;
@@ -77,6 +90,15 @@ public sealed class GenesisRuntimeState
         // Without this the head reloads with empty supervision and desyncs (grammar regresses, loss sticks).
         if (grammarRoles is { Length: > 0 })
             Inference.ImportGrammarRoles(grammarRoles.Select(r => (r.Token, r.Present, r.Absent, r.AsAnswer, r.AsCopula)));
+
+        // Rebuild the shared navigator fresh, then restore its trained weights (no-op/fresh if the checkpoint had none —
+        // an old checkpoint, or a navigator built at different dims, both leave a freshly-initialised net). Dispose the
+        // previous net (it is a TorchSharp module) so a reload doesn't leak its tensors. Restore the persistent self too
+        // (null → the engine resumes self-less), so the mind reasons from WHO IT HAD BECOME across the restart.
+        Navigator?.Dispose();
+        Navigator = CreateNavigator(config);
+        Navigator.ImportWeights(navigator);
+        Inference.RestoreSelfField(navigatorSelfField);
     }
 
     private void ImportTrainerLearningState(string? trainerLearningStateJson)

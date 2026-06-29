@@ -27,7 +27,7 @@ internal sealed class LoadStep : IStep<GenesisLoadTaskData>
     {
         ct.ThrowIfCancellationRequested();
         var loaded = GenesisCheckpointStore.LoadForRuntime(data.Path, _runtimeConfig);
-        _state.Replace(loaded.Config, loaded.Tokenizer, loaded.Model, loaded.PlatonicSpace, loaded.Conversation, loaded.TrainerLearningStateJson);
+        _state.Replace(loaded.Config, loaded.Tokenizer, loaded.Model, loaded.PlatonicSpace, loaded.Conversation, loaded.TrainerLearningStateJson, loaded.GrammarRoles, loaded.Navigator, loaded.NavigatorSelfField);
         _historyStore.Restore(loaded.AutonomousTraining);
         _persister.Persist(reason: "load", detail: data.Path);
         return ValueTask.FromResult(data with { Loaded = true });

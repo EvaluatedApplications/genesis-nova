@@ -40,6 +40,10 @@ internal sealed class GenesisCheckpointPersister
         var grammarRoles = _state.Inference.ExportGrammarRoles()
             .Select(r => new GrammarRoleSnapshot(r.Token, r.Present, r.Absent, r.AsAnswer, r.AsCopula))
             .ToArray();
+        // The trained NAVIGATOR weights + the engine's persistent SELF — checkpointed so an overnight-trained mind
+        // resumes intact (the navigator isn't reset to untrained, the self isn't wiped, on the next load).
+        var navigator = _state.Navigator.ExportWeights();
+        var navigatorSelfField = _state.Inference.SelfField is { Count: > 0 } self ? self.ToArray() : null;
         var wrote = false;
         var wroteLatest = false;
 
@@ -54,7 +58,9 @@ internal sealed class GenesisCheckpointPersister
                 conversation: _state.Conversation.ExportSnapshot(),
                 autonomousTraining: _historyStore.Export(),
                 trainerLearningStateJson: trainerLearningStateJson,
-                grammarRoles: grammarRoles);
+                grammarRoles: grammarRoles,
+                navigator: navigator,
+                navigatorSelfField: navigatorSelfField);
             wrote = true;
             wroteLatest = string.Equals(explicitPath, autoPath, StringComparison.OrdinalIgnoreCase);
         }
@@ -72,7 +78,10 @@ internal sealed class GenesisCheckpointPersister
                     platonicSpace: _state.Memory.ExportSnapshot(),
                     conversation: _state.Conversation.ExportSnapshot(),
                     autonomousTraining: _historyStore.Export(),
-                    trainerLearningStateJson: trainerLearningStateJson);
+                    trainerLearningStateJson: trainerLearningStateJson,
+                    grammarRoles: grammarRoles,
+                    navigator: navigator,
+                    navigatorSelfField: navigatorSelfField);
                 wrote = true;
                 wroteLatest = true;
             }

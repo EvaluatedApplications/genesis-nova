@@ -1,6 +1,8 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using GenesisNova.Cognition.Platonic;
+using GenesisNova.Persistence;
 using TorchSharp;
 using static TorchSharp.torch;
 using static TorchSharp.torch.nn;
@@ -157,6 +159,41 @@ public sealed class NavQueryPolicyNet : Module
 
     /// <summary>Total trainable parameter count (diagnostic — proves the net stays a thin controller).</summary>
     public long ParameterCount() => parameters().Sum(p => p.numel());
+
+    /// <summary>EXPORT every named weight tensor for the checkpoint (as f64 — lossless from the net's f32). The
+    /// architecture dims ride along so a load can detect a re-architected navigator and decline rather than crash.</summary>
+    public NavigatorSnapshot ExportWeights()
+    {
+        using var _ = no_grad();
+        var list = new List<NavParameterSnapshot>();
+        foreach (var (name, p) in named_parameters())
+        {
+            using var t = p.detach().to(float64).cpu().contiguous();
+            list.Add(new NavParameterSnapshot(name, p.shape.ToArray(), t.data<double>().ToArray()));
+        }
+        return new NavigatorSnapshot(Dim, Hidden, CueCount, SelfLength, list.ToArray());
+    }
+
+    /// <summary>RESTORE weights from a checkpoint IN PLACE (copy_ into this net's parameters). No-op when the snapshot
+    /// is null/empty or its architecture dims don't match this net (a re-architected navigator stays freshly
+    /// initialised — never throws), so an OLD checkpoint without navigator data, or a navigator built at different
+    /// dims, both load cleanly. Per-tensor shape is re-checked so a partial/renamed param is skipped, not mis-copied.</summary>
+    public void ImportWeights(NavigatorSnapshot? snapshot)
+    {
+        if (snapshot is null || snapshot.Parameters.Length == 0) return;
+        if (snapshot.Dim != Dim || snapshot.Hidden != Hidden || snapshot.CueCount != CueCount || snapshot.SelfLength != SelfLength)
+            return; // architecture changed → keep the fresh net rather than mis-load
+        using var _ = no_grad();
+        var byName = named_parameters().ToDictionary(np => np.name, np => np.parameter);
+        foreach (var ps in snapshot.Parameters)
+        {
+            if (ps.Values.Length == 0) continue;
+            if (!byName.TryGetValue(ps.Name, out var dst)) continue;
+            if (!dst.shape.SequenceEqual(ps.Shape)) continue;
+            using var src = tensor(ps.Values, ps.Shape).to(dst.dtype).to(dst.device);
+            dst.copy_(src);
+        }
+    }
 }
 
 /// <summary>

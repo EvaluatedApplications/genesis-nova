@@ -1032,6 +1032,15 @@ public sealed partial class GenesisInferenceEngine
         n = Math.Sqrt(n); if (n > 1e-9) for (var i = 0; i < _selfField.Length; i++) _selfField[i] /= n;
     }
 
+    /// <summary>PUBLIC WRITE into the SAME persistent self the field reasons from (<see cref="_selfField"/>) — so an
+    /// external loop (e.g. the query-conditioned navigator) can feed the existing self the concepts a walk traversed,
+    /// closing the vital loop THROUGH this one self. A thin pass-through to <see cref="PerceiveIntoSelfField"/>: no new
+    /// self, no new logic. READ is via <see cref="SelfField"/>; ablate via <see cref="SelfConditionsCognition"/>.</summary>
+    public void PerceiveSelf(string concept)
+    {
+        if (_memory is DialecticalSpace ds) PerceiveIntoSelfField(ds, concept);
+    }
+
     // ── RELAX: recall what the mind HOLDS about the subject. RELATION-FIRST (follow the explicit association — robust
     //    to hub dilution at scale, where a populous category's distributional cloud washes out a member's signal),
     //    context-disambiguated, falling back to semantic relaxation over the clouds when there is no held association. ─

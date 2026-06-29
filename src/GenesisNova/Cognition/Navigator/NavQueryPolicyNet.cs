@@ -36,6 +36,7 @@ public sealed class NavQueryPolicyNet : Module
     private readonly Modules.Linear _candEnc;    // per-candidate differential feature → embedding
     private readonly Modules.Linear _ctxEnc;     // (cur − anchor) displacement context → embedding
     private readonly Modules.Linear _h0Enc;      // anchor face → seed hidden h₀
+    private readonly Modules.Linear _selfEnc;    // W_s: the PERSISTENT SELF (meaning-space vector) → seed hidden bias
     private readonly Modules.Embedding _cueEmb;  // learned cue embedding over {GENUS, DOMAIN, ROOT}
     private readonly Modules.Linear _gx;          // GRU input transform: [summ, ctx, cue] = 3H → 3·Hidden (r,z,n gates)
     private readonly Modules.Linear _gh;          // GRU hidden transform → 3·Hidden
@@ -56,7 +57,11 @@ public sealed class NavQueryPolicyNet : Module
     /// <summary>Number of target-aspect cues the embedding table covers ({GENUS, DOMAIN, ROOT} = 3).</summary>
     public int CueCount { get; }
 
-    public NavQueryPolicyNet(int dim, int cueCount = NavQueryFeatures.CueCount, int hidden = 2048, Device? device = null)
+    /// <summary>Width of the persistent-self vector W_s consumes (the meaning-space semantic length the engine's
+    /// <c>SelfField</c> lives in). A self of this length seeds h₀; a null/empty self reduces to the query-only seed.</summary>
+    public int SelfLength { get; }
+
+    public NavQueryPolicyNet(int dim, int cueCount = NavQueryFeatures.CueCount, int hidden = 2048, Device? device = null, int? selfDim = null)
         : base(nameof(NavQueryPolicyNet))
     {
         if (dim <= 0) throw new ArgumentOutOfRangeException(nameof(dim));
@@ -65,11 +70,13 @@ public sealed class NavQueryPolicyNet : Module
         Dim = dim;
         Hidden = hidden;
         CueCount = cueCount;
+        SelfLength = selfDim ?? FaceCodec.SemanticLength(dim); // the meaning-space self vector width (engine SelfField length)
         FeatureLength = NavQueryFeatures.FeatureLength(dim);
 
         _candEnc = Linear(FeatureLength, hidden);
         _ctxEnc = Linear(dim, hidden);
         _h0Enc = Linear(dim, hidden);
+        _selfEnc = Linear(SelfLength, hidden, hasBias: false); // no bias → a null/zero self adds EXACTLY zero to the seed
         _cueEmb = Embedding(cueCount, hidden);
         _gx = Linear(3 * hidden, 3 * hidden); // GRU input = concat[obsSummary(H), ctxEmb(H), cue(H)] = 3H
         _gh = Linear(hidden, 3 * hidden);
@@ -85,27 +92,40 @@ public sealed class NavQueryPolicyNet : Module
     /// <summary>The learned cue vector for a [B] long index tensor → [B, Hidden].</summary>
     public Tensor CueVector(Tensor cueIdx) => _cueEmb.forward(cueIdx);
 
-    /// <summary>Seed the self h₀ from the query-context (PLATONIC_NAVIGATOR.md §3): anchor face ⊕ cue embedding.
-    /// <paramref name="anchor"/> = [B, dim]; <paramref name="cueIdx"/> = [B] long; returns h₀ [B, Hidden].</summary>
-    public Tensor SeedHidden(Tensor anchor, Tensor cueIdx) => tanh(_h0Enc.forward(anchor) + CueVector(cueIdx));
+    /// <summary>Seed the self h₀ from the query-context (PLATONIC_NAVIGATOR.md §3) AND the PERSISTENT SELF (the vital
+    /// loop, PLATONIC_CONSCIOUSNESS.md): h₀ = tanh(W·anchor + cueEmb[cue] + W_s·self). <paramref name="anchor"/> =
+    /// [B, dim]; <paramref name="cueIdx"/> = [B] long; <paramref name="selfVec"/> = [B, SelfLength] the engine's
+    /// accumulated <c>SelfField</c> (null/empty → the self term vanishes and this reduces EXACTLY to the query-only
+    /// seed). The self biases the AMBIGUOUS fork — exactly as it conditions <c>ds.Reason</c> in the field today.</summary>
+    public Tensor SeedHidden(Tensor anchor, Tensor cueIdx, Tensor? selfVec = null)
+    {
+        var pre = _h0Enc.forward(anchor) + CueVector(cueIdx);
+        if (selfVec is not null) pre = pre + _selfEnc.forward(selfVec); // W_s·self — the persistent self tilts the seed
+        return tanh(pre);
+    }
 
     /// <summary>
     /// One hop of the recurrent query policy. <paramref name="features"/> = [B, K, F] answer-free differential rows;
     /// <paramref name="mask"/> = [B, K]; <paramref name="context"/> = [B, dim] the (cur−anchor) displacement;
-    /// <paramref name="cueIdx"/> = [B] long; <paramref name="h"/> = [B, Hidden]. Returns candidate logits [B, K]
+    /// <paramref name="cueIdx"/> = [B] long; <paramref name="h"/> = [B, Hidden]; <paramref name="selfVec"/> =
+    /// [B, SelfLength] the PERSISTENT SELF (null → query-only, byte-identical). Returns candidate logits [B, K]
     /// (padding −∞), halt logit [B, 1], value [B, 1], next self [B, Hidden].
     /// </summary>
     public (Tensor candLogits, Tensor haltLogit, Tensor value, Tensor hNext) Step(
-        Tensor features, Tensor mask, Tensor context, Tensor cueIdx, Tensor h)
+        Tensor features, Tensor mask, Tensor context, Tensor cueIdx, Tensor h, Tensor? selfVec = null)
     {
         var candEmb = functional.relu(_candEnc.forward(features));      // [B, K, H]
 
         var m = mask.unsqueeze(-1);                                    // [B, K, 1]
         var summ = (candEmb * m).sum(new long[] { 1 }) / m.sum(new long[] { 1 }).clamp_min(1e-6); // [B, H]
         var ctx = functional.relu(_ctxEnc.forward(context));           // [B, H]
-        var cue = CueVector(cueIdx);                                    // [B, H] — the persistent question-tension
+        // The persistent question-tension. The SELF rides the SAME un-saturated channel as the cue, mixed in every hop
+        // (the seed alone is tanh-saturated by the cue, so W_s gets no gradient there) — W_s·self + cueEmb. Null self →
+        // exactly the cue (byte-identical to the query-only navigator).
+        var cue = CueVector(cueIdx);                                    // [B, H]
+        if (selfVec is not null) cue = cue + _selfEnc.forward(selfVec); // the self conditions the walk, exactly per hop
 
-        // GRU cell: thread the self with the new observation AND the cue.
+        // GRU cell: thread the self with the new observation AND the cue⊕self.
         var hNext = GruCell(cat(new[] { summ, ctx, cue }, dim: 1), h);  // input 3H → [B, H]
 
         // Score each candidate from the updated self ⊕ its embedding.
@@ -155,6 +175,7 @@ public sealed class QueryNavPolicy : INavPolicy, IDisposable
     private readonly Device _device;
     private readonly double[] _anchorFace;
     private readonly int _cue;
+    private readonly float[]? _selfVec; // the PERSISTENT SELF (engine SelfField) that seeds h₀; null → query-only seed
     private readonly int _k;
     private readonly double _minConfidence;
     private readonly double _haltThreshold;
@@ -165,12 +186,18 @@ public sealed class QueryNavPolicy : INavPolicy, IDisposable
     public bool LastHalt { get; private set; }
 
     public QueryNavPolicy(NavQueryPolicyNet net, DialecticalSpace space, double[] anchorFace, int cue,
-        Device? device = null, int k = 16, double minConfidence = 0.0, double haltThreshold = 0.5)
+        Device? device = null, int k = 16, double minConfidence = 0.0, double haltThreshold = 0.5, double[]? selfVec = null)
     {
         _net = net ?? throw new ArgumentNullException(nameof(net));
         _space = space ?? throw new ArgumentNullException(nameof(space));
         _anchorFace = anchorFace ?? throw new ArgumentNullException(nameof(anchorFace));
         _cue = cue;
+        // The persistent self that seeds the walk (null/empty → query-only seed, the un-conditioned default).
+        if (selfVec is { Length: > 0 })
+        {
+            _selfVec = new float[selfVec.Length];
+            for (var i = 0; i < selfVec.Length; i++) _selfVec[i] = (float)selfVec[i];
+        }
         _device = device ?? CPU;
         _k = k;
         _minConfidence = minConfidence;
@@ -188,12 +215,15 @@ public sealed class QueryNavPolicy : INavPolicy, IDisposable
         using var scope = NewDisposeScope();
 
         using var cueT = tensor(new long[] { _cue }, new long[] { 1 }, device: _device);
+        // The PERSISTENT SELF (engine SelfField) as a tensor, reused for the seed AND every hop (null → query-only).
+        using var selfT = _selfVec is null ? null : tensor(_selfVec, new long[] { 1, _selfVec.Length }, device: _device);
 
-        // (Re)seed the self at the start of a walk from the QUERY-CONTEXT (anchor ⊕ cue); otherwise carry it.
+        // (Re)seed the self at the start of a walk from the QUERY-CONTEXT (anchor ⊕ cue) AND the PERSISTENT SELF
+        // (W_s·SelfField — the vital loop); otherwise carry it. A null _selfVec reduces to the query-only seed.
         if (state.Step == 0 || _h is null)
         {
             using var anchorSeed = ToTensor(_anchorFace, dim);
-            ReplaceHidden(_net.SeedHidden(anchorSeed, cueT));
+            ReplaceHidden(_net.SeedHidden(anchorSeed, cueT, selfT));
         }
 
         // Answer-free egocentric observation: candidate rows are differentials against the ANCHOR, not the goal.
@@ -209,7 +239,7 @@ public sealed class QueryNavPolicy : INavPolicy, IDisposable
         for (var i = 0; i < dim; i++) ctxArr[i] = (float)(state.CurrentFace[i] - _anchorFace[i]); // displacement from start
         using var context = tensor(ctxArr, new long[] { 1, dim }, device: _device);
 
-        var (logits, haltLogit, _, hNext) = _net.Step(features, mask, context, cueT, _h!);
+        var (logits, haltLogit, _, hNext) = _net.Step(features, mask, context, cueT, _h!, selfT);
         ReplaceHidden(hNext); // thread the self forward
 
         var haltProb = sigmoid(haltLogit).cpu().item<float>();

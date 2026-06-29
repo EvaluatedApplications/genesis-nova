@@ -34,6 +34,7 @@ public class MainWindow : Form
     private string _exampleFolder;
     private TabControl _tabControl = null!;
     private readonly List<(int Cycle, double Acc, double Loss)> _warmHistory = new(); // Inspect-tab warming curve
+    private GenesisNova.Runtime.NavTrainCycleResult _lastNavTrain; // last navigator-training cycle (for the inspect tab)
     private System.Windows.Forms.Timer? _inspectTimer;
     private volatile bool _inspectReading;
     private string[]? _inspectGlue, _inspectContent; // probe words pulled from the LIVE foundation vocabulary (so the table shows trained words)
@@ -216,6 +217,9 @@ public class MainWindow : Form
 
         flow.Controls.Add(new Label { Text = "Scheduler:", AutoSize = true, Margin = new Padding(0, 10, 0, 0), ForeColor = Color.DimGray });
         flow.Controls.Add(new CheckBox { Name = "CurFocused", Text = "Focused + rehearsal (unticked = all tasks every cycle)", Checked = true, AutoSize = true, Margin = new Padding(20, 0, 0, 0) });
+        // The platonic NAVIGATOR (query-conditioned walker) trains a LIGHT step each gym cycle on the live space, so it
+        // accumulates overnight alongside the model. Default ON so an unattended run trains it; untick to leave it frozen.
+        flow.Controls.Add(new CheckBox { Name = "CurTrainNavigator", Text = "Train Navigator — the platonic walker learns the live space each cycle (accumulates overnight)", Checked = true, AutoSize = true, Margin = new Padding(20, 0, 0, 0) });
         flow.Controls.Add(new Label { Text = "Memory index file (MEMORY.md):", AutoSize = true, Margin = new Padding(0, 8, 0, 2) });
         flow.Controls.Add(new TextBox { Name = "MemPath", Width = 270, Text = DefaultMemoryIndexPath() });
         flow.Controls.Add(new Label { Text = "Code root directory:", AutoSize = true, Margin = new Padding(0, 6, 0, 2) });
@@ -1578,7 +1582,10 @@ public class MainWindow : Form
         if (persona is not null)
             curriculum = new ProbeAlongsideCurriculum(curriculum, persona); // graded each cycle → shows in the list, kept alive
         var ct = _gymCts.Token;
-        _ = RunLowPriorityTrainingAsync(async () => { await GymLoopAsync(curriculum, gymChildren, persona, ct); return 0; }, ct);
+        // Read the navigator toggle on the UI thread NOW (captured into the loop so the background thread never touches
+        // a WinForms control). Default ON so an overnight run trains the platonic walker.
+        var trainNavigator = GetControl<CheckBox>("CurTrainNavigator")?.Checked ?? true;
+        _ = RunLowPriorityTrainingAsync(async () => { await GymLoopAsync(curriculum, gymChildren, persona, trainNavigator, ct); return 0; }, ct);
     }
 
     private void StopGym()
@@ -1596,9 +1603,9 @@ public class MainWindow : Form
     /// UNBOUNDED difficulty level. Runs on a low-priority background thread; renders to the training panels.
     /// REPL queries share the runtime safely via its internal model-ops gate.
     /// </summary>
-    private async Task GymLoopAsync(ITrainingCurriculum curriculum, IReadOnlyList<GymTrainer> gymChildren, PersonalityCurriculum? persona, CancellationToken ct)
+    private async Task GymLoopAsync(ITrainingCurriculum curriculum, IReadOnlyList<GymTrainer> gymChildren, PersonalityCurriculum? persona, bool trainNavigator, CancellationToken ct)
     {
-        AppendOutput($"[train] started: {curriculum.Name} (model {_gymStateDir})");
+        AppendOutput($"[train] started: {curriculum.Name} (model {_gymStateDir}){(trainNavigator ? " | navigator: training each cycle" : "")}");
 
         // The unified MODULAR orchestrator drives the chosen curriculum (gym, memory+code, or a composite).
         var orchestrator = new GenesisModularTrainingOrchestrator();
@@ -1634,6 +1641,20 @@ public class MainWindow : Form
                 AppendOutput($"[train] personality LEVEL → {persona.Level} (new situation unlocked + seeded)");
             }
             UpdateGymStats(m);
+            // THE NAVIGATOR LEARNS THE LIVE SPACE — a LIGHT training step per gym cycle (serialized with model-train /
+            // REPL / save via the runtime's model gate; bounded; CUDA-OOM-safe). Accumulates overnight so the platonic
+            // walker keeps pace with the growing space. Logged alongside the gym warm-history.
+            if (trainNavigator)
+            {
+                try
+                {
+                    var nav = _runtime.TrainNavigatorCycle();
+                    _lastNavTrain = nav;
+                    if (nav.Queries > 0)
+                        AppendOutput($"[nav] cyc {m.Cycle} | loss {nav.Loss:F3} | queries {nav.Queries} | resolve {nav.ResolvePct:P0} abstain {nav.AbstainPct:P0} | running resolve {_runtime.NavResolveRunningPct:P0}");
+                }
+                catch (Exception ex) { AppendOutput($"[nav] skipped cyc {m.Cycle}: {ex.Message}"); }
+            }
             // Op-head class-balance window [abstain,add,sub,mul,div] — one dominant entry = the head COLLAPSING (the
             // erosion failure mode, now visible live). Shown as the four operator shares.
             var opStr = m.OpClassBalance is { Count: 5 } op ? $" | op +{op[1]} -{op[2]} x{op[3]} /{op[4]}" : "";

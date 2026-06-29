@@ -160,16 +160,17 @@ public sealed class NavQueryPolicyNet : Module
     /// <summary>Total trainable parameter count (diagnostic — proves the net stays a thin controller).</summary>
     public long ParameterCount() => parameters().Sum(p => p.numel());
 
-    /// <summary>EXPORT every named weight tensor for the checkpoint (as f64 — lossless from the net's f32). The
-    /// architecture dims ride along so a load can detect a re-architected navigator and decline rather than crash.</summary>
+    /// <summary>EXPORT every named weight tensor for the checkpoint as NATIVE f32 (the net's own dtype — lossless, and
+    /// HALF the bytes of the former f64 export, so autosave I/O is halved). The architecture dims ride along so a load
+    /// can detect a re-architected navigator and decline rather than crash.</summary>
     public NavigatorSnapshot ExportWeights()
     {
         using var _ = no_grad();
         var list = new List<NavParameterSnapshot>();
         foreach (var (name, p) in named_parameters())
         {
-            using var t = p.detach().to(float64).cpu().contiguous();
-            list.Add(new NavParameterSnapshot(name, p.shape.ToArray(), t.data<double>().ToArray()));
+            using var t = p.detach().to(float32).cpu().contiguous();
+            list.Add(new NavParameterSnapshot(name, p.shape.ToArray(), t.data<float>().ToArray()));
         }
         return new NavigatorSnapshot(Dim, Hidden, CueCount, SelfLength, list.ToArray());
     }

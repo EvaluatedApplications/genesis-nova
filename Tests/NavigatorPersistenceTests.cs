@@ -82,7 +82,7 @@ public sealed class NavigatorPersistenceTests
                 loaded.Config, loaded.Tokenizer, loaded.Model, loaded.PlatonicSpace, loaded.Conversation,
                 loaded.TrainerLearningStateJson, loaded.GrammarRoles, loaded.Navigator, loaded.NavigatorSelfField);
 
-            // ── ASSERT weights identical (bit-exact: f32 weights round-trip f32→f64→shard→f64→f32 losslessly). ──
+            // ── ASSERT weights identical (bit-exact: f32 weights round-trip f32→native-f32 shard→f32 losslessly). ──
             var navAfter = s2.Navigator.ExportWeights();
             Assert.Equal(navBefore.Dim, navAfter.Dim);
             Assert.Equal(navBefore.Hidden, navAfter.Hidden);

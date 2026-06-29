@@ -52,10 +52,10 @@ public static class GenesisShardedCheckpointStore
             PlanWeights = Strip(nn.PlanWeights),
             TrunkWeights = Strip(nn.TrunkWeights),
             // Navigator: keep the param NAMES + SHAPES (and arch dims) in meta, but EMPTY the values — the bytes go to
-            // the concatenated "navigator" f64 shard below (the big tensors, like the model's, don't bloat the meta JSON).
+            // the concatenated "navigator" f32 shard below (the big tensors, like the model's, don't bloat the meta JSON).
             Navigator = nn.Navigator is null
                 ? null
-                : nn.Navigator with { Parameters = nn.Navigator.Parameters.Select(p => p with { Values = Array.Empty<double>() }).ToArray() },
+                : nn.Navigator with { Parameters = nn.Navigator.Parameters.Select(p => p with { Values = Array.Empty<float>() }).ToArray() },
             PlatonicSpace = null,
         };
         AddJson(sections, shardsDir, "meta", meta);
@@ -73,14 +73,15 @@ public static class GenesisShardedCheckpointStore
         AddF64(sections, shardsDir, "trunkWeights", nn.TrunkWeights);
 
         // NAVIGATOR policy-net weights: concatenate every param tensor (row-major, in the meta's param order) into ONE
-        // f64 shard. Optional — pre-navigator checkpoints (Navigator null) write nothing here, so they stay loadable.
+        // native-f32 shard (half the bytes of the old f64 encoding, lossless for f32 params — halves autosave I/O).
+        // Optional — pre-navigator checkpoints (Navigator null) write nothing here, so they stay loadable.
         if (nn.Navigator is { Parameters.Length: > 0 } nav)
         {
             var total = nav.Parameters.Sum(p => (long)p.Values.Length);
-            var blob = new double[total];
+            var blob = new float[total];
             long off = 0;
             foreach (var p in nav.Parameters) { Array.Copy(p.Values, 0L, blob, off, p.Values.Length); off += p.Values.Length; }
-            AddF64Raw(sections, shardsDir, "navigator", blob);
+            AddF32Raw(sections, shardsDir, "navigator", blob);
         }
 
         WriteManifest(modelDir, shardsDir, nn.Version, sections, generation);
@@ -121,18 +122,18 @@ public static class GenesisShardedCheckpointStore
         if (manifest.Sections.ContainsKey("trunkWeights") && cp.TrunkWeights is not null)
             cp = cp with { TrunkWeights = cp.TrunkWeights with { Values = ReadF64(manifest, shardsDir, "trunkWeights") } };
 
-        // NAVIGATOR weights: split the one concatenated f64 shard back into the per-param tensors by their (meta) shapes.
-        // Absent for pre-navigator checkpoints (cp.Navigator null / no "navigator" section) → leave it null (fresh net).
+        // NAVIGATOR weights: split the one concatenated native-f32 shard back into the per-param tensors by their (meta)
+        // shapes. Absent for pre-navigator checkpoints (cp.Navigator null / no "navigator" section) → null (fresh net).
         if (cp.Navigator is { Parameters.Length: > 0 } nav && manifest.Sections.ContainsKey("navigator"))
         {
-            var blob = ReadF64(manifest, shardsDir, "navigator");
+            var blob = ReadF32(manifest, shardsDir, "navigator");
             var restored = new NavParameterSnapshot[nav.Parameters.Length];
             long off = 0;
             for (var i = 0; i < nav.Parameters.Length; i++)
             {
                 var p = nav.Parameters[i];
                 var len = p.Shape.Aggregate(1L, (a, b) => a * b);
-                var vals = new double[len];
+                var vals = new float[len];
                 if (off + len <= blob.LongLength) Array.Copy(blob, off, vals, 0L, len);
                 off += len;
                 restored[i] = p with { Values = vals };
@@ -256,6 +257,15 @@ public static class GenesisShardedCheckpointStore
         sections[name] = new Section("f64", bytes.LongLength, values.Length, 1, ChunkAndWrite(shardsDir, bytes));
     }
 
+    // A raw NATIVE-f32 vector section — used for the concatenated navigator weight blob (half the bytes of f64, lossless
+    // for the f32 policy-net params, so autosave I/O is halved).
+    private static void AddF32Raw(IDictionary<string, Section> sections, string shardsDir, string name, float[] values)
+    {
+        var bytes = new byte[(long)values.Length * sizeof(float)];
+        Buffer.BlockCopy(values, 0, bytes, 0, bytes.Length);
+        sections[name] = new Section("f32", bytes.LongLength, values.Length, 1, ChunkAndWrite(shardsDir, bytes));
+    }
+
     private static void AddJson<T>(IDictionary<string, Section> sections, string shardsDir, string name, T value)
     {
         var bytes = JsonSerializer.SerializeToUtf8Bytes(value, Json);
@@ -267,6 +277,27 @@ public static class GenesisShardedCheckpointStore
         if (!manifest.Sections.TryGetValue(name, out var s)) return Array.Empty<double>();
         var bytes = ReadAndConcat(shardsDir, s.Shards, s.Length);
         var values = new double[bytes.Length / sizeof(double)];
+        Buffer.BlockCopy(bytes, 0, values, 0, bytes.Length);
+        return values;
+    }
+
+    // Read a native-f32 raw vector section (the navigator weight blob). A pre-f32 checkpoint that stored this section as
+    // f64 is handled transparently: if the byte length is a multiple of 8 (and the f32 view would be even-padded) we fall
+    // back to decoding f64 then narrowing, so an OLD navigator shard still loads. New saves are always f32.
+    private static float[] ReadF32(ManifestDoc manifest, string shardsDir, string name)
+    {
+        if (!manifest.Sections.TryGetValue(name, out var s)) return Array.Empty<float>();
+        var bytes = ReadAndConcat(shardsDir, s.Shards, s.Length);
+        if (string.Equals(s.Kind, "f64", StringComparison.Ordinal))
+        {
+            // Legacy navigator shard written as f64 — decode wide then narrow to f32 (the params are f32 anyway).
+            var wide = new double[bytes.Length / sizeof(double)];
+            Buffer.BlockCopy(bytes, 0, wide, 0, bytes.Length);
+            var narrowed = new float[wide.Length];
+            for (var i = 0; i < wide.Length; i++) narrowed[i] = (float)wide[i];
+            return narrowed;
+        }
+        var values = new float[bytes.Length / sizeof(float)];
         Buffer.BlockCopy(bytes, 0, values, 0, bytes.Length);
         return values;
     }

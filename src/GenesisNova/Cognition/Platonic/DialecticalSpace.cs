@@ -103,9 +103,11 @@ public sealed class DialecticalSpace : IPlatonicSpace
         // Index the ACTIVE non-atom concepts by their FULL face; the lattice slices the semantic region
         // [WordFaceStart..dim) internally — the SAME offset FaceCodec.SemanticStart (and CloudOf) use, so the
         // VP-tree's neighbourhood and the relaxation's ranking live in one subspace.
+        // EXCLUDE atoms (the reusable base) AND Functions (reserved operation elements — a route, not a semantic
+        // target) from the retrieval index, so an op never surfaces as a nearest-concept answer.
         _lattice = new PlatonicLattice(
-            nodeNames: () => _concepts.All.Where(e => !e.Archived && e.Kind != ElementKind.Atom).Select(e => e.Symbol),
-            nodeFaces: () => _concepts.All.Where(e => !e.Archived && e.Kind != ElementKind.Atom)
+            nodeNames: () => _concepts.All.Where(IsRetrievable).Select(e => e.Symbol),
+            nodeFaces: () => _concepts.All.Where(IsRetrievable)
                                           .Select(e => (e.Symbol, FullFace(e.Symbol, e))));
     }
 
@@ -126,6 +128,18 @@ public sealed class DialecticalSpace : IPlatonicSpace
     }
 
     private static string Normalize(string v) => v.Trim().ToLowerInvariant();
+
+    // A retrievable concept: live, and neither an atom (reusable base) nor a Function (reserved operation element — a
+    // first-class, decodable route over the address space, never a semantic-retrieval target). One predicate so the
+    // lattice index and every concept scan agree on what an op is NOT.
+    private static bool IsRetrievable(Element e) => !e.Archived && e.Kind != ElementKind.Atom && e.Kind != ElementKind.Function;
+
+    // RESERVED symbol form for a Function/op element — the "∘fn:" namespace. Distinct from the intent/op anchors
+    // (∘add/∘qst…) and Merge label anchors (∘<label>) so an op token (even "add") never collides with one via
+    // GetOrCreate idempotency; still ∘-prefixed, so every existing reserved-symbol filter (IsReservedConcept,
+    // discharge, Decompose) already covers it and keeps it out of retrieval.
+    private const string OpSymbolPrefix = "∘fn:";
+    private static string OpSymbol(string opToken) => OpSymbolPrefix + opToken;
     private static string Key(string a, string b) => string.CompareOrdinal(a, b) <= 0 ? a + "" + b : b + "" + a;
     private static double Clamp01(double x) => x < 0.0 ? 0.0 : x > 1.0 ? 1.0 : x;
 
@@ -141,8 +155,26 @@ public sealed class DialecticalSpace : IPlatonicSpace
     public int FaceDimension => _dim;
     public int NumericDimensions => Math.Min(_dim / 2, 21);
     public bool ContainsConcept(string concept)
-        => _concepts.TryGet(Normalize(concept), out var e) && !e.Archived && e.Kind != ElementKind.Atom;
-    public void RegisterOperationToken(string token) { if (!string.IsNullOrWhiteSpace(token)) _operationTokens.Add(Normalize(token)); }
+        => _concepts.TryGet(Normalize(concept), out var e) && IsRetrievable(e);
+    // G5 — "a Function is itself an element": registering an op both records the cue token AND realises a live, first-
+    // class Function element so the operation has a decodable coordinate (kind=Function + op band) like every other band.
+    public void RegisterOperationToken(string token)
+    {
+        if (string.IsNullOrWhiteSpace(token)) return;
+        var op = Normalize(token);
+        _operationTokens.Add(op);
+        GetOrCreateFunction(op);
+    }
+
+    /// <summary>
+    /// (G5) Realise an OPERATION as a live, first-class <see cref="ElementKind.Function"/> element under its RESERVED
+    /// <see cref="OpSymbolPrefix"/> symbol — born with a token orbital like any element, its op-code written into the
+    /// frozen op band [400,416) by <see cref="WriteOpBand"/> at face-assembly time. Idempotent (same op ⇒ same element).
+    /// NOT registered in the lattice and NOT counted as a concept (it is a route, not a retrieval target); reserved
+    /// (∘-prefixed) so it never enters concept retrieval / NodeCount / discharge.
+    /// </summary>
+    private Element GetOrCreateFunction(string opToken)
+        => _concepts.GetOrCreate(OpSymbol(opToken), ElementKind.Function, () => FaceCodec.Token(OpSymbol(opToken), _dim));
     public bool IsOperationToken(string concept) => _operationTokens.Count > 0 && _operationTokens.Contains(Normalize(concept));
 
     // ─────────────────────────────────────────────────────────────────────────────── Faces (synthesize / π)
@@ -299,7 +331,27 @@ public sealed class DialecticalSpace : IPlatonicSpace
         // here so the composite decodes from its frozen face (TryDecodeStructure), not just its symbol/lossy orbital.
         // The band lies OUTSIDE FaceAwareDistance's [_semStart,dim) tail, so semantic retrieval is unaffected.
         if (element is not null) WriteStructureBand(face, element);
+        // ADDRESS SPACE (op band): a FUNCTION element (a realised operation) carries its op-code in the FROZEN op band
+        // [400,416) + the kind band = Function, so the operation decodes from its coordinate (TryDecodeCoordinate). The
+        // op band lies BELOW the orbital tail, so the learned orbital never clobbers it (mirrors WriteStructureBand).
+        if (element is not null) WriteOpBand(face, element);
         return face;
+    }
+
+    /// <summary>
+    /// (Op band) Write a FUNCTION element's op-code into the FROZEN op band [400,416) via
+    /// <see cref="PlatonicFaceComposer.EncodeOp"/>, and stamp the kind band = Function (overriding the symbol's
+    /// best-effort Object code), so an operation's coordinate decodes to (kind=Function, op=token) — the 7th frozen
+    /// band. The op token = the element's reserved symbol minus the <see cref="OpSymbolPrefix"/>. No-op for a
+    /// non-Function element or below address-space dims (legacy faces have no op band).
+    /// </summary>
+    private void WriteOpBand(double[] face, Element e)
+    {
+        if (!Core.FaceLayout.IsAddressSpace(_dim) || e.Kind != ElementKind.Function
+            || !e.Symbol.StartsWith(OpSymbolPrefix, StringComparison.Ordinal)) return;
+        var op = e.Symbol.Substring(OpSymbolPrefix.Length);
+        PlatonicFaceComposer.EncodeKind(face, PlatonicKind.Function, _dim);
+        PlatonicFaceComposer.EncodeOp(face, op, _dim);
     }
 
     /// <summary>
@@ -422,6 +474,16 @@ public sealed class DialecticalSpace : IPlatonicSpace
     // address to score an arbitrary/decoded coordinate against (TryDecodeCoordinate confidence).
     private double[] FrozenAddressOf(string symbol) => FaceCodec.AssemblePositiveFace(symbol, new double[_semLen], _dim);
 
+    // The pure-codec FROZEN face of a FUNCTION/op coordinate: the reserved symbol's address with the kind band stamped
+    // Function and the op band [400,416) written — the address a DECODED op coordinate is scored against (confidence).
+    private double[] FrozenFunctionAddressOf(string opToken)
+    {
+        var face = FrozenAddressOf(OpSymbol(opToken));
+        PlatonicFaceComposer.EncodeKind(face, PlatonicKind.Function, _dim);
+        PlatonicFaceComposer.EncodeOp(face, opToken, _dim);
+        return face;
+    }
+
     private static double RangeDistance(IReadOnlyList<double> a, IReadOnlyList<double> b, int start, int end)
     {
         var n = Math.Min(Math.Min(a.Count, b.Count), end);
@@ -522,6 +584,19 @@ public sealed class DialecticalSpace : IPlatonicSpace
             {
                 symbol = val.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture);
                 confidence = q;
+                return true;
+            }
+        }
+        // (1b) FUNCTION / OP — decode WHICH operation off the frozen op band [400,416), nearest registered op-code.
+        // Works for a LATENT op coordinate (built from the codec, never stored) — the same "decode the void" property
+        // the number band has: the operation is a route over the address space, decodable from its coordinate alone.
+        if (kind == PlatonicKind.Function)
+        {
+            var op = PlatonicFaceDecoder.DecodeOp(face, _dim, _operationTokens);
+            if (!string.IsNullOrEmpty(op))
+            {
+                symbol = op;
+                confidence = 1.0 / (1.0 + FrozenIdentityDistance(face, FrozenFunctionAddressOf(op)));
                 return true;
             }
         }
@@ -1670,8 +1745,12 @@ public sealed class DialecticalSpace : IPlatonicSpace
         // archived concepts in the live store, but serializing the evicted long tail would re-bloat the checkpoint
         // unboundedly under corpus scale (the storage half of the blow-up) and defeat the eviction. An evicted concept
         // that recurs after a reload is simply re-created from observation — exactly as it was first learned.
+        // Function elements (reserved operations) are OMITTED — they are codec-derived from their op token (no learned
+        // orbital that matters) and recreated on import via RegisterOperationToken from the persisted OperationTokens
+        // list, exactly like numeric elements are recreated on demand. Persisting them would also collide with that
+        // recreate (a Function symbol round-tripped through GetOrCreateConcept would come back the wrong kind).
         var elements = _concepts.All
-            .Where(e => !e.Archived && !FaceCodec.IsNumeric(e.Symbol))
+            .Where(e => !e.Archived && !FaceCodec.IsNumeric(e.Symbol) && e.Kind != ElementKind.Function)
             .Select(e => new DialecticalElementSnapshot(e.Symbol, (int)e.Kind, (double[])e.SemanticFace.Clone(), e.ObservationCount, e.Archived))
             .ToArray();
         var rels = _relations.Values.Select(r => new PlatonicRelationSnapshot(

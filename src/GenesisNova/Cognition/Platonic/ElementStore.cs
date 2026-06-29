@@ -20,8 +20,15 @@ public sealed class ElementStore
     private readonly Dictionary<int, Element> _byId = new();
     private int _nextId;
     private int _activeCount;    // tracked incrementally so ActiveCount is O(1) — it gates per-query hot paths
-    private int _activeConcepts; // active elements that are NOT atoms (= NodeCount). O(1), and safe to read concurrently
+    private int _activeConcepts; // active USER concepts (= NodeCount). EXCLUDES the bounded structural base (atoms) AND
+                                 // reserved Functions (operations — a route over the address space, not a retrievable
+                                 // concept), so registering an op never moves NodeCount. O(1), safe to read concurrently
                                  // from /status without enumerating the live store (which races with training).
+
+    // A user CONCEPT for NodeCount purposes: not an atom (the reusable sub-lexical base) and not a Function (a reserved
+    // operation element — first-class + decodable, but a route, never a semantic-retrieval target). Kept in one place so
+    // every count mutation (create / reactivate / archive / remove) stays consistent.
+    private static bool CountsAsConcept(ElementKind kind) => kind != ElementKind.Atom && kind != ElementKind.Function;
 
     /// <summary>Live (non-archived) element count. O(1) (maintained on create/reactivate/archive).</summary>
     public int ActiveCount => _activeCount;
@@ -54,7 +61,7 @@ public sealed class ElementStore
     {
         if (_bySymbol.TryGetValue(symbol, out var existing))
         {
-            if (existing.Archived) { existing.Archived = false; _activeCount++; if (existing.Kind != ElementKind.Atom) _activeConcepts++; } // reactivate (G6)
+            if (existing.Archived) { existing.Archived = false; _activeCount++; if (CountsAsConcept(existing.Kind)) _activeConcepts++; } // reactivate (G6)
             return existing;
         }
 
@@ -62,7 +69,7 @@ public sealed class ElementStore
         _bySymbol[symbol] = element;
         _byId[element.Id] = element;
         _activeCount++;
-        if (kind != ElementKind.Atom) _activeConcepts++;
+        if (CountsAsConcept(kind)) _activeConcepts++;
         return element;
     }
 
@@ -73,7 +80,7 @@ public sealed class ElementStore
         {
             e.Archived = true;
             _activeCount--;
-            if (e.Kind != ElementKind.Atom) _activeConcepts--;
+            if (CountsAsConcept(e.Kind)) _activeConcepts--;
         }
     }
 
@@ -90,6 +97,6 @@ public sealed class ElementStore
         if (!_bySymbol.TryGetValue(symbol, out var e)) return;
         _bySymbol.Remove(symbol);
         _byId.Remove(e.Id);
-        if (!e.Archived) { _activeCount--; if (e.Kind != ElementKind.Atom) _activeConcepts--; } // callers only purge archived; stay honest
+        if (!e.Archived) { _activeCount--; if (CountsAsConcept(e.Kind)) _activeConcepts--; } // callers only purge archived; stay honest
     }
 }

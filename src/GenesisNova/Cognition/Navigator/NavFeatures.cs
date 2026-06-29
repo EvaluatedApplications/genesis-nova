@@ -39,6 +39,16 @@ public static class NavFeatures
     /// <summary>Per-candidate feature width as a multiple of dim: [candFace−goal, candFace−cur, candFace].</summary>
     public const int DiffBlocks = 3;
 
+    /// <summary>
+    /// EXPERIMENT HOOK (NavigatorGeometryExperiment, "navigate by MEANING not spelling"). When &gt; 0, every
+    /// per-candidate differential block is ZEROED below this index, so the policy SCORES candidates ONLY on the
+    /// region [MeaningFloorStart, dim) — e.g. <see cref="GenesisNova.Core.FaceLayout.OrbitalStart"/> (416), the learned
+    /// meaning cloud, excluding the frozen random spelling/identity address [0,416) that is noise for navigation. The
+    /// emitted candidate FACE (NavObservation.CandidateFaces) is left at FULL dim, so TryLand still lands on the full
+    /// decodable coordinate. Default 0 = full-face features (bit-identical legacy behaviour; production never sets it).
+    /// </summary>
+    public static int MeaningFloorStart;
+
     /// <summary>Per-candidate feature length given the face dimension: 3·dim (three differential blocks) + 1 (κ).</summary>
     public static int FeatureLength(int dim) => DiffBlocks * dim + 1;
 
@@ -72,8 +82,10 @@ public static class NavFeatures
             if (!space.TryGetConceptFace(nb.Concept, out var candFace) || candFace.Length != dim) continue;
 
             var baseIdx = valid * f;
+            var floor = MeaningFloorStart; // experiment: 0 = full face; OrbitalStart = score on the meaning cloud only
             for (var d = 0; d < dim; d++)
             {
+                if (floor > 0 && d < floor) continue; // leave frozen spelling/identity dims at zero (excluded from scoring)
                 var cf = (float)candFace[d];
                 featuresFlat[baseIdx + d] = cf - (float)goalFace[d];        // contrast to the GOAL  (closing the gap?)
                 featuresFlat[baseIdx + dim + d] = cf - (float)curFace[d];   // contrast to HERE      (the step taken)

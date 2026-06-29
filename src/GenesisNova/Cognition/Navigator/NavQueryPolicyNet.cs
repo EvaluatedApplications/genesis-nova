@@ -1,0 +1,249 @@
+using System;
+using System.Linq;
+using GenesisNova.Cognition.Platonic;
+using TorchSharp;
+using static TorchSharp.torch;
+using static TorchSharp.torch.nn;
+using Modules = TorchSharp.Modules;
+
+namespace GenesisNova.Cognition.Navigator;
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+//  THE QUERY-CONDITIONED NAVIGATOR POLICY  (PLATONIC_NAVIGATOR.md §2/§3/§6; PLATONIC_MIND.md §3 "an answer is wherever
+//  a query relaxes to").
+//
+//  Same recurrent differential recogniser as NavigatorPolicyNet, but goal-conditioning is REPLACED by a query-context
+//  the walker has WITHOUT the answer:  (anchorFace, cue).
+//    • the self h₀ is SEEDED from  tanh(W·anchorFace + cueEmbedding[cue])  — the walk starts as the self, oriented by
+//      the question (the anchor it is asked about) and the target-aspect tension (the cue), not by the answer;
+//    • each hop the cue embedding is MIXED into the GRU input (it persists as the question-tension), alongside the
+//      masked candidate summary and the (cur − anchor) displacement context;
+//    • the HALT and VALUE heads read concat[self, cue], so "am I resolved?" is learned PER CUE — the same node halts
+//      for GENUS but steps onward for DOMAIN/ROOT.
+//
+//  Candidate features are the answer-free differential rows from NavQueryFeatures ([cand−anchor, cand−cur, cand, κ]).
+//  The net still never emits an answer from weights: it SCORES substrate-enumerated candidates and the chosen
+//  candidate's FACE is the target the lattice lands (§5.1).
+// ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// <summary>
+/// The query-conditioned recurrent policy/value network (PLATONIC_NAVIGATOR.md §6). Two steps like its goal-conditioned
+/// sibling: <see cref="SeedHidden"/> (h₀ from anchor ⊕ cue) and <see cref="Step"/> (one hop: candidate features +
+/// (cur−anchor) context + cue + h ⇒ candidate logits, halt logit, value, next h). A hand-rolled GRU carries the self.
+/// </summary>
+public sealed class NavQueryPolicyNet : Module
+{
+    private readonly Modules.Linear _candEnc;    // per-candidate differential feature → embedding
+    private readonly Modules.Linear _ctxEnc;     // (cur − anchor) displacement context → embedding
+    private readonly Modules.Linear _h0Enc;      // anchor face → seed hidden h₀
+    private readonly Modules.Embedding _cueEmb;  // learned cue embedding over {GENUS, DOMAIN, ROOT}
+    private readonly Modules.Linear _gx;          // GRU input transform: [summ, ctx, cue] = 3H → 3·Hidden (r,z,n gates)
+    private readonly Modules.Linear _gh;          // GRU hidden transform → 3·Hidden
+    private readonly Modules.Linear _score1;     // score MLP layer 1 over concat[h, candEmb]
+    private readonly Modules.Linear _score2;     // score MLP layer 2 → one logit per candidate
+    private readonly Modules.Linear _haltHead;   // halt logit from concat[h, cue]  (resolved FOR THIS CUE)
+    private readonly Modules.Linear _valueHead;  // value (cost-to-go) from concat[h, cue]
+
+    /// <summary>Face/coordinate dimension (e.g. 1024 — the decodable address space).</summary>
+    public int Dim { get; }
+
+    /// <summary>Per-candidate differential feature width (3·dim + 1).</summary>
+    public int FeatureLength { get; }
+
+    /// <summary>Hidden trunk / self width (kept thin — a controller, not a store).</summary>
+    public int Hidden { get; }
+
+    /// <summary>Number of target-aspect cues the embedding table covers ({GENUS, DOMAIN, ROOT} = 3).</summary>
+    public int CueCount { get; }
+
+    public NavQueryPolicyNet(int dim, int cueCount = NavQueryFeatures.CueCount, int hidden = 2048, Device? device = null)
+        : base(nameof(NavQueryPolicyNet))
+    {
+        if (dim <= 0) throw new ArgumentOutOfRangeException(nameof(dim));
+        if (cueCount <= 0) throw new ArgumentOutOfRangeException(nameof(cueCount));
+        if (hidden <= 0) throw new ArgumentOutOfRangeException(nameof(hidden));
+        Dim = dim;
+        Hidden = hidden;
+        CueCount = cueCount;
+        FeatureLength = NavQueryFeatures.FeatureLength(dim);
+
+        _candEnc = Linear(FeatureLength, hidden);
+        _ctxEnc = Linear(dim, hidden);
+        _h0Enc = Linear(dim, hidden);
+        _cueEmb = Embedding(cueCount, hidden);
+        _gx = Linear(3 * hidden, 3 * hidden); // GRU input = concat[obsSummary(H), ctxEmb(H), cue(H)] = 3H
+        _gh = Linear(hidden, 3 * hidden);
+        _score1 = Linear(2 * hidden, hidden);
+        _score2 = Linear(hidden, 1);
+        _haltHead = Linear(2 * hidden, 1);  // (self ⊕ cue)
+        _valueHead = Linear(2 * hidden, 1); // (self ⊕ cue)
+
+        RegisterComponents();
+        if (device is not null) _ = this.to(device);
+    }
+
+    /// <summary>The learned cue vector for a [B] long index tensor → [B, Hidden].</summary>
+    public Tensor CueVector(Tensor cueIdx) => _cueEmb.forward(cueIdx);
+
+    /// <summary>Seed the self h₀ from the query-context (PLATONIC_NAVIGATOR.md §3): anchor face ⊕ cue embedding.
+    /// <paramref name="anchor"/> = [B, dim]; <paramref name="cueIdx"/> = [B] long; returns h₀ [B, Hidden].</summary>
+    public Tensor SeedHidden(Tensor anchor, Tensor cueIdx) => tanh(_h0Enc.forward(anchor) + CueVector(cueIdx));
+
+    /// <summary>
+    /// One hop of the recurrent query policy. <paramref name="features"/> = [B, K, F] answer-free differential rows;
+    /// <paramref name="mask"/> = [B, K]; <paramref name="context"/> = [B, dim] the (cur−anchor) displacement;
+    /// <paramref name="cueIdx"/> = [B] long; <paramref name="h"/> = [B, Hidden]. Returns candidate logits [B, K]
+    /// (padding −∞), halt logit [B, 1], value [B, 1], next self [B, Hidden].
+    /// </summary>
+    public (Tensor candLogits, Tensor haltLogit, Tensor value, Tensor hNext) Step(
+        Tensor features, Tensor mask, Tensor context, Tensor cueIdx, Tensor h)
+    {
+        var candEmb = functional.relu(_candEnc.forward(features));      // [B, K, H]
+
+        var m = mask.unsqueeze(-1);                                    // [B, K, 1]
+        var summ = (candEmb * m).sum(new long[] { 1 }) / m.sum(new long[] { 1 }).clamp_min(1e-6); // [B, H]
+        var ctx = functional.relu(_ctxEnc.forward(context));           // [B, H]
+        var cue = CueVector(cueIdx);                                    // [B, H] — the persistent question-tension
+
+        // GRU cell: thread the self with the new observation AND the cue.
+        var hNext = GruCell(cat(new[] { summ, ctx, cue }, dim: 1), h);  // input 3H → [B, H]
+
+        // Score each candidate from the updated self ⊕ its embedding.
+        var k = features.shape[1];
+        var hExp = hNext.unsqueeze(1).expand(new long[] { hNext.shape[0], k, Hidden }); // [B, K, H]
+        var scoreIn = cat(new[] { hExp, candEmb }, dim: 2);            // [B, K, 2H]
+        var logits = _score2.forward(functional.relu(_score1.forward(scoreIn))).squeeze(-1); // [B, K]
+        logits = logits + (mask - 1f) * 1e9f;                          // mask padded candidates to −∞
+
+        // HALT / VALUE conditioned on (self, cue) — "resolved for THIS cue".
+        var headIn = cat(new[] { hNext, cue }, dim: 1);                // [B, 2H]
+        var halt = _haltHead.forward(headIn);                          // [B, 1]
+        var value = _valueHead.forward(headIn);                        // [B, 1]
+        return (logits, halt, value, hNext);
+    }
+
+    // Hand-rolled GRU cell (version-independent). x = [B, 3H], h = [B, H].
+    private Tensor GruCell(Tensor x, Tensor h)
+    {
+        var gi = _gx.forward(x);  // [B, 3H]
+        var gh = _gh.forward(h);  // [B, 3H]
+        var ix = gi.chunk(3, dim: 1);
+        var ih = gh.chunk(3, dim: 1);
+        var r = sigmoid(ix[0] + ih[0]);
+        var z = sigmoid(ix[1] + ih[1]);
+        var n = tanh(ix[2] + r * ih[2]);
+        return (1f - z) * n + z * h;
+    }
+
+    /// <summary>Total trainable parameter count (diagnostic — proves the net stays a thin controller).</summary>
+    public long ParameterCount() => parameters().Sum(p => p.numel());
+}
+
+/// <summary>
+/// THE QUERY-CONDITIONED POLICY as an <see cref="INavPolicy"/> (PLATONIC_NAVIGATOR.md §6) — drops into
+/// <see cref="NavigatorWalk"/> unchanged. UNLIKE <see cref="NavNetPolicy"/> it is NOT given the goal: the anchor face
+/// and the cue are fixed in the ctor (the query), and <see cref="Decide"/> reads ONLY <c>state.CurrentSymbol/Face</c>
+/// plus that stored query-context. Run the walk with <c>goalSymbol=null</c> so the loop relies on this policy's learned
+/// HALT (not goal-reached): when the halt head fires the agent stands on the answer the query relaxed to. <see
+/// cref="LastHalt"/> records whether the most recent decision was a halt — the caller uses it to tell a confident halt
+/// from a budget-exhausted abstain (§8).
+/// </summary>
+public sealed class QueryNavPolicy : INavPolicy, IDisposable
+{
+    private readonly NavQueryPolicyNet _net;
+    private readonly DialecticalSpace _space;
+    private readonly Device _device;
+    private readonly double[] _anchorFace;
+    private readonly int _cue;
+    private readonly int _k;
+    private readonly double _minConfidence;
+    private readonly double _haltThreshold;
+    private Tensor? _h; // the threaded self (persists across Decide calls within a walk)
+
+    /// <summary>True iff the most recent <see cref="Decide"/> returned a HALT (confident halt OR a structural dead-end).
+    /// False after a step move — so budget exhaustion (the loop exits after a non-halt move) leaves this false.</summary>
+    public bool LastHalt { get; private set; }
+
+    public QueryNavPolicy(NavQueryPolicyNet net, DialecticalSpace space, double[] anchorFace, int cue,
+        Device? device = null, int k = 16, double minConfidence = 0.0, double haltThreshold = 0.5)
+    {
+        _net = net ?? throw new ArgumentNullException(nameof(net));
+        _space = space ?? throw new ArgumentNullException(nameof(space));
+        _anchorFace = anchorFace ?? throw new ArgumentNullException(nameof(anchorFace));
+        _cue = cue;
+        _device = device ?? CPU;
+        _k = k;
+        _minConfidence = minConfidence;
+        _haltThreshold = haltThreshold;
+    }
+
+    public NavDecision Decide(NavState state)
+    {
+        var dim = _net.Dim;
+        if (state.CurrentFace is null || state.CurrentFace.Length < dim)
+        { LastHalt = true; return new NavDecision(Array.Empty<double>(), Halt: true); } // can't sense → abstain
+
+        _net.eval();
+        using var _ = no_grad();
+        using var scope = NewDisposeScope();
+
+        using var cueT = tensor(new long[] { _cue }, new long[] { 1 }, device: _device);
+
+        // (Re)seed the self at the start of a walk from the QUERY-CONTEXT (anchor ⊕ cue); otherwise carry it.
+        if (state.Step == 0 || _h is null)
+        {
+            using var anchorSeed = ToTensor(_anchorFace, dim);
+            ReplaceHidden(_net.SeedHidden(anchorSeed, cueT));
+        }
+
+        // Answer-free egocentric observation: candidate rows are differentials against the ANCHOR, not the goal.
+        var obs = NavQueryFeatures.Build(_space, state.CurrentSymbol, state.CurrentFace, _anchorFace, _k, _minConfidence);
+        if (obs.ValidCount == 0)
+        { LastHalt = true; return new NavDecision(Array.Empty<double>(), Halt: true); } // dead end → structural abstain (§8)
+
+        var f = _net.FeatureLength;
+        using var features = tensor(obs.FeaturesFlat, new long[] { 1, _k, f }, device: _device);
+        using var mask = tensor(obs.Mask, new long[] { 1, _k }, device: _device);
+
+        var ctxArr = new float[dim];
+        for (var i = 0; i < dim; i++) ctxArr[i] = (float)(state.CurrentFace[i] - _anchorFace[i]); // displacement from start
+        using var context = tensor(ctxArr, new long[] { 1, dim }, device: _device);
+
+        var (logits, haltLogit, _, hNext) = _net.Step(features, mask, context, cueT, _h!);
+        ReplaceHidden(hNext); // thread the self forward
+
+        var haltProb = sigmoid(haltLogit).cpu().item<float>();
+        if (haltProb > _haltThreshold)
+        { LastHalt = true; return new NavDecision(Array.Empty<double>(), Halt: true); }
+
+        var best = (int)argmax(logits, dim: 1).cpu().item<long>();
+        if (best < 0 || best >= obs.ValidCount)
+        { LastHalt = true; return new NavDecision(Array.Empty<double>(), Halt: true); }
+
+        // Emit the chosen candidate's FACE; the lattice lands exactly on it (decode-first, §5.1).
+        LastHalt = false;
+        return new NavDecision((double[])obs.CandidateFaces[best].Clone(), Halt: false);
+    }
+
+    private Tensor ToTensor(double[] face, int dim)
+    {
+        var arr = new float[dim];
+        for (var i = 0; i < dim; i++) arr[i] = (float)face[i];
+        return tensor(arr, new long[] { 1, dim }, device: _device);
+    }
+
+    // Persist the new hidden state across Decide calls: detach + survive the per-call dispose scope, free the old one.
+    private void ReplaceHidden(Tensor next)
+    {
+        var keep = next.detach().clone();
+        keep.MoveToOuterDisposeScope();
+        _h?.Dispose();
+        _h = keep;
+    }
+
+    public void Dispose()
+    {
+        _h?.Dispose();
+        _h = null;
+    }
+}

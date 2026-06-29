@@ -114,18 +114,40 @@ path. The chaos is attenuated because order is imposed by navigation, not awaite
 The route ladder's fixed sequence (op → composer → function → relaxation → retrieval → chain → neural) collapses into
 a **menu of actions** a single policy chooses among, per step:
 
-| action | what it does | substrate primitive |
+| action | what it does | how it produces a target |
 |---|---|---|
-| **STEP-near** | move to one of the k egocentric neighbours | `Neighborhood` |
-| **FOLLOW-edge** | step along a named relation/▷ from `p_t` (fact recall = one hop) | adjacency / relations |
-| **COMPUTE-jump** | apply an operation (e.g. `+`, `category-of`) → a *computed target coordinate*, step there (arithmetic = route into the void to `141`) | homomorphism / learned functions |
-| **TOWARD-landmark** | move toward a centroid/region bearing | centroids |
-| **HALT/EMIT** | decode `p_t` as the answer and stop | `TryDecodeCoordinate` |
+| **STEP-near** | move to one of the k egocentric neighbours | the lattice neighbours themselves |
+| **FOLLOW-edge** | step along a named relation/▷ from `p_t` (fact recall = one hop) | the edge's endpoint coordinate |
+| **COMPUTE-jump** | apply an operation (e.g. `+`, `category-of`) → a *computed target coordinate* (arithmetic = a target in the void at `141`) | homomorphism / learned functions |
+| **TOWARD-landmark** | move toward a centroid/region | the centroid coordinate |
 
 Retrieval is "follow an edge." Arithmetic is "compute-jump to the result coordinate." Composition is "step into a
-structure coordinate." There is no privileged ladder — the policy learns *when* each move applies. (Recommendation:
-include COMPUTE-jump and FOLLOW-edge as first-class actions; a pure spatial walk cannot do arithmetic or one-hop
-recall — see §10.)
+structure coordinate." There is no privileged ladder — the policy learns *when* each move applies.
+
+### 5.1 One motion primitive: every action rides the lattice (DECIDED)
+
+The action types above do **not** each get their own traversal machinery. They all reduce to **one** move:
+**emit/compute a target coordinate, then let the lattice land the step** — the nearest decodable coordinate to that
+target, in O(log N). STEP-near reads lattice neighbours directly; FOLLOW-edge, COMPUTE-jump, and TOWARD-landmark each
+*produce a target coordinate* and the **lattice resolves where the foot actually falls**. This is the
+"rides-on-the-lattice-for-speed" rule: no per-action O(N) scan, no parallel index — the VP-tree (`PlatonicLattice`)
+is the single, fast motion primitive for the whole walk.
+
+It also settles the step-granularity question: the policy emits a **continuous** target (a direction/coordinate) and
+the **lattice snaps** it to the nearest decodable coordinate — continuous intent, discrete, decodable landing. The
+one requirement this puts on the substrate (§9): the lattice must index/query the **frozen address bands** (stable
+identity), not the drifting orbital tail, so a "land near coordinate X" query is exact and drift-free.
+
+### 5.2 The walk grows the space: navigation as genesis tick (DECIDED)
+
+Navigation is **not** read-only. When the walker passes through a **latent** coordinate that proves *useful* — it lies
+on a successful path / has high goal-alignment / the walk halts confidently there — that coordinate is
+**materialised**: committed to the store with an orbital, so the trail the walk blazed becomes durable structure.
+Thinking *creates* structure (the genesis create→select→store tick, `[[nova-nn-directed-generative-tick]]`). The
+existing **relevance-decay eviction** keeps this bounded — useful materialised coordinates are reinforced and kept,
+trails that never pay off decay back to latent. The store therefore converges on *exactly the useful* structure:
+navigation writes, eviction prunes. (A write-policy — *when* a passed-through coordinate earns materialisation — is a
+build detail in §11; default: materialise on a confident successful halt-path, let decay handle the rest.)
 
 ---
 
@@ -181,31 +203,37 @@ The space is enormous; a from-scratch random walk never hits the answer. Cold-st
 - `_selfField` — the self to initialise `h_t` from.
 
 **Still needed for the navigator (later build):**
-- a **centroid/landmark accessor** (TOWARD-landmark bearings) — degree is a proxy today; a real centroid index is
+- the **lattice over the FROZEN ADDRESS** — the single motion primitive (§5.1). The VP-tree must index/query the
+  stable frozen bands `[42,416)`, not the drifting orbital tail, and expose a "nearest decodable coordinate to target
+  `X`" query. (This also fixes the L2-flagged stale slice: the lattice still keys on `WordFaceStart=202` while
+  semantics moved to `416`.)
+- a **land(targetCoord) → coordinate** step: the lattice resolves any emitted/computed target to its nearest
+  decodable landing — the move every action reduces to.
+- a **centroid/landmark accessor** (TOWARD-landmark targets) — degree is a proxy today; a real centroid index is
   cleaner.
-- **COMPUTE-jump / FOLLOW-edge** exposed as steppable actions returning a target coordinate (arithmetic +
-  learned-function + relation traversal), so the homomorphism and recall are first-class moves.
+- **COMPUTE-jump / FOLLOW-edge** as *target producers* (arithmetic + learned-function + relation traversal emit a
+  target coordinate; the lattice lands it), so the homomorphism and recall are first-class moves.
+- a **materialise(coord) write-path** for the genesis-tick growth (§5.2) — commit a useful passed-through latent
+  coordinate to the store; reuse the existing relevance-decay eviction to bound it.
 - a **trajectory-recording teacher** wrapper around the current routes (Phase 0 data).
 - the **policy/value network + the walk loop** (the navigator proper), replacing `GenerateFromField`'s route ladder.
 
 ---
 
-## 10. Open decisions (yours to settle)
+## 10. Decisions (settled)
 
-1. **Action granularity.** Pure neighbour-stepping, or also COMPUTE-jump + FOLLOW-edge + TOWARD-landmark?
-   *(Recommend: include them — else no arithmetic / no one-hop recall.)*
-2. **Discrete vs continuous step.** Choose among discrete `Neighborhood` candidates (simple, stable), or emit a
-   continuous direction vector and snap to the nearest decodable coordinate (expressive, needs snapping)?
-   *(Recommend: discrete first, continuous later.)*
-3. **Reward.** Sparse hit + dense frozen-address-distance shaping — confirm, or sparse-only?
-   *(Recommend: shaped — the space is too big for sparse.)*
-4. **Self.** Reuse/extend `_selfField` as `h_t`, or a fresh recurrent state seeded from it? *(Recommend: reuse +
-   extend.)*
-5. **Materialisation on the walk.** Does passing through a latent coordinate ever *realise* it (leave a trail, grow
-   the space — the genesis tick, `[[nova-nn-directed-generative-tick]]`), or is navigation read-only? *(Open — this is
-   how the space could grow from thinking.)*
-6. **How much old routing to keep.** Keep all routes as the teacher through Phase 1, then retire — or keep some as
-   permanent fallbacks?
+1. **Action granularity — DECIDED.** Hybrid menu (STEP / FOLLOW-edge / COMPUTE-jump / TOWARD-landmark / HALT),
+   **unified through the lattice**: every action emits a target coordinate, the lattice lands the step (§5.1). All
+   moves "ride the lattice for speed."
+2. **Step granularity — DECIDED (follows from 1).** Policy emits a **continuous** target; the **lattice snaps** it to
+   the nearest decodable coordinate. Continuous intent, discrete decodable landing.
+3. **Reward — default taken.** Sparse hit + dense frozen-address-distance shaping. *(Override if you want sparse-only.)*
+4. **Self — default taken.** Reuse + extend `_selfField` as `h_t`. *(Override if you want a fresh recurrent state.)*
+5. **Materialisation on the walk — DECIDED.** The walk **grows the space** (§5.2): useful passed-through latent
+   coordinates are materialised (genesis tick, `[[nova-nn-directed-generative-tick]]`); relevance-decay eviction
+   bounds it. Navigation is **not** read-only.
+6. **How much old routing to keep — default taken.** Keep all routes as the teacher through Phase 1, then retire.
+   *(Override if you want permanent fallbacks.)*
 
 ---
 

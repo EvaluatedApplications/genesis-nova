@@ -202,14 +202,16 @@ public class MainWindow : Form
         // Merge parse / fact memory / retrieval all read (see [[nova-merge-substrate-plan]]). Tick more as each is ready.
         flow.Controls.Add(new Label { Text = "Curricula — run top → bottom (only the prebake is checked; train it first):", AutoSize = true, Margin = new Padding(0, 18, 0, 4), Font = new Font("Segoe UI", 10, FontStyle.Bold) });
 
-        // Uniform peer checkbox — same indent for every task; only the run-first prerequisite starts checked.
-        static CheckBox Cur(string name, string text, bool runFirst = false) =>
-            new() { Name = name, Text = text, Checked = runFirst, AutoSize = true, Margin = new Padding(20, 1, 0, 1) };
+        // Uniform peer checkbox — same indent for every task. The `startChecked` ones are the PRODUCTION hot path that runs
+        // by default (run order is set by BootstrapRank below, NOT by this flag): the prebake prerequisite + nav-reasoning
+        // (so the navigator actually trains on a taxonomy and its HELD-OUT curve populates without the user ticking it).
+        static CheckBox Cur(string name, string text, bool startChecked = false) =>
+            new() { Name = name, Text = text, Checked = startChecked, AutoSize = true, Margin = new Padding(20, 1, 0, 1) };
 
-        flow.Controls.Add(Cur("CurPrebakeLanguage", "Prebake — warm function-word recognition from BOTH a real text corpus (Wikipedia) + synthetic L1", runFirst: true));
+        flow.Controls.Add(Cur("CurPrebakeLanguage", "Prebake — warm function-word recognition from BOTH a real text corpus (Wikipedia) + synthetic L1", startChecked: true));
         flow.Controls.Add(Cur("CurOpCues", "Op-cue words — sum / difference / product / quotient → operator"));
         flow.Controls.Add(Cur("CurNumberWords", "Number words — digit ↔ word lexicon"));
-        flow.Controls.Add(Cur("CurNavReasoning", "Nav-reasoning — grow an is-a taxonomy + level cues; trains the navigator's walk (HELD-OUT curve in [nav-heldout])"));
+        flow.Controls.Add(Cur("CurNavReasoning", "Nav-reasoning — grow an is-a taxonomy + level cues; trains the navigator's walk (HELD-OUT curve in [nav-heldout])", startChecked: true));
         foreach (var skill in Enum.GetValues<GenesisNova.Train.GymSkill>())
             flow.Controls.Add(Cur("GymSkill_" + skill, "Gym — " + GymSkillLabel(skill)));
         flow.Controls.Add(Cur("CurMemCode", "Memory + Code index"));

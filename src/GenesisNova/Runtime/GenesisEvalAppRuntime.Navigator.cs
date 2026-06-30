@@ -51,7 +51,11 @@ public sealed partial class GenesisEvalAppRuntime
     // Light per-cycle budget knobs — kept small so the navigator step never dominates a gym cycle.
     private const int NavSampleMembers = 8;   // leaf concepts sampled per cycle (each yields up to 3 cued queries)
     private const int NavBcEpochs = 3;        // a few gradient passes — a light step, NOT a full train
-    private const int NavDaggerRounds = 1;    // on-policy DAgger rounds after the BC warm-start (0 = pure BC)
+    private const int NavDaggerRounds = 0;    // on-policy DAgger rounds after the BC warm-start (0 = pure BC).
+                                              // TEMP 0: DAgger's successful rollouts fold category HUBS into the shared
+                                              // model _selfField every cycle (the loop's write side), polluting the
+                                              // model's cognition and degrading the function-word foundation. Re-enable
+                                              // once the gym nav training stops writing the SHARED self (see below).
     private const int NavEvalWalks = 6;       // on-policy probes for the resolve%/abstain% signal
     private const int NavMaxSteps = 8;        // the walk's cognitive light-cone for the probe
     private const int NavK = NavQueryDaggerTrainer.DefaultK;

@@ -1,6 +1,7 @@
 # Self-improvement loop: the genesis engine for Claude
 
-> Direction (`PLATONIC_RECKONING.md`): iterations should target **SUBTRACTION toward the keep-core** (the
+> Direction (`CLAUDE.md` "The direction"; `[[nova-reckoning-keep-core]]`): iterations should target
+> **SUBTRACTION toward the keep-core** (the
 > homomorphism, the distributional face, composition-by-reuse, relaxation, abstention). This is *not* about adding
 > another head, plan shape, or skill.
 

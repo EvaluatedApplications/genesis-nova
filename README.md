@@ -74,7 +74,7 @@ The hardest part to hold in your head is the inversion itself: we are used to th
 We'd rather you trust the honest version than oversell it.
 
 - It is **not** a general intelligence, not a product, and **not** competitive with large models on open-ended language. Fluent conversation is in progress, not done.
-- Everything above is at **small scale**: a 512-dimensional space, small vocabularies, focused tasks. There is **no evidence yet that it holds at large scale or on real language.** The head-to-head win is real but at toy scale; it has to be repeated bigger before the data-efficiency thesis is established.
+- Everything above is at **small scale**: a 1024-dimensional space, small vocabularies, focused tasks. There is **no evidence yet that it holds at large scale or on real language.** The head-to-head win is real but at toy scale; it has to be repeated bigger before the data-efficiency thesis is established.
 - The pieces above are **demonstrated mechanisms**, not finished capabilities. Some are solid (exact arithmetic, fact memory, abstention, the head-to-head); others (full grammar, talking, scaling to a corpus) are partial and actively being built. Where it's unproven, we say so.
 - The evocative names (*"conscious field," "platonic space," "the vital loop"*) are **inspiration, not claims.** Strip every metaphor and what remains is concrete geometry and a small network. We do **not** claim the system is conscious, alive, or that it models physics. It's a space of ideas whose rules we chose, constrained only by a handful of internal axioms.
 

@@ -46,14 +46,15 @@ Each is named for its atoms but holds the thing those atoms compose — and in e
 
 ## 1. One vector = one address; the bands decode to the element
 
-A coordinate is a vector of width `dim` (proposed 512). Reading left→right is reading from the crisp, low-entropy
+A coordinate is a vector of width `dim` (production **1024**; the fixed-offset address-space layout activates at
+`dim ≥ 512` = `FaceLayout.AddressSpaceDim`). Reading left→right is reading from the crisp, low-entropy
 **identity nucleus** to the diffuse **meaning tail**. The frozen bands `[0, OrbitalStart)` are a pure function of the
 *symbol* and are **identical for a blank coordinate and a realised one** — that is what makes them an address. Only
 the orbital tail differs between "latent" and "realised".
 
 ```mermaid
 flowchart LR
-  subgraph V["one coordinate = one vector (dim 512)"]
+  subgraph V["one coordinate = one vector (production dim 1024)"]
     direction LR
     P["poly · [0,21)<br/>number (add/sub)"]
     L["log · [21,42)<br/>number (mul/div)"]
@@ -61,7 +62,7 @@ flowchart LR
     B["spelling · [48,208)<br/><b>a WORD</b> (char slots)"]
     S["structure · [208,400)<br/><b>a COMPOSITE</b> (child coords)"]
     O["op · [400,416)"]
-    E["orbital · [416,512)<br/>LEARNED meaning"]
+    E["orbital · [416,dim)<br/>LEARNED meaning<br/>608 dims at dim 1024"]
     P --- L --- K --- B --- S --- O --- E
   end
   classDef nuc fill:#922b21,color:#ffffff,stroke:#f1948a,stroke-width:2px;
@@ -78,7 +79,7 @@ flowchart LR
 | **spelling** | `[48,208)` *(tunable: 16 char-slots × 10)* | the literal token, slot *i* = atom of `s[i]` | char atom, word | ✅ |
 | **structure** | `[208,400)` *(tunable: 6 child-slots × 32 = digest 24 + role 8)* | ordered child coordinates + label | composition, relation, fact | ✅ |
 | **op** | `[400,416)` | which operation (a route over the address space) | function | ✅ |
-| **orbital** | `[416,512)` | **learned meaning** (the distributional cloud) | **materialised elements only** | ❌ |
+| **orbital** | `[416,dim)` *(608 dims at production dim 1024)* | **learned meaning** (the distributional cloud) | **materialised elements only** | ❌ |
 
 The whole region `[0, 416)` is **frozen, codec-derived, invertible address**; only `[416, dim)` is the mobile,
 learned tail. The number bands `[0,42)` stay **byte-identical** to today's `FaceLayout` — the homomorphism is sacred,
@@ -97,9 +98,9 @@ element with no stored node.
 - **Char atom** → `kind` + one spelling slot. **Decode:** nearest char-atom in the ~95-char vocab → the char.
   Deterministic.
 - **Word** → `kind` + spelling slots = its letters. **Decode:** read each slot back to a char → the string. **No more
-  random word-identity hash** — spelling *is* the identity, and it is invertible. *Build target:* `CharSlotDecode`,
-  the inverse of `GetCharComposedEmbedding` (we already ship the numeric and word-slot inverses; the char inverse is
-  the missing one).
+  random word-identity hash** — spelling *is* the identity, and it is invertible. *Realised:*
+  `PlatonicFaceDecoder.CharSlotDecode` (`PlatonicFaceDecoder.cs:188`), the inverse of
+  `PlatonicFaceComposer.GetCharComposedEmbedding`.
 - **Function / op** → `kind` + op-code. **Decode:** nearest op-code → which operation. The op is then a *route*
   (coordinate → coordinate), exactly like `+`: a function **encodes information** by mapping addresses, not by storing
   outputs.
@@ -132,7 +133,8 @@ This is what brings back **kNN at scale**, which hub-dilution had killed:
   it can no longer pollute addressing.
 
 > The thing that killed kNN was *every* element carrying a learned, drifting cloud across the whole high face. Now the
-> wiggle is a 96-dim tail on realised points only; the rest is frozen coordinate. Only the materialised elements have
+> wiggle is a 608-dim tail (at production dim 1024; 96 at the 512 activation floor) on realised points only; the rest
+> is frozen coordinate. Only the materialised elements have
 > the unused faces left free to move.
 
 ---
@@ -142,8 +144,9 @@ This is what brings back **kNN at scale**, which hub-dilution had killed:
 Potentiality is **total** in `[0,208)` (numbers, chars, words): every coordinate there decodes exactly, so you can
 route freely into the blank and the codec always answers. It is **budget-bounded** in the `structure` band `[208,400)`.
 
-A child-slot digest (24 dims) decodes a **numeric child exactly** (a 3-dim poly/log digest recovers the value) and a
-**short atom child** (a few char-slots), but it cannot hold a long word inline. Therefore:
+A child-slot digest (24 dims) decodes a **numeric child exactly** (a 4-dim numeric head `poly[0..1]+log[0..1]`
+recovers the value) and a **short atom child** (the first 2 spelling slots = leading 2 chars, 20 dims), but it cannot
+hold a long word inline. Therefore:
 
 - Shallow composites of atom children → **fully latent**: decode from the void, never stored (an arithmetic result; a
   fact between short tokens).
@@ -191,19 +194,30 @@ structural criterion, not a tuned confidence threshold.
 
 ---
 
-## Status: realised vs build target
+## Status: realised
 
-- **Realised today (the existence proof):** the number bands `[0,42)` and their exact inverse
-  (`PlatonicFaceComposer.GetFreshNumericEmbedding` ↔ `PlatonicFaceDecoder.DecodeNumericFromPrediction`). A latent
-  number coordinate already decodes with zero storage.
-- **Build target (this document is the spec):**
-  1. `FaceLayout` reallocation to the bands in §1 (shrink the learned region to the `[416,dim)` tail; reclaim the high
-     dims as frozen `kind` / `spelling` / `structure` / `op` address).
-  2. `CharSlotDecode` — the missing inverse of the spelling band (§2), so words decode from the void like numbers do.
-  3. The `structure` band as recursive child-coordinate encoding (§4), with the arity/width budget that bounds how
-     deep the void stays free.
-  4. Routing + retrieval read the frozen address bands for identity (latent coordinates are valid targets) and the
-     orbital tail only for learned similarity; abstain on undecodable-void-with-no-edge.
+The spec above is now **built** — the full address-space layout and its inverse codec ship in code. The address-space
+bands activate at `dim ≥ FaceLayout.AddressSpaceDim` (512); production runs at 1024. Below 512 the legacy
+`CharFace`/`WordFace` layout stays in force so small-dim callers/tests are unaffected.
 
-The number fragment proves the pattern; the work is to make the other frozen bands decode the same way, so the whole
-space becomes the deterministic field of potentiality this document describes.
+1. **`FaceLayout` reallocation to the §1 bands** — the fixed-offset address-space constants
+   (`KindStart=42`, `SpellingStart=48`, `StructureStart=208`, `OpStart=400`, `OrbitalStart=416`) in
+   `Core/FaceLayout.cs:115-172`, gated on `IsAddressSpace(dim)`. The learned region is the `[416,dim)` tail; the high
+   dims are reclaimed as frozen `kind` / `spelling` / `structure` / `op` address.
+2. **Number bands `[0,42)`** and their exact inverse (`PlatonicFaceComposer.GetFreshNumericEmbedding` ↔
+   `PlatonicFaceDecoder.DecodeNumericFromPrediction`, `PlatonicFaceDecoder.cs:74`) — the original existence proof; a
+   latent number coordinate decodes with zero storage.
+3. **`CharSlotDecode`** — the spelling inverse (`PlatonicFaceDecoder.cs:188`), partner of
+   `PlatonicFaceComposer.GetCharComposedEmbedding`; words decode from the void like numbers do.
+4. **`structure` band** as ordered child-digest encoding (`PlatonicFaceComposer.EncodeStructure` ↔
+   `PlatonicFaceDecoder.DecodeStructure`, `PlatonicFaceDecoder.cs:283`), with the 24-dim digest budget that bounds how
+   deep the void stays free (§4).
+5. **`kind` / `op` decode** (`DecodeKind`, `PlatonicFaceDecoder.cs:227`; `DecodeOp`, `:248`) and the unified **void
+   decoder** `DialecticalSpace.TryDecodeCoordinate` (`DialecticalSpace.cs:578`) that routes a raw coordinate — realised
+   OR latent — to (kind, symbol, confidence): number off poly/log, operation off the op band, composite off the
+   structure band, word/atom off the spelling band. Routing/retrieval read the frozen address for identity and the
+   orbital tail only for learned similarity; abstain on undecodable-void-with-no-edge.
+
+The number fragment proved the pattern; the other frozen bands now decode the same way, so the whole space is the
+deterministic field of potentiality this document describes. See `PLATONIC_NAVIGATOR.md` for the walker that routes
+over it and `Tests/AddressSpaceVoidTests.cs` for the void-decode proofs.

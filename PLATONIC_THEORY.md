@@ -182,8 +182,8 @@ synthesis (Law D). The algebra is closed: every result is again a valid Π.
 
 | Model law | Number fragment | Word / text |
 |---|---|---|
-| κ per-aspect (§3) | n/a (algebraic) | **Per-aspect κ**: `κ : E×E → [0,1]^A`, never reduced to one scalar; aspects derived from the live faces at update time |
-| π emergent (Law D) | exact (homomorphism) | **Synthesis**: the semantic face is born neutral and settles by local Ξ-minimization; no position is assigned directly |
+| κ per-aspect (§3) | n/a (algebraic) | **Per-aspect κ**: `κ : E×E → [0,1]^A`, never reduced to one scalar; aspects derived from the live faces at update time *(live core: the κ-EDGE is a scalar `Relation.Synthesis`; per-aspect meaning is realized in the distributional cloud — see §9.1.2)* |
+| π emergent (Law D) | exact (homomorphism) | **Synthesis**: the semantic face is born neutral and SETTLES from κ as the distributional cloud (`RecomputeCloud`: token(self) + Σ (1−2κ)·token(neighbour)), never stamped; composites instead derive position from their parts (Laws C/S, `Merge`) |
 | Composition reuse (Laws C/S) | digit places | **▷-hubs over reused atoms**: O(N+\|Atoms\|); a novel composite costs O(1) |
 | ▷ vs κ (§4) | n/a | **Two distinct edge types**: ▷ (part-of, down) kept separate from κ (contradiction, sideways) |
 | G1-G6 (§5) | held | **Soundness gate**: every operation preserves all six axioms |
@@ -208,17 +208,31 @@ invokes it. `DialecticalSpace` is the default core (`GenesisNovaConfig.UseDialec
    generalizes to unseen operands; no stored numeric facts; numbers never form relation edges.
 2. **[Law M] Meaning is per-aspect κ.** κ is a per-aspect profile, never a single scalar; "cat≈dog on `animal`,
    cat≠dog on `sound`" is representable; related pairs converge on shared aspects and preserve contradicting ones.
+   **NEEDS REVIEW (realization):** in the live core a κ EDGE is a SCALAR (`Relation.Synthesis ∈ [0,1]`, read by
+   `GetContradiction`; `ObserveContradiction` takes one `double`). The per-aspect / differential structure is realized
+   instead in the DISTRIBUTIONAL CLOUD (`RecomputeCloud`: cloud = token(self) + Σ (1−2κ)·token(neighbour)), where each
+   semantic dimension can agree or contradict independently — *not* in a κ vector. The per-dimension `MessagePassUpdate`
+   / `DialecticPreserveFraction` mechanism this row's wording evokes lives only in the LEGACY `PlatonicSpaceMemory`;
+   `DialecticalSpace.DimensionalContradiction` is a vestigial flag (set `true`, never read).
 3. **[Law D] Position emerges, not assigned.** No path writes a semantic position directly; it settles from κ.
 4. **[Laws C/S] Composites reuse components.** A novel composite over existing components adds O(1) storage;
    N texts over a bounded word set grow O(N+\|Atoms\|).
 5. **[G4] Conservation.** Every element has an involutive complement, `e ⊕ ¬e = 0`.
-6. **[G6] Irreversibility.** E is monotone; removal archives, never deletes; snapshots round-trip archived elements.
+6. **[G6] Irreversibility.** A distinction, once made, is never unmade — but the live core holds this via a LATENT
+   coordinate system, not by never-deleting. Live eviction genuinely DELETES (`DischargeIrrelevant → DischargeConcept
+   → ElementStore.Remove`), and `ExportSnapshot` persists the ACTIVE set only (archived elements are NOT round-tripped).
+   G6 still holds because identity is a deterministic decodable ADDRESS (a pure function of the symbol): a removed
+   symbol re-observed re-derives the EXACT same frozen face, and the non-derivable learned tail (orbital +
+   `FunctionEvidence`) re-accumulates as first learned. `ElementStore.Archive` (G6-dormancy) survives only to restore
+   the dormant flag on snapshot import — it is NOT the evictor. (`Element.cs`/`ElementStore.cs` docs; memory
+   `nova-function-word-conserved` flags this as a candidate G6 reinterpretation worth review.)
 7. **[G2] Consistency.** No resolved synthesis agrees (κ=0) with both `b` and `¬b`.
 8. **[Closure] Algebra closed.** `Observe`/`Compose` only add to E and maintain ¬; `Synthesize`/`Recognize` are
    read-only over the synthesis. Every result is again a valid Π.
 9. **[Law A] Address space — frozen faces decode.** π on the frozen subspace is a deterministic, invertible codec:
-   a coordinate decodes to its element with no stored node (numbers exact today; spelling/structure are the build
-   target). The learned meaning tail is non-zero **only on materialised elements**; latent coordinates carry the
+   a coordinate decodes to its element with no stored node — numbers, spelling, structure and op all decode today at
+   `dim ≥ 512` (`TryDecodeCoordinate` / `TryLand` / `CharSlotDecode` / `DecodeStructure`). The learned meaning tail is
+   non-zero **only on materialised elements**; latent coordinates carry the
    frozen address and a zero tail. Identity kNN over frozen faces is drift-free and admits latent neighbours; semantic
    kNN reads only the realised tail. See `PLATONIC_NUCLEUS.md`.
 
@@ -247,23 +261,24 @@ The number fragment is the homomorphism and is held exact (names are the durable
 boundaries: `PolyFaceMax=42`; `NumericDims=min(dim/2,21)`; poly `[0..ND)`, log `[ND..2ND)`;
 `CharFaceStart=min(42,dim/2)`; `WordFaceStart = dim>202 ? 202 : dim`.
 
-### 9.4 Address-space layout (target — realises Law A)
+### 9.4 Address-space layout (realises Law A — LIVE at `dim ≥ 512`)
 
-The current `FaceLayout` keeps the high face `[202,dim)` as one big *learned* region on every element; the
-address-space model (Law A, `PLATONIC_NUCLEUS.md`) reallocates it so the frozen, decodable address dominates and the
-learned tail is small and materialised-only. Proposed bands at `dim=512` (poly/log unchanged; *tunable* widths marked):
+`FaceLayout` (`Core/FaceLayout.cs`, lines 115-172) reallocates the high face into FIXED, codec-derived address bands so
+the frozen, decodable address dominates and the learned tail is small and materialised-only. The layout is in force
+when `IsAddressSpace(dim)` (`dim ≥ AddressSpaceDim = 512`); below that the legacy char/word layout (§9.3) stays active,
+so small-dim callers/tests are unaffected. Bands (fixed `const` offsets; poly/log unchanged):
 
 | band | dims | encodes / decode | frozen? |
 |---|---|---|---|
-| poly | `[0,21)` | number value; `v = e[0]·10` | ✅ (unchanged) |
-| log | `[21,42)` | number value; `v = exp(e[0]·10)` | ✅ (unchanged) |
-| kind | `[42,48)` | kind code (numbers read off poly/log) | ✅ |
-| spelling | `[48,208)` *(16 char-slots × 10)* | the token; nearest-char-per-slot → string (needs `CharSlotDecode`) | ✅ |
-| structure | `[208,400)` *(6 child-slots × 32)* | ordered child coordinates + label; recurse-decode | ✅ |
-| op | `[400,416)` | which operation (a route over addresses) | ✅ |
-| orbital | `[416,512)` | learned meaning; **non-zero only on materialised elements** | ❌ |
+| poly | `[0,21)` | number value; `v = e[0]·10` | ✅ |
+| log | `[21,42)` | number value; `v = exp(e[0]·10)` | ✅ |
+| kind | `[42,48)` | `KindStart`/`KindDims`; per-kind code (numbers = all-zero) | ✅ |
+| spelling | `[48,208)` *(16 char-slots × 10)* | the token; `PlatonicFaceDecoder.CharSlotDecode` → string | ✅ |
+| structure | `[208,400)` *(6 child-slots × 32 = digest 24 + role 8)* | ordered child coordinates + label; `DecodeStructure`, recurse-decode | ✅ |
+| op | `[400,416)` | `EncodeOp`/`DecodeOp`; which operation (Function elements) | ✅ |
+| orbital | `[416,dim)` | learned meaning; **non-zero only on materialised elements** | ❌ |
 
-Build order: (1) `FaceLayout` reallocation; (2) `CharSlotDecode` (the missing spelling inverse — numeric and
-word-slot inverses already exist in `PlatonicFaceDecoder`); (3) `structure` band recursive child-coordinate encoding
-with the arity/width budget that bounds how deep the void stays free; (4) routing/retrieval read frozen address bands
-for identity and the orbital tail only for similarity, abstaining on undecodable-void-with-no-edge.
+All bands decode today: `DialecticalSpace.TryDecodeCoordinate` reads kind/number/op/structure/spelling, `TryLand`
+lands a navigator step on the nearest decodable coordinate (realised or latent void), and `GetNearestConcepts` uses
+`FrozenIdentityDistance` over `[KindStart,OrbitalStart)` = `[42,416)` as the identity tie-break. At the production face
+`dim = 1024` the orbital tail is `[416,1024)` = 608 dims (the frozen bands ≤ 416 are fixed regardless of `dim`).

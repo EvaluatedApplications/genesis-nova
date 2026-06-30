@@ -41,7 +41,7 @@ dotnet run --project claude/GenesisInspect -c Release -- gymprobe 1             
 
 ## Notes for others
 
-- Requires the same TorchSharp + CUDA setup as the main project (CPU fallback works; GenesisInspect defaults
-  to CPU). Build it once with `dotnet build claude/GenesisInspect -c Release` then run the `.exe` directly.
+- Requires the same TorchSharp + CUDA setup as the main project (defaults to GPU; pass `--cpu` for the CPU
+  fallback). Build it once with `dotnet build claude/GenesisInspect -c Release` then run the `.exe` directly.
 - `.claude-nova/` is regenerable runtime state; treat it as a cache, not source (ignore it in VCS).
 - libtorch prints benign `.grad` warnings to stderr during training; suppress with `2>$null` (PowerShell).

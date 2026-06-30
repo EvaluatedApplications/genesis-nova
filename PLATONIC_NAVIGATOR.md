@@ -1,8 +1,30 @@
 # The Navigator: reasoning as a learned walk through the address space
 
-> **Status: DESIGN / PROPOSAL.** The substrate it rides on is built and proven (the decodable address space —
-> `PLATONIC_NUCLEUS.md`); the navigator itself is not built yet. This doc is the spec to shape and build against.
-> Open decisions are collected in §10 — they are yours to settle.
+> **Status: BUILT & LIVE (M1–M4 + multi-hop ceiling-break).** This started as a design proposal; the navigator it
+> specs is now built, trained in the gym every cycle, and **ON in production** —
+> `GenesisNovaConfig.WithProductionMechanisms()` sets `NavigatorDisambiguation = true`, which wires the trained policy
+> into the **AMBIGUOUS branch** of `GenesisInferenceEngine.TryFieldRelax` (between the dominant-relation answer and the
+> one-shot `ds.Reason`), gated to a confident halt so a cold/untrained walk falls through (cold-safe). Code:
+> `src/GenesisNova/Cognition/Navigator/` — `PlatonicFlowField.cs` (the backward-Dijkstra flow-field oracle/teacher),
+> `NavQueryFeatures.cs` + `NavQueryPolicyNet.cs` (the **answer-free, query-conditioned** recurrent policy/value net +
+> `QueryNavPolicy`), `NavQueryDaggerTrainer.cs` (BC warm-start + on-policy DAgger), `NavigatorWalk.cs` (the walk loop +
+> `FlowFieldPolicy` oracle seam); live wiring in `Runtime/GenesisRuntimeState.WireNavigatorDisambiguator`; per-cycle
+> training, held-out eval and learned level-regions in `Runtime/GenesisEvalAppRuntime.Navigator.cs`.
+>
+> **Read the body below as the originating vision — several pieces were realised differently than specced (notes inline,
+> and the design's "open decisions" in §10 are settled in code):**
+> - The walk is conditioned on a **QUERY-CONTEXT it has without the answer** — the anchor concept + a **learned level
+>   cue** over `{GENUS, DOMAIN, ROOT}` (the `NavCue` enum; anchors `∘gns`/`∘dom`/`∘rut`, the level read from the answer's
+>   **graph depth** via `LearnNavLevelCue`/`DeriveNavCue`, no word list) — **not** a supplied goal coordinate `g` (§2).
+>   The candidate rows are answer-free differentials `[cand−ref, cand−cur, cand, κ]` (`NavFeatures`/`NavQueryFeatures`).
+> - Training is **BC-on-the-flow-field then on-policy DAgger** (the §7 "Phase 1 — RL fine-tune / beat the oracle" was
+>   **not** built; the value head is supervised by the oracle `cost[]` via MSE, not a policy-gradient return).
+> - **M2** adds target-kind conditioning (`DeriveNavKind` → `W_k·kindFace`, halt-on-first-of-this-kind composition).
+> - **M4** adds a **learned per-level goal-region** centroid (`EnsureLevelRegions`/`NavLevelGoalRegions`); the unified
+>   `cand−goal` feature + `W_k` halt-bias is what broke the multi-hop (DOMAIN/ROOT) landing ceiling (~0%→100% on a clean
+>   taxonomy). Held-out generalization is measured by `RegisterNavigatorHeldOut`/`EvaluateNavigatorHeldOut(PerCue)`.
+> - **§5.2 materialise-on-walk** exists (`NavigatorWalk.MaterialiseOnSuccess` + `DialecticalSpace.Materialise`) but is
+>   **off** in every live walk (the navigator currently reads/answers; it does not grow the store).
 
 > Reasoning is **not** a one-shot route to an endpoint, and it is **not** the whole field relaxing to a global
 > equilibrium. Reasoning is a **situated walk**: a neural agent stands *at a coordinate*, senses its local

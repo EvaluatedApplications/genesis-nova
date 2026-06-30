@@ -31,7 +31,7 @@ exposure. A small recurrent neural network acts as a **thin controller** that *s
 operations rather than storing knowledge in its weights. The substrate is **conserved** (every element has an exact
 complement) and **monotone** (distinctions are archived, never destroyed). We additionally disclose a **persistent
 self-state** (realized in the substrate's own meaning-space, not as a hidden weight vector) that conditions
-reasoning and is maintained by an archival (conserved-memory) mechanism.
+reasoning and is persisted as conserved memory (restored verbatim from a checkpoint).
 
 ---
 
@@ -51,6 +51,14 @@ An element is a vector **e ∈ ℝ^D** (e.g. D = 512), partitioned into contiguo
 - **Character face** `[42, 202)`: composed from a token's characters (the frozen identity of a *word*).
 - **Relational ("word") face** `[202, D)`: the large free face that carries distributed meaning (a phrase/sentence
   of words; see §5).
+
+The `[42, 202)` / `[202, D)` boundaries above are the small-dimension layout. In the production substrate
+(`D ≥ 512`; the default `D = 1024`) the frozen identity nucleus is partitioned more finely into fixed,
+codec-derived, decodable bands — a kind code, a per-character *spelling* band, an ordered *structure* band (child
+digests + role/label codes, which records a composite's components inside the frozen address), and an op code —
+with the single learned *orbital* tail `[416, D)` carrying the relational cloud. The numeric faces (`[0, 21)` poly,
+`[21, 42)` log) are byte-identical in both layouts. The dual-face principle (frozen, exact identity nucleus +
+free, learned relational cloud) is unchanged; only the internal subdivision of the nucleus differs.
 
 **Key property (restore-after-update):** any learning update may write only to free dimensions; after every update
 the frozen dimensions are restored to their exact values and the complement (§8) is re-enforced. Therefore
@@ -147,9 +155,14 @@ mark *how* content tokens compose.
 
 - **Conservation (complement).** Every element e has an exact complement `¬e = −e`, re-enforced after every update,
   so the substrate's total signed mass is zero. The complement anchors differential meaning.
-- **Monotonicity (archival).** Elements are never destroyed; an evicted element is **archived** (made dormant) with
-  its learned state retained and is **reactivated** intact if re-observed. The active set stays bounded for speed
-  while no distinction is ever lost.
+- **Monotonicity (G6) by latent coordinate.** No distinction is ever unmade, but *not* because elements are never
+  deleted: live eviction genuinely **de-materialises** an element to keep the active set bounded under churn. G6
+  holds because identity is a deterministic, decodable **address** — a pure function of the symbol — so an evicted
+  symbol that is re-observed **re-derives its exact frozen identity**; the distinction is conserved by the coordinate
+  system, not by the live entry. The non-derivable learned tail (the orbital cloud) **re-accumulates** on
+  re-observation rather than being preserved verbatim through eviction. A separate **dormant/archival** path that
+  retains an element's learned state intact and reactivates it exists, but its live use is restoring dormancy on
+  checkpoint import, not eviction. The active set stays bounded for speed while no *identity* is ever lost.
 
 ## 9. The thin neural controller
 
@@ -176,8 +189,9 @@ concepts cognition has recently attended to; it is *not* reset between inputs. T
 reasoning by biasing the substrate's relaxation/retrieval toward the accumulated context (so an ambiguous query is
 resolved in the direction of what the system has been "thinking about"), and (ii) is itself shaped by learning:
 the same clouds the system sharpens by observation are what the self is built from. Because identity lives in the
-frozen faces and is conserved (§8), the substrate's learned state survives eviction (archival) and can be restored
-from conserved memory if re-observed.
+frozen faces and is conserved (§8) by the latent decodable coordinate, an evicted concept's identity is re-derived
+exactly when re-observed, and persisted learned state (including the self-state itself, restored verbatim from a
+checkpoint) is recovered from conserved memory.
 
 > *Inspirational framing (not a literal claim).* The language of a "homeostatic loop", a committed identity
 > "setpoint" restored under "perturbation", and a measurable "cognitive reach" is generative metaphor for the
@@ -208,13 +222,15 @@ The combination, and each of the following, is disclosed as inventive:
    of its neighbourhood** in the relation graph (a function word bridges unrelated concepts with low clustering,
    content clusters with its kin with high clustering), enabling distributional, supervision-free acquisition of
    grammatical structure.
-7. A **conserved** (exact complement) and **monotone/archival** geometric substrate.
+7. A **conserved** (exact complement) and **monotone** geometric substrate, in which monotonicity (G6) is realized
+   by a **latent decodable coordinate**: eviction de-materialises an element to stay bounded, yet a re-observed
+   symbol re-derives its exact frozen identity, so no distinction is unmade.
 8. A **thin recurrent controller** that selects and composes substrate operations (rather than storing knowledge in
    weights), with substrate and controller widths chosen independently via a name-based bridge, falling through a
    ladder of **abstaining** substrate operations.
 9. A **persistent, substrate-resident self-state** held in the substrate's meaning-space (a decaying accumulation
-   of attended meaning-clouds) that conditions the system's relaxation/retrieval, surviving element eviction via the
-   conserved/archival mechanism (§8).
+   of attended meaning-clouds) that conditions the system's relaxation/retrieval, with the substrate's identity conserved across eviction by the
+   latent-coordinate mechanism (§8) and persisted learned state (the self-state included) restorable from a checkpoint.
 
 ## 12. Reproducibility
 

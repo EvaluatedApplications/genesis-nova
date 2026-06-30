@@ -8,6 +8,8 @@ that hosts the live model + training gym. Everything else builds on it and must 
 - `src/` (`GenesisNova.csproj`): **the engine** (GENERAL; no app-specific hardcoding). The single source of truth.
 - `Tests/`: the behaviour + emergence suite (in `GenesisNova.slnx`).
 - `bench/RaceBench/`: equal-param benchmark vs a transformer (references the engine; also in the .slnx).
+  (`bench/RetentionBench/` is a second benchmark exe that references the engine but is **not** in the .slnx;
+  build it directly when needed.)
 - `claude/`: **applied** tooling on top of the engine (NOT in the .slnx, so it never affects the test suite):
   - `GenesisInspect/`: read-only diagnostic CLI showing what a trained model *is* and how it answers (the only CLI).
 - `.claude-nova/`: **runtime state only** (a model checkpoint + logs, ~400 MB). Generated, gitignored,
@@ -15,10 +17,14 @@ that hosts the live model + training gym. Everything else builds on it and must 
 
 ## Prerequisites
 
-- **.NET 8 SDK** (Windows; the projects target `net8.0-windows`).
-- **TorchSharp** pulls libtorch automatically on restore. **CPU works everywhere**; an NVIDIA **GPU + CUDA** is
-  optional and used for training (`--gpu`) and benchmarks. libtorch prints benign `.grad` warnings to stderr
-  during training; suppress them with `2>$null` in PowerShell.
+- **A recent .NET SDK on Windows.** The projects target `net8.0-windows`, but the solution uses the new XML
+  `.slnx` format, which requires SDK tooling **≥ 9.0.200** (a .NET 9 or 10 SDK; this machine builds it with
+  `10.0.300`). You also need the .NET 8 desktop targeting pack to compile `net8.0-windows`.
+- **TorchSharp** pulls libtorch automatically on restore. Every project references **`TorchSharp` 0.107.0** *and*
+  **`TorchSharp-cuda-windows` 0.107.0** directly, so restore always downloads the CUDA libtorch native runtime
+  (a multi-GB package) regardless of hardware. At runtime the default backend is GPU; **CPU works everywhere** as
+  a fallback when no NVIDIA **GPU + CUDA** is present (force it with `--cpu` in GenesisInspect). libtorch prints
+  benign `.grad` warnings to stderr during training; suppress them with `2>$null` in PowerShell.
 - Git (any recent build; a Visual Studio install bundles one under `Common7/.../Git/cmd`).
 
 ## 1. Build the engine + run the fast tests

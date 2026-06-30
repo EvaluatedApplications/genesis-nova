@@ -11,7 +11,7 @@ A checkpoint splits along the **shared / local** seam:
 
 | Tier | Contents | Lives in | Git |
 |---|---|---|---|
-| **Shared starter** (what everyone forks) | vocab, embeddings, output/route/edit heads, GRU gates, learned spacing/casing, **+ the platonic substrate** | `models/genesis-nova/` (+ pointer `models/genesis-nova.json`, substrate `models/genesis-nova.platonic/`) | committed |
+| **Shared starter** (what everyone forks) | vocab, embeddings, output/route/edit heads, GRU gates, query-op/operand + plan + trunk + role heads, learned spacing/casing/grammar, the **navigator** policy-net + its persistent **self**, **+ the platonic substrate** | `models/genesis-nova/` (+ pointer `models/genesis-nova.json`, substrate `models/genesis-nova.platonic/`) | committed |
 | **Local working state** (per user) | the user's evolving fork as the in-app gym trains it, curriculum/mastery, metrics/logs | `%LocalAppData%/GenesisNova/gym/` | not committed |
 
 The committed starter is a read-only baseline. The repo model changes only when someone promotes a fork and opens a PR.
@@ -20,11 +20,13 @@ dir `models/genesis-nova/`, and the substrate dir `models/genesis-nova.platonic/
 
 ---
 
-## 2. Binary, all-`double`
+## 2. Binary weights (NN `double`, navigator `float32`)
 
-Weights are stored as raw little-endian **`double`** (8 bytes), not JSON text or `float32`. The starter exists to be
-*trained further*. The `double` format keeps a continued fork bit-faithful (no rounding drift down a fork chain) and is
-~3× smaller and faster to parse than text.
+The NN's big tensors are stored as raw little-endian **`double`** (8 bytes), not JSON text. The starter exists to be
+*trained further*; the `double` format keeps a continued fork bit-faithful (no rounding drift down a fork chain) and is
+~3× smaller and faster to parse than text. The one exception is the **navigator** policy-net: its params are native
+**`float32`**, so they ride in a single concatenated `f32` shard (lossless for f32 params, half the bytes / autosave
+I/O of the former f64 encoding — `GenesisShardedCheckpointStore.AddF32Raw`, `:262`). Small structured state is UTF-8 JSON.
 
 ---
 
@@ -46,12 +48,22 @@ into ~4 shards and a full ~460 MB model into ~15. It stays a flat `shards/` dire
 **once** (dedup); a "better model" PR is a **manifest diff** (text, reviewable) plus only the shards that changed.
 
 
-**Sectioned**, so an unchanged tensor keeps its hash and isn't rewritten. Each section (`embeddings`, `outputWeights`,
-`gruWih`, … plus JSON sections like `config`, `vocab`, `spacingModel`) records its `kind` (`f64` / `json`), shape, and
-ordered shard hashes in the manifest. Big `f64` tensors are raw doubles; small structured state is UTF-8 JSON.
+**Sectioned**, so an unchanged tensor keeps its hash and isn't rewritten. Each section records its `kind`
+(`f64` / `f32` / `json`), shape, and ordered shard hashes in the manifest. The big `f64` tensor sections are
+`embeddings`, `outputWeights`, `routeWeights`, `editWeights`, `gruWih`, `gruWhh`, `queryOpWeights`,
+`queryOperandWeights`, `planWeights`, `trunkWeights`; the navigator's concatenated weights are the one `f32` section
+(`navigator`). Everything else — config, vocab, all biases, GRU gate biases, spacing/casing/grammar-role models,
+curriculum, the navigator param *shapes* (values emptied), and the navigator's persistent **self** field
+(`NavigatorSelfField`, ~608 doubles) — rides in a **single `meta` JSON section** (`GenesisShardedCheckpointStore.cs:42-61`),
+not separate per-field JSON sections. The manifest stamps `FormatVersion` (`1`, `:20`) and the checkpoint schema
+`ModelVersion` (currently `7` — `GenesisCheckpoint.CurrentVersion`, navigator + persistent self added at v7).
 
 The **platonic substrate** is a *separate* sharded directory (`…/<name>.platonic/`, `GenesisShardedCheckpointStore.cs:28`)
 so it can be reset (delete the dir) without disturbing the long-lived NN. This is the "wipe space, keep GRU" behaviour.
+It serialises faithful dialectical elements (`DialecticalElementSnapshot`: orbital + kind + counters + the conserved
+`FunctionEvidence` scalar) plus relations, chunks, op-tokens and the learned number-word lexicon, stamped with a
+`LayoutVersion` (currently `2`, `PlatonicMemorySnapshot.CurrentLayoutVersion`) — an import stamped below it drops the
+layout-dependent element orbitals and re-learns them, keeping only layout-independent state.
 
 A per-save **generation** id is stamped on the model manifest, the substrate manifest, and the pointer marker, so a load
 verifies all parts came from the same save and rejects a torn (crash-interrupted) checkpoint.
@@ -62,13 +74,13 @@ The loader reads this sharded format. A one-time legacy-JSON migration path also
 
 ## 4. Seed & promote
 
-**Seed** (`GenesisShardedCheckpointStore.SeedFromStarter`, `GenesisShardedCheckpointStore.cs:184`): if NO local gym
+**Seed** (`GenesisShardedCheckpointStore.SeedFromStarter`, `GenesisShardedCheckpointStore.cs:220`): if NO local gym
 checkpoint exists yet and the committed starter is present and consistent, the app copies the starter's pointer + model +
 substrate into the local gym dir, so a clone / fresh machine begins from the warmed model instead of an empty brain.
 It is a **no-op** once a local checkpoint exists (the local fork then evolves independently and is never overwritten) or
-if the starter is absent / torn. Called on startup from `MainWindow` (`MainWindow.cs:61`), before the runtime resumes.
+if the starter is absent / torn. Called on startup from `MainWindow` (`MainWindow.cs:67`), before the runtime resumes.
 
-**Promote** (`GenesisShardedCheckpointStore.PromoteToStarter`, `GenesisShardedCheckpointStore.cs:171`): copies a local
+**Promote** (`GenesisShardedCheckpointStore.PromoteToStarter`, `GenesisShardedCheckpointStore.cs:207`): copies a local
 fork's pointer + model + substrate (mirroring the destination) into the starter location (`models/genesis-nova{.json,/,.platonic/}`)
 so it can be committed and opened as a PR. It is **test-covered but not yet exposed as a UI/CLI action**: promotion is a
 deliberate, manual step.
@@ -94,9 +106,9 @@ Both take POINTER paths (the `.json` marker); the model/substrate dirs derive fr
 ```
 models/genesis-nova.json             # SHARED (committed): the pointer marker
 models/genesis-nova/                 #   the model dir
-  manifest.json                      #     sections → shard hashes, dims, generation
-  shards/<sha256>.gnv                #     32 MiB content-addressed double shards
-models/genesis-nova.platonic/        #   substrate (separate → resettable), same shard layout
+  manifest.json                      #     sections → shard hashes, dims, FormatVersion/ModelVersion, generation
+  shards/<sha256>.gnv                #     ≤32 MiB content-addressed shards (f64 tensors, one f32 navigator blob, meta JSON)
+models/genesis-nova.platonic/        #   substrate (separate → resettable), same shard layout; LayoutVersion-stamped
 
 %LocalAppData%/GenesisNova/gym/      # LOCAL (not committed): the in-app gym working dir
   genesis-nova.autosave.checkpoint.json      # local pointer

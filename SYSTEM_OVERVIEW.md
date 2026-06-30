@@ -1,6 +1,14 @@
 # GenesisNova — System Overview & the Road to an LLM Competitor
 
-*Status as of 2026-06-28. Empirical, not aspirational — every claim below is backed by a measurement from this codebase.*
+*Status as of 2026-06-30. Empirical, not aspirational — every claim below is backed by a measurement from this codebase.*
+
+> **Update (Phase 1 started):** the "statistics on the GPU" rebalance is no longer purely proposed. The cloud
+> recompute — the substrate's hottest scalar loop — now has a batched GPU path (`Cognition/Platonic/GpuCloudBatcher.cs`,
+> driven by `DialecticalSpace.BatchedCloudGpu`). It defers + dedups dirty clouds and recomputes them in one
+> `index_select`/`index_add_` op on CUDA (Cloud = A·T), validated cosine-identical to the scalar definition. It is
+> **gated `default-off`** (`GenesisNovaConfig.BatchedCloudGpu = false`, NOT yet in `WithProductionMechanisms`) and not
+> yet wired into the gym loop, so the live default path below is still the scalar CPU loop. Sections 5–7 describe that
+> default; the GPU rows in §6 are now partly built rather than hypothetical.
 
 ---
 
@@ -38,6 +46,14 @@ That bet is **half-right**, and this document is about which half.
 **What lives where:**
 - **Substrate (CPU):** identity, relations, geometric clouds, homomorphic arithmetic, Merge-style composition, recall by relaxation, eviction/forgetting.
 - **NN (GPU):** role recognition, op-cue inference, route/abstain decisions — a *general pattern recogniser* that supervises the substrate.
+
+> **Live-path note:** the production config (`GenesisNovaConfig.WithProductionMechanisms()`, used by the desktop app
+> and RaceBench) turns on `ConsciousField`, which **bypasses the GRU route/plan/op classifier entirely**. Cognition
+> runs through `GenesisInferenceEngine.GenerateFromField` — a substrate route ladder that abstains/falls through per
+> step (induction → predicate → arithmetic → number-word → field-tick → learned-function → meaning-ticks/analogy/
+> compose → talk → learn → recall → **relaxation (`TryFieldRelax`)** → abstain), each answer tagged with a
+> `DecisionPath`. The "NN recognises routes/ops and directs" box above describes the legacy classifier path (default
+> when `ConsciousField=false`) and the aspirational recogniser role — not the live production cognition path.
 
 ---
 
@@ -97,7 +113,7 @@ Move the **hard, doesn't-structure-well, distributional** work off the CPU graph
 
 | Today (CPU substrate, overfit) | Proposed (GPU/NN, batched) |
 |---|---|
-| `RecomputeCloud` per observation | **Clouds as sparse matvec** — periodic batched recompute on GPU |
+| `RecomputeCloud` per observation | **Clouds as sparse matvec** — periodic batched recompute on GPU — **BUILT** (`GpuCloudBatcher`, gated `BatchedCloudGpu`, default-off, gym-wiring pending) |
 | kNN nearest-concept scan | **kNN as matmul** over the embedding matrix |
 | Function-likeness via graph thresholds | **Distributional semantics as a learned GPU embedding / factorization** — the NN *learns* the soft function/content gradient instead of us thresholding a graph |
 | Field relaxation, one step at a time | **Relaxation as attention** — batched, parallel settling |
@@ -115,7 +131,7 @@ An LLM is, crudely, **one giant distributional engine** — everything (syntax, 
 
 Our differentiated bet: **a hybrid that is exact where structure exists and fluent where it doesn't.**
 
-**Phase 1 — Rebalance (now).** Fix the 90/10 split. Move clouds/kNN/relaxation/distributional-semantics to batched GPU. Saturate the tensor engine. This alone unblocks scale — the substrate stops being the bottleneck.
+**Phase 1 — Rebalance (now, in progress).** Fix the 90/10 split. Move clouds/kNN/relaxation/distributional-semantics to batched GPU. Saturate the tensor engine. This alone unblocks scale — the substrate stops being the bottleneck. *Status:* the cloud-recompute piece is built (`GpuCloudBatcher`, defer+dedup+`index_add_` on CUDA, validated cosine-identical), but gated `default-off` and not yet wired into the gym/production loop; kNN and relaxation are still scalar CPU.
 
 **Phase 2 — Let the NN own the statistics.** Stop hand-tuning graph metrics for distributional properties (function words, soft routing, ambiguity). The NN learns them from data on the GPU. The substrate keeps only exact structure. (The PMI failure is the mandate for this.)
 

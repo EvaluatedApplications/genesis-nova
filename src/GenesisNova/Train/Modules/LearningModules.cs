@@ -96,12 +96,13 @@ public sealed class DisruptionModule : IProbeOutcomeModule
     public IReadOnlyDictionary<string, double> Metrics() => new Dictionary<string, double> { ["disrupted"] = _disrupted };
 }
 
-/// <summary>SELF-HEAL a CUE MISROUTE — the missing "learn from a WRONG ROUTE" signal. On a value-WRONG probe whose
-/// numeric answer was produced as a compare WORD (an arithmetic query hijacked to the compare route), contradict the
-/// operator/cue that selected it so training UNLEARNS the bad cue→∘cmp relation and the route stops hijacking. Gated by
-/// the engine's SelfHealMisroutedCues flag (off = no-op). Without it a corpus-contaminated "-"→∘cmp is IMMORTAL and
-/// focused training can never recover the skill (the failure lives where no gradient/curriculum reaches it). See
-/// nova-subtract-stuck-compare-hijack.</summary>
+/// <summary>SELF-HEAL a misselected ROUTE/OP — the missing "learn from a WRONG selection" signal, at BOTH selection
+/// stages. (1) INTENT misroute: a numeric answer produced as a compare WORD (an arithmetic query hijacked to the
+/// compare route) → contradict the cue that selected the wrong route (HealMisroutedCue). (2) OP misselection: a query
+/// that DID compute a number but used the wrong arithmetic op because a cue→∘op edge was mislearned ("add"→∘sub) →
+/// derive the correct op from operands→truth and unlearn/reinforce the cue (HealMisselectedOp). Both gated by the
+/// engine's SelfHealMisroutedCues flag (off = no-op). Without these the bad cue edge is IMMORTAL — routing/op-resolution
+/// has no trainable parameter and focused training never reaches it. See nova-subtract-stuck-compare-hijack.</summary>
 public sealed class CueSelfHealModule : IProbeOutcomeModule
 {
     private long _healed;
@@ -109,8 +110,9 @@ public sealed class CueSelfHealModule : IProbeOutcomeModule
 
     public void OnGradedProbe(in ProbeOutcome o)
     {
-        if (!o.ValueCorrect)
-            try { o.Runtime.HealMisroutedCue(o.Probe.Query, o.Probe.Allowed, o.Output, o.DecisionPath); _healed++; } catch { }
+        if (o.ValueCorrect) return; // a RIGHT answer disrupts nothing — only wrong selections heal
+        try { o.Runtime.HealMisroutedCue(o.Probe.Query, o.Probe.Allowed, o.Output, o.DecisionPath); _healed++; } catch { }
+        try { o.Runtime.HealMisselectedOp(o.Probe.Query, o.Probe.Allowed, o.Output, o.DecisionPath); } catch { }
     }
 
     public IReadOnlyDictionary<string, double> Metrics() => new Dictionary<string, double> { ["healed"] = _healed };

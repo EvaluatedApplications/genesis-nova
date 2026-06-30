@@ -256,6 +256,13 @@ public sealed partial class GenesisEvalAppRuntime : ILearningRuntime
     public void HealMisroutedCue(string query, IReadOnlyList<string> allowedAnswers, string output, string decisionPath)
         => WithModelGate(() => { _state.Inference.HealMisroutedCue(query, allowedAnswers, output, decisionPath); return 0; });
 
+    /// <summary>SELF-HEAL an OP MISSELECTION (the op-selection-stage sibling of <see cref="HealMisroutedCue"/>): a
+    /// value-wrong probe that DID compute a number used the wrong arithmetic op because a cue→∘op edge was mislearned.
+    /// Derive the correct op from the operands→truth and unlearn/reinforce the cue. No-op unless SelfHealMisroutedCues.
+    /// Model-ops gated.</summary>
+    public void HealMisselectedOp(string query, IReadOnlyList<string> allowedAnswers, string output, string decisionPath)
+        => WithModelGate(() => { _state.Inference.HealMisselectedOp(query, allowedAnswers, output, decisionPath); return 0; });
+
     /// <summary>Live op-head class-balance window [abstain, add, sub, mul, div] (decayed EMA counts). A single
     /// dominant entry signals the head COLLAPSING to one operator — the erosion failure mode. Surfaced here because
     /// these counts were exposed on the model but read by NOTHING; they only mean something during training.</summary>

@@ -345,6 +345,53 @@ public sealed partial class GenesisInferenceEngine
                 ds.DisruptCueRelation(t, anchor);
     }
 
+    /// <summary>SELF-HEAL an OP MISSELECTION — the op-selection-stage sibling of <see cref="HealMisroutedCue"/>, gated by
+    /// the SAME <see cref="SelfHealMisroutedCues"/> flag. The capability (the homomorphism) is sound; the failure is the
+    /// router picking the WRONG arithmetic op because a cue token was mis-learned to a wrong ∘op anchor ("add"→∘sub).
+    /// On a value-WRONG probe that DID compute a number (DecisionPath "field-compute"), derive the correct op STRUCTURALLY
+    /// — try the four ops on the operands and see which reproduces the TRUE answer — with NO operator-word list and NO
+    /// special-cased op pair. If a query cue token RESOLVES (by its learned ∘op relation) to a DIFFERENT op than the one
+    /// arithmetic says is correct, that cue was misresolved: DROP its wrong cue→∘op edge (<see
+    /// cref="DialecticalSpace.DisruptCueRelation"/>, as op resolution reads the TOP relation) and REINFORCE the correct
+    /// ∘op for that cue (the LearnArithmeticCue-style positive) so the right op wins next time. A genuinely-correct cue
+    /// (already resolves to the correct op) is left untouched, and the explicit infix-operator path is hardcoded — no
+    /// learned edge to heal — so it is out of scope. EXTENSIBLE in spirit: "a different selector would have produced the
+    /// truth → disrupt the wrong selector, reinforce the right one"; arithmetic-op is the concrete proof.</summary>
+    public void HealMisselectedOp(string query, IReadOnlyList<string> allowed, string output, string decisionPath)
+    {
+        if (!SelfHealMisroutedCues || _memory is not DialecticalSpace ds) return;
+        if (string.IsNullOrWhiteSpace(query) || allowed is not { Count: > 0 }) return;
+        if (decisionPath != "field-compute") return; // ONLY the numeric arithmetic route (it computed a number, just wrong)
+
+        var inv = CultureInfo.InvariantCulture;
+        const NumberStyles ns = NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint;
+        var merged = SignMerge(TokenizeField(query));
+        // EXPLICIT infix operator ("3 - 1", "plus") → the op came from the hardcoded TryOpToken path (EvalPrecedence),
+        // not a learned cue. A hardcoded mapping cannot be "misselected by learning" and there is no cue→∘op edge to
+        // disrupt — out of scope (mirrors LearnArithmeticCue, which likewise skips explicit-operator examples).
+        if (merged.Any(t => TryOpToken(t, out _))) return;
+        var nums = merged.Where(t => double.TryParse(t, ns, inv, out _)).Select(t => double.Parse(t, ns, inv)).ToList();
+        if (nums.Count != 2) return;                                          // the clean binary cue-fold case
+        if (!double.TryParse(allowed[0].Trim(), ns, inv, out var truth)) return; // a non-number truth ⇒ not an op misselect
+
+        // DERIVE the CORRECT op from arithmetic itself — try the four ops on the operands, keep the one(s) that hit the
+        // truth EXACTLY. No operator-word list; the op is read off the homomorphism. Heal only when the truth is
+        // UNIQUELY one op of these operands (e.g. add≡sub when b=0 is ambiguous → leave it, can't name the right op).
+        var correct = OpAnchors.Where(a => Math.Abs(FieldStep(nums[0], a.Op, nums[1]) - truth) < 1e-6).ToList();
+        if (correct.Count != 1) return;
+        var correctOp = correct[0].Op;
+        var correctAnchor = correct[0].Anchor;
+
+        // Any query cue token that RESOLVES to a DIFFERENT op than the truth-op is the misselected selector (a token that
+        // already resolves to the correct op is genuine — left untouched). DROP its wrong edge + reinforce the right ∘op.
+        foreach (var t in merged)
+        {
+            if (IsNumericLike(t) || !ResolveLearnedOp(ds, t, out var resolved) || resolved == correctOp) continue;
+            ds.DisruptCueRelation(t, OpAnchors.First(a => a.Op == resolved).Anchor);   // unlearn the wrong cue→∘op edge
+            ds.FineEditFromExample(new[] { t }, new[] { correctAnchor }, isNegativeExample: false); // reinforce the right one
+        }
+    }
+
     private enum AnswerKind { Empty, Number, NumberWord, Word, Other }
 
     // STRUCTURAL type of an answer string (no word lists): a single digit ⇒ Number; an all-letters run the number-word

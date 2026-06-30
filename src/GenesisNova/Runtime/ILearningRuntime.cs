@@ -21,6 +21,7 @@ public interface ILearningRuntime
     void DisruptWrongAnswer(string query, string output);
     void TrainRetrievalToward(string query, IReadOnlyList<string> allowedAnswers);
     void HealMisroutedCue(string query, IReadOnlyList<string> allowedAnswers, string output, string decisionPath);
+    void HealMisselectedOp(string query, IReadOnlyList<string> allowedAnswers, string output, string decisionPath);
 
     IReadOnlyList<long> OpClassBalance { get; }
 }

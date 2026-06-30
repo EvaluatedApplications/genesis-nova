@@ -237,4 +237,117 @@ public sealed class SelfHealMisroutedCueTests
         Assert.Equal("field-predicate", still.DecisionPath);
         Assert.Equal("greater", still.Output.Trim());
     }
+
+    // ─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+    // OP-SELECTION SELF-HEAL — the SAME structural self-correction at the OP-selection stage. The capability (the
+    // homomorphism) is sound; the router just picked the wrong arithmetic op because a cue token was mis-learned to the
+    // wrong ∘op anchor. HealMisselectedOp derives the correct op STRUCTURALLY (try the four ops on the operands, keep
+    // the one that hits the truth — NO operator-word list, NO special-cased op pair), drops the wrong cue→∘op edge, and
+    // reinforces the right ∘op. Proven for TWO different op pairs (add/sub AND mul/div) so it's general, not hardcoded.
+    // ─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+    private static GenesisInferenceEngine OpEngine(out DialecticalSpace space, int seed, bool selfHeal)
+    {
+        var config = new GenesisNovaConfig(HiddenSize: ProductionDims.HiddenSize);
+        space = new DialecticalSpace(config.FaceDimension, seed: seed);
+        return new GenesisInferenceEngine(new WhitespaceGenesisTokenizer(), new GenesisNeuralModel(config), space, null)
+        {
+            ConsciousField = true,
+            LearnedCuesOnly = true,
+            SelfHealMisroutedCues = selfHeal,
+        };
+    }
+
+    // Mis-teach a LEARNED op cue to the WRONG op, then drive the focused-training self-heal loop and assert the cue is
+    // corrected so the query computes again. Parameterised over the (cue, right-op, wrong-op) so ONE proof covers
+    // add←/sub AND mul←/div — the same path, no per-pair code.
+    private void ProveOpHeal(int seed, string cue, string wrongAnchor,
+        (int A, int B)[] pairs, Func<int, int, int> right, Func<int, int, int> wrong)
+    {
+        var eng = OpEngine(out var space, seed, selfHeal: true);
+
+        // THE MISLEARNING: the cue resolves to the WRONG op (corpus contamination / a confused early lesson).
+        for (var i = 0; i < 4; i++) space.FineEditFromExample(new[] { cue }, new[] { wrongAnchor }, isNegativeExample: false);
+
+        // REPRODUCE THE MISSELECTION: "a <cue> b" computes with the wrong op (a number, just the wrong one).
+        var (qa, qb) = pairs[0];
+        var before = eng.Generate(new GenerationRequest($"{qa} {cue} {qb}", 4));
+        _out.WriteLine($"before: '{qa} {cue} {qb}' path={before.DecisionPath} -> '{before.Output.Trim()}' (wrong={wrong(qa, qb)}, right={right(qa, qb)})");
+        Assert.Equal("field-compute", before.DecisionPath);
+        Assert.Equal(wrong(qa, qb), (int)double.Parse(before.Output.Trim(), NumberStyles.Float, Inv));
+
+        // FOCUSED TRAINING: predict each probe; on a value-WRONG answer feed the op self-heal signal. The correct op is
+        // derived from operands→truth; the wrong cue→∘op edge is dropped and the right ∘op reinforced.
+        for (var pass = 0; pass < 4; pass++)
+            foreach (var (a, b) in pairs)
+            {
+                var truth = right(a, b).ToString(Inv);
+                var r = eng.Generate(new GenerationRequest($"{a} {cue} {b}", 4));
+                if (r.Output.Trim() != truth)
+                    eng.HealMisselectedOp($"{a} {cue} {b}", new[] { truth }, r.Output, r.DecisionPath);
+            }
+
+        // HEALED: the cue now selects the RIGHT op and the query computes correctly.
+        var after = eng.Generate(new GenerationRequest($"{qa} {cue} {qb}", 4));
+        _out.WriteLine($"after:  '{qa} {cue} {qb}' path={after.DecisionPath} -> '{after.Output.Trim()}'");
+        Assert.Equal("field-compute", after.DecisionPath);
+        Assert.Equal(right(qa, qb), (int)double.Parse(after.Output.Trim(), NumberStyles.Float, Inv));
+    }
+
+    [Fact]
+    public void OpSelfHeal_AddMislearnedAsSub_HealsBackToAdd()
+        => ProveOpHeal(seed: 21, cue: "addup", wrongAnchor: "∘sub",
+            pairs: new[] { (12, 5), (9, 4), (15, 6), (8, 3), (20, 7), (11, 2) }, right: (a, b) => a + b, wrong: (a, b) => a - b);
+
+    [Fact] // DIFFERENT op pair — proves the mechanism is general, not hardcoded to add/sub.
+    public void OpSelfHeal_MulMislearnedAsDiv_HealsBackToMul()
+        => ProveOpHeal(seed: 22, cue: "scaleby", wrongAnchor: "∘div",
+            pairs: new[] { (6, 2), (8, 4), (12, 3), (10, 5), (9, 3), (14, 2) }, right: (a, b) => a * b, wrong: (a, b) => a / b);
+
+    [Fact] // SURGICAL: a GENUINELY-CORRECT learned op cue answers right, so the heal disrupts NOTHING (only wrong probes heal).
+    public void OpSelfHeal_GenuineOpCue_NotDisrupted()
+    {
+        var eng = OpEngine(out var space, seed: 23, selfHeal: true);
+        for (var i = 0; i < 4; i++) space.FineEditFromExample(new[] { "diff" }, new[] { "∘sub" }, isNegativeExample: false); // CORRECT cue
+
+        // "diff" genuinely means subtract: every probe is value-correct, so the module never calls heal (and even if it
+        // did, the cue resolves to the correct op → skipped). Drive the same loop and assert it keeps computing right.
+        var pairs = new[] { (12, 5), (9, 4), (15, 6), (8, 3) };
+        for (var pass = 0; pass < 4; pass++)
+            foreach (var (a, b) in pairs)
+            {
+                var truth = (a - b).ToString(Inv);
+                var r = eng.Generate(new GenerationRequest($"{a} diff {b}", 4));
+                if (r.Output.Trim() != truth) eng.HealMisselectedOp($"{a} diff {b}", new[] { truth }, r.Output, r.DecisionPath);
+            }
+
+        var ok = eng.Generate(new GenerationRequest("12 diff 5", 4));
+        _out.WriteLine($"genuine: '12 diff 5' path={ok.DecisionPath} -> '{ok.Output.Trim()}'");
+        Assert.Equal("field-compute", ok.DecisionPath);
+        Assert.Equal(7, (int)double.Parse(ok.Output.Trim(), NumberStyles.Float, Inv));
+    }
+
+    [Fact] // GATE-OFF: identical setup with the flag off → the misselection PERSISTS (proves the feature is load-bearing).
+    public void OpSelfHeal_Default_Off_MisselectionPersists()
+    {
+        var eng = OpEngine(out var space, seed: 21, selfHeal: false); // gate OFF
+        for (var i = 0; i < 4; i++) space.FineEditFromExample(new[] { "addup" }, new[] { "∘sub" }, isNegativeExample: false);
+
+        Assert.Equal(7, (int)double.Parse(eng.Generate(new GenerationRequest("12 addup 5", 4)).Output.Trim(), NumberStyles.Float, Inv)); // 12-5
+
+        var pairs = new[] { (12, 5), (9, 4), (15, 6), (8, 3), (20, 7), (11, 2) };
+        for (var pass = 0; pass < 4; pass++)
+            foreach (var (a, b) in pairs)
+            {
+                var truth = (a + b).ToString(Inv);
+                var r = eng.Generate(new GenerationRequest($"{a} addup {b}", 4));
+                if (r.Output.Trim() != truth) eng.HealMisselectedOp($"{a} addup {b}", new[] { truth }, r.Output, r.DecisionPath);
+            }
+
+        // With the gate off HealMisselectedOp is a no-op → "addup" still resolves to subtract → still computes 12-5=7.
+        var still = eng.Generate(new GenerationRequest("12 addup 5", 4));
+        _out.WriteLine($"gate-off after loop: '12 addup 5' path={still.DecisionPath} -> '{still.Output.Trim()}'");
+        Assert.Equal("field-compute", still.DecisionPath);
+        Assert.Equal(7, (int)double.Parse(still.Output.Trim(), NumberStyles.Float, Inv));
+    }
 }

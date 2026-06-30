@@ -1163,6 +1163,14 @@ public sealed partial class GenesisInferenceEngine
     /// confidently resolve, so the caller FALLS THROUGH to the one-shot reason (never regressing the clear cases).</summary>
     public Func<string, NavCue, double[]?, double[]?, (string Answer, double Confidence, bool Ok)>? NavigatorDisambiguator { get; set; }
 
+    /// <summary>NAVIGATOR LEVEL GOAL-REGIONS (M4 multi-hop fix). Indexed by <see cref="NavCue"/> (Genus=0/Domain=1/Root=2):
+    /// the LEARNED prototype/centroid face of the concepts at that abstraction LEVEL, derived from the live relation
+    /// graph's DEPTH (NO hardcoding — see <c>GenesisEvalAppRuntime.EnsureLevelRegions</c>). The runtime assigns this array
+    /// (by reference, refreshed each training cycle) so a LEVEL query with no named category-hub still descends toward a
+    /// GOAL region across hops — the unified goal channel that breaks the multi-hop landing ceiling. Null/absent entries
+    /// ⇒ no level goal (the walk is the M1 query-only walk for that cue, byte-identical).</summary>
+    public double[]?[]? NavLevelGoalRegions { get; set; }
+
     // CUE MAPPING (M1.1 — LEARNED, replacing the English keyword stand-in). The navigator's target ABSTRACTION LEVEL
     // (genus / domain / root) is resolved from the query tokens by the LEARNED level cue (∘gns/∘dom/∘rut, taught by
     // LearnNavLevelCue from the answer's GRAPH DEPTH — no word list, no English keywords). The highest-confidence
@@ -1205,6 +1213,18 @@ public sealed partial class GenesisInferenceEngine
     // A category must have at least this many members (relational degree) to count as a navigable KIND — keeps a random
     // low-degree content word from being mistaken for a target kind (the substrate's "is this a hub" floor).
     private const int NavKindMinDegree = 3;
+
+    // The learned goal-REGION centroid for a level cue (M4), or null when no region is registered for it. A clone so the
+    // engine's caller can't mutate the runtime's cached region array.
+    private double[]? LevelGoal(NavCue cue)
+    {
+        var regions = NavLevelGoalRegions;
+        if (regions is null) return null;
+        var i = (int)cue;
+        if (i < 0 || i >= regions.Length) return null;
+        var r = regions[i];
+        return r is { Length: > 0 } ? (double[])r.Clone() : null;
+    }
 
     // ── RELAX: recall what the mind HOLDS about the subject. RELATION-FIRST (follow the explicit association — robust
     //    to hub dilution at scale, where a populous category's distributional cloud washes out a member's signal),
@@ -1287,7 +1307,11 @@ public sealed partial class GenesisInferenceEngine
             // the specific member, not the category hub. A kind-free query keeps the LEARNED level cue (M1).
             var navKind = DeriveNavKind(ds, toks, subject);
             var navCue = navKind is null ? DeriveNavCue(toks) : NavCue.Genus;
-            var (navAns, navConf, navOk) = NavigatorDisambiguator(subject, navCue, _selfField, navKind);
+            // UNIFIED GOAL (M4): a named category-hub (composition) OR — for a kind-free LEVEL query — the learned per-level
+            // goal-REGION centroid, so the walk descends toward the right abstraction region across MULTIPLE hops instead
+            // of stalling at one. Null ⇒ the M1 query-only walk (byte-identical) for that cue.
+            var navGoal = navKind ?? LevelGoal(navCue);
+            var (navAns, navConf, navOk) = NavigatorDisambiguator(subject, navCue, _selfField, navGoal);
             if (navOk && !Bad(navAns) && ds.ContainsConcept(navAns))
             {
                 Attend();

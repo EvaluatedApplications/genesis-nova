@@ -96,8 +96,14 @@ the old way — **the navigator is a trained passenger, not the driver.**
   default (`NAVM4_CYCLES`, default 6, ~2 min): the held-out **resolve% curve CLEARLY CLIMBS** (~67–77% cold → ~95–100%
   warm — the policy learns to confidently halt on members it never trained on), held-out **GENUS (1-hop) generalization
   ≥20–30%**, and the **cue self-teaches** through the curriculum's frames (∘gns/∘dom/∘rut relations form, novel phrasing
-  generalizes). **HONEST GAPS:** (a) the query-conditioned navigator's multi-hop (domain/root) LANDING does not yet
-  generalize to fully-novel anchors in a short run (~0%) — the documented structural multi-hop ceiling; (b) the gym's
+  generalizes). **CEILING BROKEN (2026-06-30, see `[[nova-navigator-multihop-broken]]`):** held-out DOMAIN/ROOT
+  (multi-hop) LANDING to FULLY-NOVEL anchors went **0% → 100%** (peak; `NAVMH_CYCLES=8`, `WithProductionMechanisms`,
+  navigator 1024/2048, 30 held-out queries never trained), genus 1-hop 0%→100% (no regression). FIX = a LEARNED per-level
+  goal-REGION centroid (from graph DEPTH — climb each leaf's is-a chain, centroid the genus/domain/root nodes, no word
+  list) fed through the UNIFIED goal channel (M2 `_kindEnc` generalized: the `cand−goal` feature descent + the W_k
+  seed/halt bias). Null goal = byte-identical M1/M2. `Tests/NavigatorMultiHopCeiling.cs` [SlowFact], per-cue curve via
+  `EvaluateNavigatorHeldOutPerCue`; CAVEAT: 100% is on the clean uniform-depth taxonomy — the architecture is the
+  contribution. **HONEST GAPS:** (a) ~~multi-hop LANDING~~ DONE; (b) the gym's
   production observe path (discriminative-coupling + distractor REPULSION) writes weak edges + drifts the taxonomy clouds,
   which destabilises the navigator's substrate — FIXED the LABEL side (the is-a climb now follows STRONG relations only:
   `DialecticalSpace.StrongRelationDegree`, `ClimbAncestors`/`ClimbRelationAncestors`), and the curriculum RE-ASSERTS its

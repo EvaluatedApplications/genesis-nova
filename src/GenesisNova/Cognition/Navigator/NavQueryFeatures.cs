@@ -47,15 +47,22 @@ public static class NavQueryFeatures
     public static int FeatureLength(int dim) => NavFeatures.FeatureLength(dim);
 
     /// <summary>
-    /// Enumerate the K relational candidates of <paramref name="cur"/> and build their differential rows against the
-    /// ANSWER-FREE <paramref name="anchorFace"/> and <paramref name="curFace"/> — i.e. [cand−anchor, cand−cur, cand, κ].
-    /// No reference to the answer coordinate anywhere.
+    /// Enumerate the K relational candidates of <paramref name="cur"/> and build their differential rows against a
+    /// reference for the FIRST block and <paramref name="curFace"/> — i.e. [cand−REF, cand−cur, cand, κ]. The reference
+    /// is the GOAL face when one is supplied (the unified goal channel, M2+M4): the category-hub face for a COMPOSITION
+    /// query, or the learned per-LEVEL goal-REGION centroid for a level walk — so the first block becomes the explicit
+    /// <c>cand − goal</c> DESCENT signal that lets a multi-hop walk close the gap toward the right region across hops. A
+    /// NULL goal falls back to the answer-free <paramref name="anchorFace"/> (block = cand−anchor) — EXACTLY the original
+    /// M1 query-only layout, so the no-goal path stays byte-identical. The answer is never referenced; the goal is a
+    /// region/kind the walker KNOWS from the question, not the specific answer coordinate.
     /// </summary>
-    public static NavObservation Build(DialecticalSpace space, string cur, double[] curFace, double[] anchorFace, int k, double minConfidence)
+    public static NavObservation Build(DialecticalSpace space, string cur, double[] curFace, double[] anchorFace, int k, double minConfidence, double[]? goalFace = null)
     {
         ArgumentNullException.ThrowIfNull(anchorFace);
-        // The math is identical to the goal-conditioned builder with anchorFace in place of goalFace; reuse it so the
-        // two paths share one candidate enumeration and one feature layout (no drift between train and inference).
-        return NavFeatures.Build(space, cur, curFace, anchorFace, k, minConfidence);
+        // The math is identical to the goal-conditioned builder; reuse it so the train + inference paths share one
+        // candidate enumeration and one feature layout (no drift). REF = goal when present (cand−goal descent), else
+        // anchor (cand−anchor, M1-byte-identical). The goal must match the face dim or it cannot be a per-dim reference.
+        var reference = goalFace is { Length: > 0 } && goalFace.Length == anchorFace.Length ? goalFace : anchorFace;
+        return NavFeatures.Build(space, cur, curFace, reference, k, minConfidence);
     }
 }

@@ -82,7 +82,10 @@ public static class NavQueryDaggerTrainer
             var path = OraclePath(field, member, ancestor);
             if (path.Count == 0) continue;
 
-            var steps = BuildQuerySteps(space, path, ancestor, anchorFace, field, k, minConfidence);
+            // Train the per-candidate features on the SAME goal the live walk sees (kind hub OR level region), so the
+            // cand−goal descent block matches at train + inference; null kind → cand−anchor (M1 byte-identical).
+            var goalD = kind is null ? null : ToDouble(kind);
+            var steps = BuildQuerySteps(space, path, ancestor, anchorFace, field, k, minConfidence, goalD);
             if (steps.Count > 0)
                 trajectories.Add(new NavQueryTrajectory { AnchorFace = ToFloat(anchorFace), Cue = cue, Steps = steps, Self = self, Kind = kind });
         }
@@ -121,7 +124,7 @@ public static class NavQueryDaggerTrainer
             // goalFace is a harmless dummy (the policy ignores it); goalSymbol=null → the loop relies on the net's HALT.
             var result = walk.Walk(space, member, anchorFace, null, policy, new NavWalkOptions(MaxSteps: maxSteps));
 
-            var steps = BuildQuerySteps(space, result.Trajectory, ancestor, anchorFace, field, k, minConfidence);
+            var steps = BuildQuerySteps(space, result.Trajectory, ancestor, anchorFace, field, k, minConfidence, kindD);
             if (steps.Count > 0)
                 trajectories.Add(new NavQueryTrajectory { AnchorFace = ToFloat(anchorFace), Cue = cue, Steps = steps, Self = self, Kind = kind });
         }
@@ -153,7 +156,7 @@ public static class NavQueryDaggerTrainer
     // Build the per-node decision steps along a visited path, labelling each from the cued oracle field.
     private static List<NavQueryStep> BuildQuerySteps(
         DialecticalSpace space, IReadOnlyList<string> path, string ancestor, double[] anchorFace,
-        PlatonicFlowField field, int k, double minConfidence)
+        PlatonicFlowField field, int k, double minConfidence, double[]? goalFace = null)
     {
         var dim = anchorFace.Length;
         var maxCost = field.Cost.Count == 0 ? 1.0 : field.Cost.Values.Max() + 1.0; // fallback value for off-graph strays
@@ -161,7 +164,7 @@ public static class NavQueryDaggerTrainer
         foreach (var node in path)
         {
             if (!space.TryGetConceptFace(node, out var nodeFace) || nodeFace.Length != dim) continue;
-            var obs = NavQueryFeatures.Build(space, node, nodeFace, anchorFace, k, minConfidence);
+            var obs = NavQueryFeatures.Build(space, node, nodeFace, anchorFace, k, minConfidence, goalFace);
 
             var isAncestor = string.Equals(node, ancestor, StringComparison.Ordinal);
             var targetIdx = -1;

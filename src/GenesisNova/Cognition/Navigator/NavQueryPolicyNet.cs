@@ -221,7 +221,9 @@ public sealed class QueryNavPolicy : INavPolicy, IDisposable
     private readonly double[] _anchorFace;
     private readonly int _cue;
     private readonly float[]? _selfVec; // the PERSISTENT SELF (engine SelfField) that seeds h₀; null → query-only seed
-    private readonly float[]? _kindFace; // the TARGET-KIND face (M2) — the category the answer belongs to; null → no kind bias
+    private readonly float[]? _kindFace; // the GOAL face (M2/M4) — the category-hub the answer belongs to OR the learned
+                                         // per-level goal-REGION centroid; null → no goal bias (M1 query-only walk)
+    private readonly double[]? _goalFaceD; // the SAME goal as a double[] for the per-candidate cand−goal feature descent
     private readonly int _k;
     private readonly double _minConfidence;
     private readonly double _haltThreshold;
@@ -245,11 +247,13 @@ public sealed class QueryNavPolicy : INavPolicy, IDisposable
             _selfVec = new float[selfVec.Length];
             for (var i = 0; i < selfVec.Length; i++) _selfVec[i] = (float)selfVec[i];
         }
-        // The TARGET-KIND face (M2) — full dim, must match the net's face dim; null/empty → no kind bias (M1 walk).
+        // The GOAL face (M2/M4) — full dim, must match the net's face dim; null/empty → no goal bias (M1 walk). Kept as
+        // BOTH a float[] (for the W_k seed/per-hop bias) and a double[] (for the per-candidate cand−goal feature descent).
         if (kindFace is { Length: > 0 } && kindFace.Length >= net.Dim)
         {
             _kindFace = new float[net.Dim];
-            for (var i = 0; i < net.Dim; i++) _kindFace[i] = (float)kindFace[i];
+            _goalFaceD = new double[net.Dim];
+            for (var i = 0; i < net.Dim; i++) { _kindFace[i] = (float)kindFace[i]; _goalFaceD[i] = kindFace[i]; }
         }
         _device = device ?? CPU;
         _k = k;
@@ -281,8 +285,9 @@ public sealed class QueryNavPolicy : INavPolicy, IDisposable
             ReplaceHidden(_net.SeedHidden(anchorSeed, cueT, selfT, kindT));
         }
 
-        // Answer-free egocentric observation: candidate rows are differentials against the ANCHOR, not the goal.
-        var obs = NavQueryFeatures.Build(_space, state.CurrentSymbol, state.CurrentFace, _anchorFace, _k, _minConfidence);
+        // Egocentric observation: candidate rows are differentials against the GOAL when one is supplied (the cand−goal
+        // descent — kind hub OR learned level region), else the answer-free ANCHOR (M1 byte-identical). Never the answer.
+        var obs = NavQueryFeatures.Build(_space, state.CurrentSymbol, state.CurrentFace, _anchorFace, _k, _minConfidence, _goalFaceD);
         if (obs.ValidCount == 0)
         { LastHalt = true; return new NavDecision(Array.Empty<double>(), Halt: true); } // dead end → structural abstain (§8)
 

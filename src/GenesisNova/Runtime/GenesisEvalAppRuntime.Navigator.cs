@@ -97,6 +97,112 @@ public sealed partial class GenesisEvalAppRuntime
     private int _navHeldOutEvals;                        // monotonic eval index (the held-out curve's x-axis)
     private NavHeldOutPoint _lastHeldOut = NavHeldOutPoint.Empty;
 
+    // ── LEARNED PER-LEVEL GOAL-REGIONS (M4 multi-hop fix) ─────────────────────────────────────────────────────────
+    // The prototype/centroid FACE of the concepts at each abstraction LEVEL (Genus=0/Domain=1/Root=2), derived purely
+    // from the live relation graph's DEPTH (no word list, no hardcoded taxonomy — climb each LEAF's is-a chain and pool
+    // the genus/domain/root nodes it reaches; centroid their faces). This is the GOAL a LEVEL walk descends toward across
+    // MULTIPLE hops — the missing signal that left domain/root LANDING to novel anchors at the ~0% structural ceiling.
+    // Refreshed each training cycle + before each held-out eval (the graph grows); shared BY REFERENCE with the engine
+    // (Inference.NavLevelGoalRegions) so the live PredictAsync ambiguous branch uses the same regions training learns on.
+    private readonly double[]?[] _navLevelRegions = new double[NavQueryFeatures.CueCount][];
+    private bool _navRegionsWired;
+    private const int NavRegionMaxLeaves = 4000; // bound the per-cycle leaf climb on a large overnight space
+
+    /// <summary>The learned per-level goal-REGION centroid for <paramref name="cue"/> (a full face), recomputed from the
+    /// CURRENT live graph, or null when the space has no concept at that level yet. Public for the multi-hop ceiling
+    /// acceptance test (it conditions a held-out walk on the same region training + inference use). Gated.</summary>
+    public IReadOnlyList<double>? NavLevelRegion(NavCue cue)
+        => WithModelGate(() =>
+        {
+            if (_state.Memory is not DialecticalSpace ds) return (IReadOnlyList<double>?)null;
+            EnsureLevelRegions(ds);
+            var i = (int)cue;
+            return (IReadOnlyList<double>?)(i >= 0 && i < _navLevelRegions.Length ? _navLevelRegions[i] : null);
+        });
+
+    /// <summary>Recompute the per-level goal-regions from the live relation graph and publish them to the engine (M4).
+    /// CHEAP (bounded leaf climb over a small taxonomy); refreshed each training cycle + before each held-out read so the
+    /// regions track the growing graph. Derivation is hardcoding-free: a concept's LEVEL comes from where it sits in a
+    /// LEAF's degree-climb chain (immediate parent ⇒ Genus, 2-hop ⇒ Domain, top ⇒ Root — the same depth signal M1's
+    /// LearnNavLevelCue uses). Climbing ONLY from leaves keeps a genus node (e.g. "mammal") out of the Domain pool.</summary>
+    private void EnsureLevelRegions(DialecticalSpace ds)
+    {
+        if (!_navRegionsWired) { _state.Inference.NavLevelGoalRegions = _navLevelRegions; _navRegionsWired = true; }
+
+        var genus = new HashSet<string>(StringComparer.Ordinal);
+        var domain = new HashSet<string>(StringComparer.Ordinal);
+        var root = new HashSet<string>(StringComparer.Ordinal);
+        var leaves = 0;
+        foreach (var c in ds.ActiveConcepts)
+        {
+            if (leaves >= NavRegionMaxLeaves) break;
+            if (string.IsNullOrWhiteSpace(c) || double.TryParse(c, out _)) continue;
+            if (!IsTaxonomyLeaf(ds, c)) continue;
+            leaves++;
+            var chain = ClimbAncestors(ds, c);
+            if (chain.Count >= 1) genus.Add(chain[0]);
+            if (chain.Count >= 2) { domain.Add(chain[1]); root.Add(chain[^1]); }
+        }
+        _navLevelRegions[(int)NavCue.Genus] = Centroid(ds, genus);
+        _navLevelRegions[(int)NavCue.Domain] = Centroid(ds, domain);
+        _navLevelRegions[(int)NavCue.Root] = Centroid(ds, root);
+    }
+
+    // A concept is a TAXONOMY LEAF iff it has at least one strong relation but NO strictly-more-specific strong neighbour
+    // (no neighbour of lower strong-degree) — i.e. nothing is-a it. Categories are relational HUBS (higher degree), so a
+    // leaf sits at the bottom of the degree gradient; we climb regions from leaves only so each ancestor lands at its
+    // true level (the level a real query about a leaf would ask for).
+    private static bool IsTaxonomyLeaf(DialecticalSpace ds, string c)
+    {
+        var deg = ds.StrongRelationDegree(c, NavStrongRelation);
+        if (deg == 0) return false;
+        IReadOnlyList<PlatonicNeighbor> nbrs;
+        try { nbrs = ds.GetNeighbors(c, PlatonicNeighborhoodType.Relational, 16, NavStrongRelation); }
+        catch { return false; }
+        foreach (var n in nbrs)
+        {
+            if (double.TryParse(n.Concept, out _)) continue;
+            if (ds.StrongRelationDegree(n.Concept, NavStrongRelation) < deg) return false; // a more-specific neighbour → not a leaf
+        }
+        return true;
+    }
+
+    // Centroid of a set of concepts' faces (the level's prototype), or null when none has a face. Full-dim faces only.
+    private static double[]? Centroid(DialecticalSpace ds, IEnumerable<string> nodes)
+    {
+        double[]? sum = null; var n = 0;
+        foreach (var x in nodes)
+        {
+            if (!ds.TryGetConceptFace(x, out var f) || f.Length == 0) continue;
+            sum ??= new double[f.Length];
+            if (f.Length != sum.Length) continue;
+            for (var i = 0; i < sum.Length; i++) sum[i] += f[i];
+            n++;
+        }
+        if (sum is null || n == 0) return null;
+        for (var i = 0; i < sum.Length; i++) sum[i] /= n;
+        return sum;
+    }
+
+    // The level goal-region for a cue as a float[] (the Query.Kind / QueryNavPolicy.kindFace form), or null when absent.
+    private float[]? LevelRegionFloat(NavCue cue)
+    {
+        var i = (int)cue;
+        var r = i >= 0 && i < _navLevelRegions.Length ? _navLevelRegions[i] : null;
+        if (r is not { Length: > 0 }) return null;
+        var f = new float[r.Length];
+        for (var j = 0; j < r.Length; j++) f[j] = (float)r[j];
+        return f;
+    }
+
+    // The level goal-region for a cue as a double[] (for a direct QueryNavPolicy walk), or null when absent.
+    private double[]? LevelRegionDouble(NavCue cue)
+    {
+        var i = (int)cue;
+        var r = i >= 0 && i < _navLevelRegions.Length ? _navLevelRegions[i] : null;
+        return r is { Length: > 0 } ? (double[])r.Clone() : null;
+    }
+
     /// <summary>The HELD-OUT navigator generalization curve (one point per <see cref="EvaluateNavigatorHeldOut"/> call) —
     /// the M4 acceptance series. A climbing <see cref="NavHeldOutPoint.AccuracyPct"/> over an overnight run is the proof
     /// the loop improves GENERALIZING reasoning, not just training fit. Empty until a held-out set is registered.</summary>
@@ -174,25 +280,16 @@ public sealed partial class GenesisEvalAppRuntime
         if (set.Length == 0 || _state.Memory is not DialecticalSpace ds)
             return _lastHeldOut;
 
+        try { EnsureLevelRegions(ds); } catch { } // condition the held-out walk on the SAME learned regions training uses
         var net = _state.Navigator;
         var device = net.parameters().FirstOrDefault()?.device ?? CPU; // walk on whatever device the resting net is on
-        var walk = new NavigatorWalk();
         int halted = 0, correct = 0, scored = 0;
         foreach (var q in set)
         {
-            if (!ds.TryGetConceptFace(q.Member, out var anchor)) continue;
+            if (!ds.TryGetConceptFace(q.Member, out _)) continue;
             scored++;
-            try
-            {
-                using var policy = new QueryNavPolicy(net, ds, anchor, (int)q.Cue, device, NavK, 0.0, 0.5, selfVec: null, kindFace: null);
-                var res = walk.Walk(ds, q.Member, anchor, null, policy, new NavWalkOptions(MaxSteps: NavMaxSteps));
-                if (policy.LastHalt)
-                {
-                    halted++;
-                    if (string.Equals(res.FinalSymbol, q.Ancestor, StringComparison.Ordinal)) correct++;
-                }
-            }
-            catch { /* a single bad walk must never break the held-out read */ }
+            var (h, c) = HeldOutWalk(ds, net, device, q);
+            halted += h; correct += c;
         }
         if (scored == 0) return _lastHeldOut;
 
@@ -205,6 +302,52 @@ public sealed partial class GenesisEvalAppRuntime
         }
         return point;
     }
+
+    // ONE held-out walk: condition on the cue's learned level goal-region (the unified goal channel; M4), NO self (pure
+    // policy generalization). Returns (halted, correct) as 0/1. Exception-isolated — one bad walk never breaks the read.
+    private (int Halted, int Correct) HeldOutWalk(DialecticalSpace ds, NavQueryPolicyNet net, Device device, NavHeldOutQuery q)
+    {
+        if (!ds.TryGetConceptFace(q.Member, out var anchor)) return (0, 0);
+        try
+        {
+            using var policy = new QueryNavPolicy(net, ds, anchor, (int)q.Cue, device, NavK, 0.0, 0.5,
+                selfVec: null, kindFace: LevelRegionDouble(q.Cue));
+            var res = new NavigatorWalk().Walk(ds, q.Member, anchor, null, policy, new NavWalkOptions(MaxSteps: NavMaxSteps));
+            if (!policy.LastHalt) return (0, 0);
+            return (1, string.Equals(res.FinalSymbol, q.Ancestor, StringComparison.Ordinal) ? 1 : 0);
+        }
+        catch { return (0, 0); }
+    }
+
+    /// <summary>One held-out generalization point PER CUE (Genus/Domain/Root) on the LIVE trained navigator — the honest
+    /// breakdown that shows WHETHER THE MULTI-HOP (Domain/Root) LANDING ceiling broke, not just the aggregate. Read-only,
+    /// gated, GPU-OOM-safe; conditions each walk on the cue's learned level goal-region. Empty when nothing is registered.</summary>
+    public IReadOnlyList<NavHeldOutPoint> EvaluateNavigatorHeldOutPerCue()
+        => WithModelGate(() =>
+        {
+            NavHeldOutQuery[] set;
+            lock (_navHeldOut) set = _navHeldOut.ToArray();
+            if (set.Length == 0 || _state.Memory is not DialecticalSpace ds)
+                return (IReadOnlyList<NavHeldOutPoint>)Array.Empty<NavHeldOutPoint>();
+
+            try { EnsureLevelRegions(ds); } catch { }
+            var net = _state.Navigator;
+            var device = net.parameters().FirstOrDefault()?.device ?? CPU;
+            var points = new List<NavHeldOutPoint>(NavQueryFeatures.CueCount);
+            foreach (var cue in new[] { NavCue.Genus, NavCue.Domain, NavCue.Root })
+            {
+                int halted = 0, correct = 0, scored = 0;
+                foreach (var q in set)
+                {
+                    if (q.Cue != cue || !ds.ContainsConcept(q.Member)) continue;
+                    scored++;
+                    var (h, c) = HeldOutWalk(ds, net, device, q);
+                    halted += h; correct += c;
+                }
+                if (scored > 0) points.Add(new NavHeldOutPoint((int)cue, (double)halted / scored, (double)correct / scored, scored));
+            }
+            return (IReadOnlyList<NavHeldOutPoint>)points;
+        });
 
     /// <summary>The most recent navigator-training cycle result (for a later inspect tab / diagnostics).</summary>
     public NavTrainCycleResult LastNavTrain => _lastNavTrain;
@@ -228,6 +371,10 @@ public sealed partial class GenesisEvalAppRuntime
         // there is nothing to train on there.
         if (_state.Memory is not DialecticalSpace ds)
             return _lastNavTrain = NavTrainCycleResult.Empty;
+
+        // Refresh the learned per-level goal-regions from the current graph BEFORE sampling, so the level queries train on
+        // the same goal the live walk + held-out eval condition on (the unified goal channel; M4 multi-hop fix).
+        try { EnsureLevelRegions(ds); } catch { }
 
         List<NavQueryDaggerTrainer.Query> queries;
         try { queries = SampleNavigatorQueries(ds, maxMembers); }
@@ -340,15 +487,17 @@ public sealed partial class GenesisEvalAppRuntime
             sampledMembers.Add(member);
             var chain = ClimbAncestors(ds, member);
             if (chain.Count == 0) continue;                                                   // flat below this node
-            queries.Add(new NavQueryDaggerTrainer.Query(member, (int)NavCue.Genus, chain[0])); // immediate parent = GENUS
+            // Each LEVEL query carries the learned per-level goal-REGION as its goal (M4): the per-candidate cand−goal
+            // descent + the W_k halt-bias let the DOMAIN/ROOT walks aim at the right abstraction region across multiple
+            // hops instead of stalling 1-hop — the fix for the held-out multi-hop landing ceiling. Null region (flat/cold
+            // space) ⇒ Kind null ⇒ the M1 query-only walk (byte-identical).
+            queries.Add(new NavQueryDaggerTrainer.Query(member, (int)NavCue.Genus, chain[0], Kind: LevelRegionFloat(NavCue.Genus)));
             if (chain.Count >= 2)
             {
-                queries.Add(new(member, (int)NavCue.Domain, chain[1]));                        // 2-hop ancestor = DOMAIN
+                queries.Add(new(member, (int)NavCue.Domain, chain[1], Kind: LevelRegionFloat(NavCue.Domain))); // 2-hop = DOMAIN
                 // ROOT = the TOP of the chain, emitted whenever it is ≥2 hops up — so a GENUS HUB (whose own chain is
-                // only [domain, root], length 2) ALSO gets a genus→root pair, not just leaf members (chain ≥3). This is
-                // the sampler DEEPENING (M1): TrainNavigatorCycle alone now trains the full genus→domain→root cue range,
-                // so the genus→root multi-hop ambiguous case no longer needs a focused ground-truth supplement.
-                queries.Add(new(member, (int)NavCue.Root, chain[^1]));                         // the top reached = ROOT
+                // only [domain, root], length 2) ALSO gets a genus→root pair, not just leaf members (chain ≥3).
+                queries.Add(new(member, (int)NavCue.Root, chain[^1], Kind: LevelRegionFloat(NavCue.Root)));     // the top = ROOT
             }
             added++;
         }
@@ -584,9 +733,14 @@ public sealed partial class GenesisEvalAppRuntime
         // tensors the policy builds match the net's params (no cross-device Step).
         var device = _state.Navigator.parameters().FirstOrDefault()?.device ?? CPU;
 
+        // Condition the level walk on the learned goal-region for the cue (M4 multi-hop fix) — the same goal training +
+        // held-out eval use, so a diagnostic `/nav X domain` descends toward the right region across hops.
+        try { EnsureLevelRegions(ds); } catch { }
+
         try
         {
-            using var policy = new QueryNavPolicy(_state.Navigator, ds, anchor, (int)nav, device, NavK, 0.0, 0.5, self);
+            using var policy = new QueryNavPolicy(_state.Navigator, ds, anchor, (int)nav, device, NavK, 0.0, 0.5, self,
+                kindFace: LevelRegionDouble(nav));
             var res = new NavigatorWalk().Walk(ds, anchorSym, anchor, null, policy, new NavWalkOptions(MaxSteps: NavMaxSteps));
             var reached = policy.LastHalt; // a confident halt = relaxed to an answer; no halt in the budget = structural abstain
             return new NavWalkObservation(anchorSym, nav, res.FinalSymbol, reached, self is not null, res.Trajectory,

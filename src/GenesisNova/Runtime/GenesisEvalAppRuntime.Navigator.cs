@@ -51,6 +51,7 @@ public sealed partial class GenesisEvalAppRuntime
     // Light per-cycle budget knobs — kept small so the navigator step never dominates a gym cycle.
     private const int NavSampleMembers = 8;   // leaf concepts sampled per cycle (each yields up to 3 cued queries)
     private const int NavBcEpochs = 3;        // a few gradient passes — a light step, NOT a full train
+    private const int NavDaggerRounds = 1;    // on-policy DAgger rounds after the BC warm-start (0 = pure BC)
     private const int NavEvalWalks = 6;       // on-policy probes for the resolve%/abstain% signal
     private const int NavMaxSteps = 8;        // the walk's cognitive light-cone for the probe
     private const int NavK = NavQueryDaggerTrainer.DefaultK;
@@ -112,6 +113,32 @@ public sealed partial class GenesisEvalAppRuntime
             try { net.to(CPU); } catch { }
             device = CPU;
             losses = NavQueryDaggerTrainer.TrainQuery(net, trajectories, Math.Max(1, epochs), NavLr, CPU, NavK);
+        }
+
+        // ── DAgger (Dataset Aggregation): the BC step above imitates the ORACLE's path; this trains the policy on the
+        // states IT actually reaches. Roll out the net's OWN walk, label every visited node with the oracle's correct
+        // next-step (free — one Dijkstra already covers the whole graph), aggregate with the BC set, retrain. Teaches the
+        // walker to RECOVER from its own slips instead of only replaying a perfect path. Bounded: NavDaggerRounds rounds.
+        var aggregate = new List<NavQueryTrajectory>(trajectories);
+        for (var round = 0; round < NavDaggerRounds; round++)
+        {
+            try
+            {
+                var rollouts = NavQueryDaggerTrainer.RolloutQueryTrajectories(net, ds, queries, device, NavMaxSteps, NavK);
+                if (rollouts.Count == 0) break;
+                aggregate.AddRange(rollouts);
+                losses = NavQueryDaggerTrainer.TrainQuery(net, aggregate, Math.Max(1, epochs), NavLr, device, NavK);
+            }
+            catch (Exception ex) when (device.type == DeviceType.CUDA && IsGpuMemoryError(ex))
+            {
+                Console.WriteLine($"[nav] DAgger CUDA alloc failed — CPU for this round: {ex.Message}");
+                try { net.to(CPU); } catch { }
+                device = CPU;
+                var rollouts = NavQueryDaggerTrainer.RolloutQueryTrajectories(net, ds, queries, device, NavMaxSteps, NavK);
+                if (rollouts.Count == 0) break;
+                aggregate.AddRange(rollouts);
+                losses = NavQueryDaggerTrainer.TrainQuery(net, aggregate, Math.Max(1, epochs), NavLr, CPU, NavK);
+            }
         }
 
         // Cheap on-policy probe + the vital loop: do the freshly-trained queries RESOLVE, and fold every traversed

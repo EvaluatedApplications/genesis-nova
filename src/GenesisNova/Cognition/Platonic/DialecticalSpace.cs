@@ -88,6 +88,18 @@ public sealed class DialecticalSpace : IPlatonicSpace
     // (and is language-agnostic — a CJK char is its own atom, a Latin word breaks down only where it earns its keep), rather
     // than eagerly fixed at single chars. This is the first brick of the genesis create→decompose→select→store loop.
     public bool GenerativeAtoms { get; set; }
+
+    // DECODE-FROM-THE-VOID RECOVERY (gated, default OFF = byte-identical). When ON, an evicted / latent / never-materialised
+    // concept is RE-MATERIALISED from its COORDINATE on demand (RecoverFromCoordinate): the frozen identity bands [0,416)
+    // are a deterministic invertible codec, so the IDENTITY survives eviction even though the learned orbital + store slot
+    // were freed (G6 via the latent address). The materialised space becomes a CACHE over the conserved decodable void —
+    // the navigator's walk (TryLand) and reasoning (Reason) decode a missing concept back when they reach its address.
+    public bool RecoverFromVoid { get; set; }
+    private const double RecoverDecodeConfidence = 0.6;  // a coordinate must decode at least this confidently to count as a
+                                                         // VALID identity worth materialising (below = between addresses / noise)
+    private const double RecoverRoundTripTolerance = 0.5; // and its recovered canonical face must re-match the input coordinate's
+                                                         // FROZEN identity [42,416) within this — the junk-rejection guard
+
     private const int MaxDecomposeGram = 4;            // longest candidate n-gram (morpheme) generated per token
     private const long DecomposeMinObservations = 3;   // only PROVEN tokens (reinforced) are decomposed — never noise
     private readonly HashSet<string> _decomposed = new(StringComparer.Ordinal); // decompose each token at most once
@@ -688,6 +700,11 @@ public sealed class DialecticalSpace : IPlatonicSpace
         if (TryDecodeCoordinate(targetFace, out kind, out symbol, out confidence)
             && confidence >= LandDecodeConfidence && !string.IsNullOrEmpty(symbol))
         {
+            // DECODE-FROM-VOID RECOVERY (gated): the foot is landing on a decodable identity with NO active element
+            // (evicted / latent). Re-materialise the conserved identity from its coordinate so the walk lands on (and
+            // re-senses from) the recovered element — not just a transient decode. Guarded: RecoverFromCoordinate
+            // materialises nothing unless the coordinate cleanly decodes to a valid identity. Default-off = byte-identical.
+            if (RecoverFromVoid && !ContainsConcept(symbol)) RecoverFromCoordinate(targetFace);
             landedFace = CanonicalFace(symbol);
             return true;
         }
@@ -729,6 +746,86 @@ public sealed class DialecticalSpace : IPlatonicSpace
         var e = GetOrCreateConcept(symbol);
         e.LastSeenStep = _observeStep; // bump recency — kept by decay only if the walk keeps re-touching it
         return e;
+    }
+
+    /// <summary>
+    /// DECODE-FROM-THE-VOID RECOVERY (gated by <see cref="RecoverFromVoid"/>; G6 via the latent address). Re-materialise an
+    /// EVICTED / LATENT / never-materialised concept from its COORDINATE alone: decode the frozen identity bands to a
+    /// symbol+kind (<see cref="TryDecodeCoordinate"/>) and — only if that is a CONFIDENT, VALID, recoverable identity —
+    /// realise the element and RECONSTRUCT its orbital from KNOWN PARTS so it lands near its family (else identity-only).
+    /// The materialised space is a CACHE over the conserved decodable void: eviction freed the learned orbital + the store
+    /// slot, this decodes the identity back when the walk / retrieval reaches its address.
+    /// <para>
+    /// THE GUARD (the danger is materialising junk from a coordinate that does not cleanly decode). A "confident valid
+    /// decode" means ALL of: the decode fired with a non-empty symbol; its <b>confidence ≥ <see cref="RecoverDecodeConfidence"/></b>
+    /// (for a WORD/op the confidence IS the frozen round-trip 1/(1+frozen-distance), so this alone pins it on its address);
+    /// it is a <b>recoverable concept kind</b> — NOT a bare number and NOT a ∘-operation (both are zero-storage
+    /// void-decodable already, the codec re-derives them on demand, so materialising them would only pollute the store),
+    /// and not a reserved/op token; and a final <b>frozen round-trip</b> — the recovered element's own canonical (codec)
+    /// face must re-decode to the SAME symbol AND sit within <see cref="RecoverRoundTripTolerance"/> of the input's frozen
+    /// identity [42,416). The round-trip is what rejects a STRUCTURED noise coordinate (whose structural confidence can be
+    /// high but whose clean reconstructed structure band does not re-match the noise) — it is materialised then ROLLED
+    /// BACK. Returns the re-materialised (or already-active) element, or <c>null</c> when nothing valid decodes.
+    /// </para>
+    /// </summary>
+    public Element? RecoverFromCoordinate(double[] face)
+    {
+        if (!RecoverFromVoid || face is null || face.Length == 0 || !Core.FaceLayout.IsAddressSpace(_dim)) return null;
+        // (1) DECODE the frozen identity off the coordinate.
+        if (!TryDecodeCoordinate(face, out var kind, out var symbol, out var confidence) || string.IsNullOrEmpty(symbol))
+            return null;
+        if (confidence < RecoverDecodeConfidence) return null;
+        var key = Normalize(symbol);
+        // (2) GUARD — only a recoverable CONCEPT identity. Numbers + ∘-operations are zero-storage void-decodable already
+        //     (the codec/homomorphism re-derives them on demand), so they are never materialised into the store here.
+        if (kind == PlatonicKind.Function || FaceCodec.IsNumeric(key) || IsReservedConcept(key) || IsOperationToken(key))
+            return null;
+        // (3) ALREADY ACTIVE → nothing was evicted; hand back the live element (idempotent).
+        if (_concepts.TryGet(key, out var live) && IsRetrievable(live)) return live;
+        // (4) MATERIALISE the conserved identity (frozen bands re-derived deterministically by the codec) and RECONSTRUCT
+        //     its orbital from known parts. We remember whether it pre-existed (archived) so a junk roll-back only ever
+        //     removes something WE created.
+        var existedBefore = _concepts.TryGet(key, out _);
+        var e = GetOrCreateConcept(key);
+        ReconstructRecoveredOrbital(key, e);
+        // (5) VERIFY the round-trip on the element's OWN canonical face — the junk-rejection guard (see remarks).
+        var canonical = FullFace(key, e);
+        var roundTrips = TryDecodeCoordinate(canonical, out _, out var back, out _)
+            && string.Equals(Normalize(back), key, StringComparison.Ordinal)
+            && FrozenIdentityDistance(face, canonical) <= RecoverRoundTripTolerance;
+        if (!roundTrips)
+        {
+            if (!existedBefore) DischargeConcept(key); // materialise NOTHING from a coordinate that doesn't cleanly decode
+            return null;
+        }
+        e.LastSeenStep = _observeStep; // recency bump — kept by decay only if the walk/retrieval reinforces it
+        return e;
+    }
+
+    // Reconstruct a recovered concept's ORBITAL from its KNOWN parts so it lands near its family (the generative-atoms
+    // payoff): a multi-word whole blends its known WORD components' clouds; a single token blends its known MORPHEMES'
+    // clouds (ComposeMeaningFromKnownParts). With no known parts the orbital is left as the bare identity token (neutral).
+    private void ReconstructRecoveredOrbital(string key, Element e)
+    {
+        if (HasWhitespace(key))
+        {
+            var acc = new double[_semLen]; var n = 0;
+            foreach (var w in key.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (!_concepts.TryGet(w, out var part) || part.Archived || part.Kind == ElementKind.Atom) continue;
+                var c = CloudOf(part);
+                for (var i = 0; i < _semLen && i < c.Length; i++) acc[i] += c[i];
+                n++;
+            }
+            if (n == 0) return;
+            var dst = e.SemanticFace;
+            for (var i = 0; i < _semLen && i < dst.Length; i++) dst[i] = acc[i] / n;
+            _lattice.MarkEmbeddingsDirty();
+        }
+        else if (GenerativeAtoms && ComponentCoverage(key).Known > 0)
+        {
+            ComposeMeaningFromKnownParts(key, e);
+        }
     }
 
     // The canonical (codec) face of a decoded symbol: a realised concept carries its learned cloud; a latent symbol
@@ -1229,8 +1326,22 @@ public sealed class DialecticalSpace : IPlatonicSpace
             }
             else
             {
-                var t = FaceCodec.Token(key, _dim);
-                for (var i = 0; i < _semLen; i++) q[i] += t[i];
+                // RETRIEVAL-MISS RECOVERY (gated, conservative): the anchor has NO active element. If its FROZEN
+                // coordinate decodes to a CONFIDENT VALID identity (an evicted/latent concept), re-materialise it so we
+                // relax from its reconstructed MEANING (near its family) rather than the bare token. Guarded inside
+                // RecoverFromCoordinate (confident decode + frozen round-trip only) so a non-decoding anchor — or any
+                // number/op — falls through to the raw-token path unchanged. Default-off = byte-identical.
+                var rec = RecoverFromVoid && !FaceCodec.IsNumeric(key) ? RecoverFromCoordinate(FrozenAddressOf(key)) : null;
+                if (rec is not null)
+                {
+                    var cloud = CloudOf(rec);
+                    for (var i = 0; i < _semLen; i++) q[i] += cloud[i];
+                }
+                else
+                {
+                    var t = FaceCodec.Token(key, _dim);
+                    for (var i = 0; i < _semLen; i++) q[i] += t[i];
+                }
             }
         }
         // The reasoning is conditioned by the MIND'S SELF — a persistent meaning-space vector of what it has been

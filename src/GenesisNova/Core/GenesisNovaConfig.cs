@@ -92,7 +92,14 @@ public sealed record GenesisNovaConfig(
     // ds.Reason. false (default) ⇒ the hook is null and the ambiguous branch is byte-identical to the one-shot path
     // (so the fast suite is unaffected). ON in WithProductionMechanisms (the M1 cutover, R&D default-on); the field
     // default stays false so a bare config / the fast suite is byte-identical to the one-shot path.
-    bool NavigatorDisambiguation = false)
+    bool NavigatorDisambiguation = false,
+    // DECODE-FROM-THE-VOID RECOVERY (G6 via the latent address). When true the substrate RE-MATERIALISES an evicted /
+    // latent concept from its COORDINATE on demand (DialecticalSpace.RecoverFromCoordinate): the frozen identity bands
+    // [0,416) are a deterministic invertible codec, so the IDENTITY survives eviction even though the learned orbital +
+    // store slot were freed. The materialised space becomes a CACHE over the conserved decodable void — the navigator's
+    // walk (TryLand) and reasoning (Reason) decode a missing concept back when they reach its address, instead of missing.
+    // false (default) = the substrate misses on an evicted/latent coordinate, byte-identical. ON in WithProductionMechanisms.
+    bool DecodeFromVoidRecovery = false)
 {
     /// <summary>
     /// Platonic face (embedding) width. By default equals the GRU width (HiddenSize); when
@@ -127,6 +134,9 @@ public sealed record GenesisNovaConfig(
         NavigatorDisambiguation = true, // M1 CUTOVER — the trained navigator owns the AMBIGUOUS branch of TryFieldRelax
                                       // (multi-hop walk), gated to a CONFIDENT halt: an untrained/cold walk does not
                                       // confidently resolve → falls through to the one-shot reason (cold-safe, proven).
+        DecodeFromVoidRecovery = true, // the materialised space is a CACHE over the conserved decodable void — the walk
+                                      // (TryLand) and reasoning (Reason) DECODE + re-materialise an evicted/latent concept
+                                      // from its coordinate on demand, guarded to a confident valid decode (no junk).
         BatchedCloudGpu = true,       // PERF: GPU-batched RecomputeCloud (Cloud = A·T via index_select/index_add_ on
                                       // CUDA) replacing the scalar per-observation hot loop that was ~90% of training
                                       // CPU. Fully wired (defer+flush; every read flushes via EnsureCloudsFresh); cloud

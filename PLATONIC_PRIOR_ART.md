@@ -206,6 +206,23 @@ substrate's general primitives, with the network's classification heads bypassed
 path; the reduction logic they select is itself classifier-free.) The disclosed novelty is the ladder of abstaining
 substrate operations and the thin-controller/substrate split, independent of which selection path drives it.
 
+### 9.1 Learned navigation: reasoning as a situated walk
+
+Beyond single-shot path selection, we disclose a **learned navigator**: a thin policy network that reasons by
+**walking the substrate's relation graph step by step** to reach answers a one-shot retrieval cannot. It is consulted
+only on the **ambiguous branch** — a query with no dominant relation, where the ladder's single hop lands short — and
+otherwise falls through, cold-safe, to the existing path, so it never degrades the cases the ballpark structure
+already nails. The navigator is **query-conditioned and goal-emergent**: from a query it takes an anchor concept and a
+*learned* abstraction-level cue (genus / domain / root, derived from the answer's graph depth, with no word list) and,
+for compositional queries, a learned goal-region; it is given no goal coordinate. At each step it scores the current
+concept's relational neighbours plus a HALT action on answer-free differential features (candidate − goal, candidate −
+current, candidate, contradiction), conditioned by the persistent self-state (§10), and either steps or halts. It is
+trained by **imitation (DAgger) of a flow-field oracle** — a backward-Dijkstra cost/next field over the relation graph
+yielding globally optimal next-steps to a goal — so the walk learns to route around locally-near distractors toward a
+multi-hop answer, the lookahead a greedy heuristic lacks. The result is multi-hop reasoning (cross-relation
+composition; climbing to a queried abstraction level) reached by a *learned walk* where the ladder's one-hop retrieval
+structurally cannot — the last-mile mechanism that lifts the ambiguous cases the heuristic ceiling leaves wrong.
+
 ## 10. Persistent self-state (disclosed component)
 
 We disclose a **persistent self-state** that is held in the substrate's own meaning-space (the large relational

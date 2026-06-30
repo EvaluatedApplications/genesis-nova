@@ -24,7 +24,9 @@ frozen faces, meaning as a distributional cloud in the large face, reasoning as 
   (`FaceLayout.IsAddressSpace`): **kind `[42,48)`**, **spelling `[48,208)`**, **structure `[208,400)`**, **op
   `[400,416)`** — the frozen, invertible identity **codec `[0,416)`** — plus a learned **orbital** tail `[416,dim)`
   (the meaning cloud). (Below dim 512 the legacy layout applies: char `[42,202)` / word `[202,dim)`.) Identity dims are
-  frozen (numbers are ground truth); the orbital/free dims learn.
+  frozen (numbers are ground truth); the orbital/free dims learn. NB **two distinct widths**: this is the **substrate
+  face** width (`FaceDimension`, 1024 in production); the **GRU controller** width (`HiddenSize`) is separate — 512
+  default / 2048 in the app — and the two are decoupled (the model has no face-dim-sized params).
 - **Exact arithmetic rides the homomorphism**: `poly(a)+poly(b)=poly(a+b)`, `log(a)+log(b)=log(a·b)`,
   computed in the geometry, exact, generalizes to unseen operands, no stored facts (log face has no 0).
 - **Relations are positioned elements** (centroid of endpoints, strength `1−contradiction`); learned

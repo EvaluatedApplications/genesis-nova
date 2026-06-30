@@ -123,7 +123,7 @@ public sealed class GenesisRuntimeState
             return;
         }
         var net = Navigator;
-        Inference.NavigatorDisambiguator = (anchor, cue, self) =>
+        Inference.NavigatorDisambiguator = (anchor, cue, self, kindFace) =>
         {
             if (string.IsNullOrWhiteSpace(anchor) || !ds.TryGetConceptFace(anchor, out var anchorFace))
                 return (string.Empty, 0.0, false);
@@ -131,7 +131,7 @@ public sealed class GenesisRuntimeState
             try
             {
                 using var policy = new QueryNavPolicy(net, ds, anchorFace, (int)cue, device,
-                    NavQueryDaggerTrainer.DefaultK, minConfidence: 0.0, haltThreshold: 0.5, selfVec: self);
+                    NavQueryDaggerTrainer.DefaultK, minConfidence: 0.0, haltThreshold: 0.5, selfVec: self, kindFace: kindFace);
                 var res = new NavigatorWalk().Walk(ds, anchor, anchorFace, goalSymbol: null, policy,
                     new NavWalkOptions(MaxSteps: 8));
                 // A CONFIDENT halt (the learned halt head fired) on a concept OTHER than the start = the query relaxed

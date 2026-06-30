@@ -39,6 +39,9 @@ public sealed class NavQueryPolicyNet : Module
     private readonly Modules.Linear _ctxEnc;     // (cur − anchor) displacement context → embedding
     private readonly Modules.Linear _h0Enc;      // anchor face → seed hidden h₀
     private readonly Modules.Linear _selfEnc;    // W_s: the PERSISTENT SELF (meaning-space vector) → seed hidden bias
+    private readonly Modules.Linear _kindEnc;    // W_k (M2): the TARGET-KIND face (the category the answer belongs to) →
+                                                 // seed/per-hop bias. Goal-EMERGENT: the walk knows the KIND it seeks, not
+                                                 // the answer. Null kind ⇒ adds EXACTLY zero (no bias) ⇒ M1-byte-identical.
     private readonly Modules.Embedding _cueEmb;  // learned cue embedding over {GENUS, DOMAIN, ROOT}
     private readonly Modules.Linear _gx;          // GRU input transform: [summ, ctx, cue] = 3H → 3·Hidden (r,z,n gates)
     private readonly Modules.Linear _gh;          // GRU hidden transform → 3·Hidden
@@ -79,6 +82,7 @@ public sealed class NavQueryPolicyNet : Module
         _ctxEnc = Linear(dim, hidden);
         _h0Enc = Linear(dim, hidden);
         _selfEnc = Linear(SelfLength, hidden, hasBias: false); // no bias → a null/zero self adds EXACTLY zero to the seed
+        _kindEnc = Linear(dim, hidden, hasBias: false);        // no bias → a null/zero kind adds EXACTLY zero (M1-identical)
         _cueEmb = Embedding(cueCount, hidden);
         _gx = Linear(3 * hidden, 3 * hidden); // GRU input = concat[obsSummary(H), ctxEmb(H), cue(H)] = 3H
         _gh = Linear(hidden, 3 * hidden);
@@ -99,10 +103,11 @@ public sealed class NavQueryPolicyNet : Module
     /// [B, dim]; <paramref name="cueIdx"/> = [B] long; <paramref name="selfVec"/> = [B, SelfLength] the engine's
     /// accumulated <c>SelfField</c> (null/empty → the self term vanishes and this reduces EXACTLY to the query-only
     /// seed). The self biases the AMBIGUOUS fork — exactly as it conditions <c>ds.Reason</c> in the field today.</summary>
-    public Tensor SeedHidden(Tensor anchor, Tensor cueIdx, Tensor? selfVec = null)
+    public Tensor SeedHidden(Tensor anchor, Tensor cueIdx, Tensor? selfVec = null, Tensor? kindFace = null)
     {
         var pre = _h0Enc.forward(anchor) + CueVector(cueIdx);
         if (selfVec is not null) pre = pre + _selfEnc.forward(selfVec); // W_s·self — the persistent self tilts the seed
+        if (kindFace is not null) pre = pre + _kindEnc.forward(kindFace); // W_k·kind (M2) — orient the seed toward the sought KIND
         return tanh(pre);
     }
 
@@ -114,7 +119,7 @@ public sealed class NavQueryPolicyNet : Module
     /// (padding −∞), halt logit [B, 1], value [B, 1], next self [B, Hidden].
     /// </summary>
     public (Tensor candLogits, Tensor haltLogit, Tensor value, Tensor hNext) Step(
-        Tensor features, Tensor mask, Tensor context, Tensor cueIdx, Tensor h, Tensor? selfVec = null)
+        Tensor features, Tensor mask, Tensor context, Tensor cueIdx, Tensor h, Tensor? selfVec = null, Tensor? kindFace = null)
     {
         var candEmb = functional.relu(_candEnc.forward(features));      // [B, K, H]
 
@@ -123,9 +128,11 @@ public sealed class NavQueryPolicyNet : Module
         var ctx = functional.relu(_ctxEnc.forward(context));           // [B, H]
         // The persistent question-tension. The SELF rides the SAME un-saturated channel as the cue, mixed in every hop
         // (the seed alone is tanh-saturated by the cue, so W_s gets no gradient there) — W_s·self + cueEmb. Null self →
-        // exactly the cue (byte-identical to the query-only navigator).
+        // exactly the cue (byte-identical to the query-only navigator). The TARGET-KIND (M2) rides the same channel, so
+        // the halt/value heads (which read this cue channel) learn "resolved for THIS kind" with no new head wiring.
         var cue = CueVector(cueIdx);                                    // [B, H]
         if (selfVec is not null) cue = cue + _selfEnc.forward(selfVec); // the self conditions the walk, exactly per hop
+        if (kindFace is not null) cue = cue + _kindEnc.forward(kindFace); // W_k·kind — the sought KIND conditions every hop + halt
 
         // GRU cell: thread the self with the new observation AND the cue⊕self.
         var hNext = GruCell(cat(new[] { summ, ctx, cue }, dim: 1), h);  // input 3H → [B, H]
@@ -214,6 +221,7 @@ public sealed class QueryNavPolicy : INavPolicy, IDisposable
     private readonly double[] _anchorFace;
     private readonly int _cue;
     private readonly float[]? _selfVec; // the PERSISTENT SELF (engine SelfField) that seeds h₀; null → query-only seed
+    private readonly float[]? _kindFace; // the TARGET-KIND face (M2) — the category the answer belongs to; null → no kind bias
     private readonly int _k;
     private readonly double _minConfidence;
     private readonly double _haltThreshold;
@@ -224,7 +232,8 @@ public sealed class QueryNavPolicy : INavPolicy, IDisposable
     public bool LastHalt { get; private set; }
 
     public QueryNavPolicy(NavQueryPolicyNet net, DialecticalSpace space, double[] anchorFace, int cue,
-        Device? device = null, int k = 16, double minConfidence = 0.0, double haltThreshold = 0.5, double[]? selfVec = null)
+        Device? device = null, int k = 16, double minConfidence = 0.0, double haltThreshold = 0.5, double[]? selfVec = null,
+        double[]? kindFace = null)
     {
         _net = net ?? throw new ArgumentNullException(nameof(net));
         _space = space ?? throw new ArgumentNullException(nameof(space));
@@ -235,6 +244,12 @@ public sealed class QueryNavPolicy : INavPolicy, IDisposable
         {
             _selfVec = new float[selfVec.Length];
             for (var i = 0; i < selfVec.Length; i++) _selfVec[i] = (float)selfVec[i];
+        }
+        // The TARGET-KIND face (M2) — full dim, must match the net's face dim; null/empty → no kind bias (M1 walk).
+        if (kindFace is { Length: > 0 } && kindFace.Length >= net.Dim)
+        {
+            _kindFace = new float[net.Dim];
+            for (var i = 0; i < net.Dim; i++) _kindFace[i] = (float)kindFace[i];
         }
         _device = device ?? CPU;
         _k = k;
@@ -255,13 +270,15 @@ public sealed class QueryNavPolicy : INavPolicy, IDisposable
         using var cueT = tensor(new long[] { _cue }, new long[] { 1 }, device: _device);
         // The PERSISTENT SELF (engine SelfField) as a tensor, reused for the seed AND every hop (null → query-only).
         using var selfT = _selfVec is null ? null : tensor(_selfVec, new long[] { 1, _selfVec.Length }, device: _device);
+        // The TARGET-KIND face (M2) as a tensor, reused for the seed AND every hop (null → no kind bias = M1 walk).
+        using var kindT = _kindFace is null ? null : tensor(_kindFace, new long[] { 1, _kindFace.Length }, device: _device);
 
         // (Re)seed the self at the start of a walk from the QUERY-CONTEXT (anchor ⊕ cue) AND the PERSISTENT SELF
-        // (W_s·SelfField — the vital loop); otherwise carry it. A null _selfVec reduces to the query-only seed.
+        // (W_s·SelfField — the vital loop) AND the TARGET-KIND (W_k·kind); otherwise carry it. Null self/kind reduce out.
         if (state.Step == 0 || _h is null)
         {
             using var anchorSeed = ToTensor(_anchorFace, dim);
-            ReplaceHidden(_net.SeedHidden(anchorSeed, cueT, selfT));
+            ReplaceHidden(_net.SeedHidden(anchorSeed, cueT, selfT, kindT));
         }
 
         // Answer-free egocentric observation: candidate rows are differentials against the ANCHOR, not the goal.
@@ -277,7 +294,7 @@ public sealed class QueryNavPolicy : INavPolicy, IDisposable
         for (var i = 0; i < dim; i++) ctxArr[i] = (float)(state.CurrentFace[i] - _anchorFace[i]); // displacement from start
         using var context = tensor(ctxArr, new long[] { 1, dim }, device: _device);
 
-        var (logits, haltLogit, _, hNext) = _net.Step(features, mask, context, cueT, _h!, selfT);
+        var (logits, haltLogit, _, hNext) = _net.Step(features, mask, context, cueT, _h!, selfT, kindT);
         ReplaceHidden(hNext); // thread the self forward
 
         var haltProb = sigmoid(haltLogit).cpu().item<float>();

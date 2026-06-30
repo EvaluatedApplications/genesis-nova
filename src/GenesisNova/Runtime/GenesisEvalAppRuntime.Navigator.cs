@@ -187,9 +187,11 @@ public sealed partial class GenesisEvalAppRuntime
         _navCycle++;
 
         var added = 0;
+        var sampledMembers = new List<string>(take);
         for (var i = 0; i < qualifying.Count && added < take; i++)
         {
             var member = qualifying[(start + i) % qualifying.Count];
+            sampledMembers.Add(member);
             var chain = ClimbAncestors(ds, member);
             if (chain.Count == 0) continue;                                                   // flat below this node
             queries.Add(new NavQueryDaggerTrainer.Query(member, (int)NavCue.Genus, chain[0])); // immediate parent = GENUS
@@ -204,7 +206,102 @@ public sealed partial class GenesisEvalAppRuntime
             }
             added++;
         }
+
+        // M2 DEEPENING — CROSS-RELATION COMPOSITION + LOOKAHEAD-TRAP pairs. The genus/domain/root pairs above ride ONE
+        // greedy degree-climb chain; this pass emits KIND-CONDITIONED composition targets: for each sampled member, the
+        // specific concept that is-a CATEGORY HUB and lies ≥2 hops away (reached by composing across relation types). The
+        // flow-field oracle defines the optimal path to it — routing AROUND a face-near low-degree distractor (the trap)
+        // that a 1-hop heuristic falls for. Same member, different kind hub ⇒ a different composed answer. Robust to the
+        // trap because targets are chosen by hub-degree (the substrate's own "kind" signal), never by proximity/strength.
+        queries.AddRange(SampleCompositionQueries(ds, sampledMembers));
         return queries;
+    }
+
+    // M2: how many composition targets to emit per member (bounded — this runs every gym cycle alongside model training).
+    private const int NavCompPerMemberCap = 3;
+    private const int NavKindMinDegree = 3;   // a category hub must have ≥ this many members (mirrors the inference floor)
+
+    /// <summary>Emit KIND-CONDITIONED cross-relation composition queries (M2). For each member, BFS the relation graph;
+    /// any concept T reachable ≥2 hops away (composed across relations) that BELONGS to a CATEGORY HUB — i.e. T's
+    /// highest-degree relational neighbour K is a real hub (degree ≥ floor, and above T's own degree) — becomes a
+    /// composition target: emit (member, Genus, T, kindFace = face(K)). The kind is derived from the TARGET's own
+    /// category (the substrate's own "is-a-a-hub" degree signal — no word list, no relation-name list); at inference the
+    /// query word names that same hub. The oracle's flow field to the SPECIFIC T routes around face-near 1-hop
+    /// distractors (the lookahead trap, which sits at distance 1 and is never itself a target), so the trajectory teaches
+    /// LOOKAHEAD; the kind face teaches "halt on a concept of THIS kind" — so the same member under a different kind hub
+    /// composes to a different answer along a different chain. Bounded (≤ cap targets/member) and exception-free.</summary>
+    private List<NavQueryDaggerTrainer.Query> SampleCompositionQueries(DialecticalSpace ds, IReadOnlyList<string> members)
+    {
+        var result = new List<NavQueryDaggerTrainer.Query>();
+        foreach (var m in members)
+        {
+            if (string.IsNullOrWhiteSpace(m) || !ds.TryGetConceptFace(m, out _)) continue;
+            var dist = BfsDistances(ds, m, maxDepth: 3);
+            // The cheap degree-climb already reaches its chain; composition adds value ONLY where the climb does NOT reach
+            // the target — the genuine CROSS-RELATION / lookahead-trap cases (the climb is greedy and is fooled by a
+            // high-degree distractor or stops at a non-hub intermediate). On a pure is-a taxonomy every target is on the
+            // chain, so NO composition query is emitted there (it would only collide with the level GENUS cue). This is
+            // what keeps the M1 level-cue gym training byte-stable while M2 trains the truly multi-hop cases.
+            var climbChain = new HashSet<string>(ClimbAncestors(ds, m), StringComparer.Ordinal);
+            var added = 0;
+            // Prefer the nearest composition targets (a 2-hop answer before a 3-hop one) for a stable, cheap signal.
+            foreach (var t in dist.Where(kv => kv.Value >= 2).OrderBy(kv => kv.Value).Select(kv => kv.Key))
+            {
+                if (added >= NavCompPerMemberCap) break;
+                if (double.TryParse(t, out _) || t.Equals(m, StringComparison.Ordinal)) continue;
+                if (climbChain.Contains(t)) continue;       // the degree-climb already reaches t → not a composition gap
+                var tDeg = ds.GetRelationDegree(t);
+
+                // T's CATEGORY = its highest-degree relational neighbour, when that neighbour is a real HUB (a category
+                // with members) strictly more central than T. That hub IS the kind the query will name. No hub ⇒ T is not
+                // a categorised answer (skip) — keeps people/intermediates from being mistaken for kind-members.
+                string? kind = null; var kindDeg = NavKindMinDegree - 1;
+                IReadOnlyList<PlatonicNeighbor> tn;
+                try { tn = ds.GetNeighbors(t, PlatonicNeighborhoodType.Relational, 16, 0.0); }
+                catch { continue; }
+                foreach (var nb in tn)
+                {
+                    if (double.TryParse(nb.Concept, out _) || nb.Concept.Equals(m, StringComparison.Ordinal)) continue;
+                    var d = ds.GetRelationDegree(nb.Concept);
+                    if (d > kindDeg && d > tDeg) { kindDeg = d; kind = nb.Concept; }
+                }
+                if (kind is null || !ds.TryGetConceptFace(kind, out var kindFace)) continue;
+
+                var kf = new float[kindFace.Length];
+                for (var i = 0; i < kindFace.Length; i++) kf[i] = (float)kindFace[i];
+                // GENUS cue + the kind face: the halt head learns "stop on the FIRST concept of this kind" (the specific
+                // member — france/spain — NOT the category hub it would overshoot to under a deeper cue). The climb-chain
+                // skip above guarantees this never collides with a level GENUS query (different target, same member).
+                result.Add(new NavQueryDaggerTrainer.Query(m, (int)NavCue.Genus, t, Self: null, Kind: kf));
+                added++;
+            }
+        }
+        return result;
+    }
+
+    // Breadth-first hop distances from <paramref name="start"/> over the relation graph, capped at <paramref name="maxDepth"/>.
+    // Distance 0 = start. Used to find composition targets ≥2 hops away (cross-relation) and to exclude 1-hop direct facts.
+    private static Dictionary<string, int> BfsDistances(DialecticalSpace ds, string start, int maxDepth)
+    {
+        var dist = new Dictionary<string, int>(StringComparer.Ordinal) { [start] = 0 };
+        var frontier = new Queue<string>();
+        frontier.Enqueue(start);
+        while (frontier.Count > 0)
+        {
+            var cur = frontier.Dequeue();
+            var d = dist[cur];
+            if (d >= maxDepth) continue;
+            IReadOnlyList<PlatonicNeighbor> nbrs;
+            try { nbrs = ds.GetNeighbors(cur, PlatonicNeighborhoodType.Relational, 32, 0.0); }
+            catch { continue; }
+            foreach (var n in nbrs)
+            {
+                if (double.TryParse(n.Concept, out _) || dist.ContainsKey(n.Concept)) continue;
+                dist[n.Concept] = d + 1;
+                frontier.Enqueue(n.Concept);
+            }
+        }
+        return dist;
     }
 
     /// <summary>Climb the live relation graph UPWARD from <paramref name="start"/>, each hop to the strictly-more-general
@@ -258,7 +355,9 @@ public sealed partial class GenesisEvalAppRuntime
             if (!ds.TryGetConceptFace(q.Member, out var anchor)) continue;
             try
             {
-                using var policy = new QueryNavPolicy(net, ds, anchor, q.Cue, device, NavK, 0.0, 0.5);
+                double[]? kindD = null;
+                if (q.Kind is { Length: > 0 } kf) { kindD = new double[kf.Length]; for (var d = 0; d < kf.Length; d++) kindD[d] = kf[d]; }
+                using var policy = new QueryNavPolicy(net, ds, anchor, q.Cue, device, NavK, 0.0, 0.5, selfVec: null, kindFace: kindD);
                 var res = walk.Walk(ds, q.Member, anchor, null, policy, new NavWalkOptions(MaxSteps: NavMaxSteps));
                 if (policy.LastHalt)
                 {

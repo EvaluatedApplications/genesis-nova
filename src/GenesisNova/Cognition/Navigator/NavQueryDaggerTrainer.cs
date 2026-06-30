@@ -37,6 +37,11 @@ public sealed class NavQueryTrajectory
     /// <summary>The PERSISTENT SELF (engine SelfField) that primed this query, or null for the plain query-only seed.
     /// When present it seeds h₀ via W_s — so the net learns to let the accumulated self break AMBIGUOUS forks.</summary>
     public float[]? Self { get; init; }
+
+    /// <summary>The TARGET-KIND face (M2) — the category the answer belongs to (e.g. the face of the "country" hub) —
+    /// or null for a level-only (M1) query. When present it conditions the walk via W_k every hop + the halt head, so the
+    /// SAME anchor with a DIFFERENT kind composes to a different answer along a different relation chain.</summary>
+    public float[]? Kind { get; init; }
 }
 
 /// <summary>
@@ -51,7 +56,7 @@ public static class NavQueryDaggerTrainer
 
     /// <summary>A query the navigator must resolve: the <paramref name="Member"/> being asked about (the anchor), the
     /// <paramref name="Cue"/> (GENUS/DOMAIN/ROOT as an int), and the <paramref name="Ancestor"/> the cue points to.</summary>
-    public readonly record struct Query(string Member, int Cue, string Ancestor, float[]? Self = null);
+    public readonly record struct Query(string Member, int Cue, string Ancestor, float[]? Self = null, float[]? Kind = null);
 
     // ──────────────────────────────────────────────────────────── BC warm-start: clone the cued flow fields.
 
@@ -68,7 +73,7 @@ public static class NavQueryDaggerTrainer
 
         var fields = new Dictionary<string, PlatonicFlowField>(StringComparer.Ordinal);
         var trajectories = new List<NavQueryTrajectory>();
-        foreach (var (member, cue, ancestor, self) in queries)
+        foreach (var (member, cue, ancestor, self, kind) in queries)
         {
             if (string.IsNullOrWhiteSpace(member) || string.IsNullOrWhiteSpace(ancestor)) continue;
             if (!space.TryGetConceptFace(member, out var anchorFace)) continue;
@@ -79,7 +84,7 @@ public static class NavQueryDaggerTrainer
 
             var steps = BuildQuerySteps(space, path, ancestor, anchorFace, field, k, minConfidence);
             if (steps.Count > 0)
-                trajectories.Add(new NavQueryTrajectory { AnchorFace = ToFloat(anchorFace), Cue = cue, Steps = steps, Self = self });
+                trajectories.Add(new NavQueryTrajectory { AnchorFace = ToFloat(anchorFace), Cue = cue, Steps = steps, Self = self, Kind = kind });
         }
         return trajectories;
     }
@@ -104,20 +109,21 @@ public static class NavQueryDaggerTrainer
         var trajectories = new List<NavQueryTrajectory>();
         var walk = new NavigatorWalk();
 
-        foreach (var (member, cue, ancestor, self) in queries)
+        foreach (var (member, cue, ancestor, self, kind) in queries)
         {
             if (!space.TryGetConceptFace(member, out var anchorFace)) continue;
             var field = Field(space, ancestor, fields);
 
-            // Roll under the SAME persistent self that seeds this query, so the on-policy trajectory matches inference.
+            // Roll under the SAME persistent self + target-kind that seed this query, so the on-policy trajectory matches inference.
             var selfD = self is null ? null : ToDouble(self);
-            using var policy = new QueryNavPolicy(net, space, anchorFace, cue, device, k, minConfidence, selfVec: selfD);
+            var kindD = kind is null ? null : ToDouble(kind);
+            using var policy = new QueryNavPolicy(net, space, anchorFace, cue, device, k, minConfidence, selfVec: selfD, kindFace: kindD);
             // goalFace is a harmless dummy (the policy ignores it); goalSymbol=null → the loop relies on the net's HALT.
             var result = walk.Walk(space, member, anchorFace, null, policy, new NavWalkOptions(MaxSteps: maxSteps));
 
             var steps = BuildQuerySteps(space, result.Trajectory, ancestor, anchorFace, field, k, minConfidence);
             if (steps.Count > 0)
-                trajectories.Add(new NavQueryTrajectory { AnchorFace = ToFloat(anchorFace), Cue = cue, Steps = steps, Self = self });
+                trajectories.Add(new NavQueryTrajectory { AnchorFace = ToFloat(anchorFace), Cue = cue, Steps = steps, Self = self, Kind = kind });
         }
         return trajectories;
     }
@@ -209,7 +215,8 @@ public static class NavQueryDaggerTrainer
                 opt.zero_grad();
 
                 var selfArg = b.HasSelf ? b.Self : null;                            // the persistent self for this bucket
-                var h = net.SeedHidden(b.Anchor, b.Cue, selfArg);                   // [B,H] — seed incl. W_s·self when primed
+                var kindArg = b.HasKind ? b.Kind : null;                            // the target-kind face (M2) for this bucket
+                var h = net.SeedHidden(b.Anchor, b.Cue, selfArg, kindArg);          // [B,H] — seed incl. W_s·self + W_k·kind when primed
                 Tensor loss = zeros(1, device: device);
                 double bCe = 0, bHalt = 0, bValue = 0; var bCeTerms = 0;
 
@@ -219,7 +226,7 @@ public static class NavQueryDaggerTrainer
                     using var maskT = b.Mask.select(1, t);       // [B,K]
                     using var ctxT = b.Context.select(1, t);     // [B,dim]
 
-                    var (logits, haltLogit, value, hNext) = net.Step(featT, maskT, ctxT, b.Cue, h, selfArg); // self every hop
+                    var (logits, haltLogit, value, hNext) = net.Step(featT, maskT, ctxT, b.Cue, h, selfArg, kindArg); // self+kind every hop
                     h = hNext;
 
                     using var targetT = b.Target.select(1, t);   // [B] long (−1 = ignore)
@@ -274,10 +281,10 @@ public static class NavQueryDaggerTrainer
     /// </summary>
     public static QueryWalkResult WalkQuery(
         NavQueryPolicyNet net, DialecticalSpace space, string member, int cue, string expected,
-        Device device, int maxSteps = 16, int k = DefaultK, double minConfidence = 0.0, double[]? selfVec = null)
+        Device device, int maxSteps = 16, int k = DefaultK, double minConfidence = 0.0, double[]? selfVec = null, double[]? kindFace = null)
     {
         if (!space.TryGetConceptFace(member, out var anchorFace)) return new QueryWalkResult(false, false, member, 0);
-        using var policy = new QueryNavPolicy(net, space, anchorFace, cue, device, k, minConfidence, selfVec: selfVec);
+        using var policy = new QueryNavPolicy(net, space, anchorFace, cue, device, k, minConfidence, selfVec: selfVec, kindFace: kindFace);
         var walk = new NavigatorWalk();
         var res = walk.Walk(space, member, anchorFace, null, policy, new NavWalkOptions(MaxSteps: maxSteps));
         var reached = policy.LastHalt && string.Equals(res.FinalSymbol, expected, StringComparison.Ordinal);
@@ -294,6 +301,8 @@ public static class NavQueryDaggerTrainer
         public required Tensor Cue { get; init; }       // [B] long
         public required Tensor Self { get; init; }      // [B, selfLen] — the persistent self that seeds h₀ (zeros if none)
         public required bool HasSelf { get; init; }     // true iff any trajectory in this bucket was self-primed
+        public required Tensor Kind { get; init; }      // [B, dim] — the target-kind face (M2) that conditions the walk (zeros if none)
+        public required bool HasKind { get; init; }     // true iff any trajectory in this bucket carried a target kind
         public required Tensor Features { get; init; }  // [B, T, K, F]
         public required Tensor Mask { get; init; }      // [B, T, K]
         public required Tensor Context { get; init; }   // [B, T, dim]
@@ -304,7 +313,7 @@ public static class NavQueryDaggerTrainer
 
         public void Dispose()
         {
-            Anchor.Dispose(); Cue.Dispose(); Self.Dispose(); Features.Dispose(); Mask.Dispose(); Context.Dispose();
+            Anchor.Dispose(); Cue.Dispose(); Self.Dispose(); Kind.Dispose(); Features.Dispose(); Mask.Dispose(); Context.Dispose();
             Target.Dispose(); Halt.Dispose(); Value.Dispose();
         }
     }
@@ -318,6 +327,8 @@ public static class NavQueryDaggerTrainer
         var cue = new long[b];
         var self = new float[b * selfLen]; // zeros for trajectories with no primed self (W_s·0 = 0 → query-only seed)
         var hasSelf = false;
+        var kind = new float[b * dim];     // zeros for trajectories with no target kind (W_k·0 = 0 → level-only M1 seed)
+        var hasKind = false;
         var feat = new float[b * t * k * f];
         var mask = new float[b * t * k];
         var ctx = new float[b * t * dim];
@@ -332,6 +343,8 @@ public static class NavQueryDaggerTrainer
             cue[bi] = trajs[bi].Cue;
             var sv = trajs[bi].Self;
             if (sv is not null && sv.Length == selfLen) { Array.Copy(sv, 0, self, bi * selfLen, selfLen); hasSelf = true; }
+            var kv = trajs[bi].Kind;
+            if (kv is not null && kv.Length >= dim) { Array.Copy(kv, 0, kind, bi * dim, dim); hasKind = true; }
             for (var ti = 0; ti < t; ti++)
             {
                 var s = trajs[bi].Steps[ti];
@@ -353,6 +366,8 @@ public static class NavQueryDaggerTrainer
             Cue = tensor(cue, new long[] { b }, device: device),
             Self = tensor(self, new long[] { b, selfLen }, device: device),
             HasSelf = hasSelf,
+            Kind = tensor(kind, new long[] { b, dim }, device: device),
+            HasKind = hasKind,
             Features = tensor(feat, new long[] { b, t, k, f }, device: device),
             Mask = tensor(mask, new long[] { b, t, k }, device: device),
             Context = tensor(ctx, new long[] { b, t, dim }, device: device),

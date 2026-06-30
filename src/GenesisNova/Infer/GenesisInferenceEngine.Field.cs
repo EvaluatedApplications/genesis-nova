@@ -1157,7 +1157,7 @@ public sealed partial class GenesisInferenceEngine
     /// <c>ds.Reason</c> (1 relaxation) hits its ceiling on a multi-hop answer. Null (default) ⇒ the ambiguous branch is
     /// byte-identical to the legacy one-shot path. The tuple is (answer, confidence, ok); ok=false ⇒ the walk did not
     /// confidently resolve, so the caller FALLS THROUGH to the one-shot reason (never regressing the clear cases).</summary>
-    public Func<string, NavCue, double[]?, (string Answer, double Confidence, bool Ok)>? NavigatorDisambiguator { get; set; }
+    public Func<string, NavCue, double[]?, double[]?, (string Answer, double Confidence, bool Ok)>? NavigatorDisambiguator { get; set; }
 
     // CUE MAPPING (M1.1 — LEARNED, replacing the English keyword stand-in). The navigator's target ABSTRACTION LEVEL
     // (genus / domain / root) is resolved from the query tokens by the LEARNED level cue (∘gns/∘dom/∘rut, taught by
@@ -1176,6 +1176,31 @@ public sealed partial class GenesisInferenceEngine
         }
         return best?.Cue ?? NavCue.Genus; // default / unlearned → the immediate kind
     }
+
+    // TARGET-KIND derivation (M2 — cross-relation COMPOSITION). The query's KIND = the category the answer belongs to
+    // ("what COUNTRY does X live in" → the country hub). It is NOT a hardcoded word: a category is the substrate's own
+    // signal — a HUB, a concept many others point to (high relational degree). The most-category-like content token
+    // (highest degree above a floor, not the subject, not a question word, not numeric) names the kind; its FACE
+    // conditions the walk (W_k) so the SAME anchor under DIFFERENT kinds composes to different answers along different
+    // relation chains — exactly the multi-hop the level cue (abstraction depth) cannot express. Null when the query names
+    // no live category (→ the walk falls back to the level-only M1 conditioning). Generalises to a NONCE category hub.
+    private double[]? DeriveNavKind(DialecticalSpace ds, IReadOnlyList<string> toks, string subject)
+    {
+        string? bestKind = null; var bestDeg = NavKindMinDegree - 1;
+        foreach (var t in toks)
+        {
+            if (string.IsNullOrEmpty(t) || t.Equals(subject, StringComparison.Ordinal)) continue;
+            if (QuestionCue(t) || IsNumericLike(t) || !ds.ContainsConcept(t)) continue;
+            var deg = ds.GetRelationDegree(t);
+            if (deg > bestDeg) { bestDeg = deg; bestKind = t; }
+        }
+        if (bestKind is null) return null;
+        return ds.TryGetConceptFace(bestKind, out var face) ? face : null;
+    }
+
+    // A category must have at least this many members (relational degree) to count as a navigable KIND — keeps a random
+    // low-degree content word from being mistaken for a target kind (the substrate's "is this a hub" floor).
+    private const int NavKindMinDegree = 3;
 
     // ── RELAX: recall what the mind HOLDS about the subject. RELATION-FIRST (follow the explicit association — robust
     //    to hub dilution at scale, where a populous category's distributional cloud washes out a member's signal),
@@ -1248,7 +1273,12 @@ public sealed partial class GenesisInferenceEngine
         // ambiguous-but-unwalkable cases keep today's behaviour.
         if (NavigatorDisambiguator is not null)
         {
-            var (navAns, navConf, navOk) = NavigatorDisambiguator(subject, DeriveNavCue(toks), _selfField);
+            // M2: a query that names a target KIND ("what country …") is a cross-relation COMPOSITION; the KIND FACE
+            // selects the chain and the halt head (trained with the GENUS cue) stops on the FIRST concept OF THAT KIND —
+            // the specific member, not the category hub. A kind-free query keeps the LEARNED level cue (M1).
+            var navKind = DeriveNavKind(ds, toks, subject);
+            var navCue = navKind is null ? DeriveNavCue(toks) : NavCue.Genus;
+            var (navAns, navConf, navOk) = NavigatorDisambiguator(subject, navCue, _selfField, navKind);
             if (navOk && !Bad(navAns) && ds.ContainsConcept(navAns))
             {
                 Attend();

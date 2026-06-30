@@ -30,7 +30,7 @@ easy ones it already nails. Heuristics own the dominant/clear branch; the walk o
 | Decode-from-the-void stack | 🟡 BUILT-NOT-WIRED | only the navigator touches it |
 | `query → (anchor, cue)` from real text | ✅ LIVE | learned `∘gns/∘dom/∘rut` cue (`LearnNavLevelCue`); anchor via `ExtractSpecific` |
 | Self-loop write side | 🟡 partial | gym-write reverted (pollution); inference fold not wired |
-| Multi-hop / composition (lookahead) | ❌ NOT-DONE | geometry is 1-hop; ceiling ~64–78% |
+| Multi-hop / composition (lookahead) | ✅ **LIVE (composition + trap)** | M2: kind-conditioned walk does 2-hop CROSS-RELATION composition + clears a 1-hop same-kind LOOKAHEAD TRAP the heuristic can't. Held-out `PredictAsync`: **66.7% (4/6) vs one-shot 0%**, all 4 single-kind held-out persons clear the trap (baseline lands on the 1-hop city). Same-anchor multi-kind selection = partial (abstains). See `Tests/NavigatorM2MultiHop.cs`. |
 | Overnight run that *improves real reasoning* | ❌ unproven | infra wired; no number-word feed; DAgger off |
 
 **The gap in one sentence:** we built and proved the reasoning-by-navigation machinery, but the engine still reasons
@@ -61,8 +61,29 @@ the old way — **the navigator is a trained passenger, not the driver.**
     fast suite 251/0/47. **REMAINING:** the gym CURRICULUM doesn't yet emit level-cue text frames (the learner is wired
     into `ObserveLearningSignals` but only fires on a "what kind/broadly/ultimately is X→ancestor" frame), so an overnight
     run does not yet self-teach the cue without a warmup (M4); self-conditioning of the walk (M3).
-- **M2 — Multi-hop via composition / lookahead.** **DONE =** held-out multi-hop climbs clearly above the 1-hop ceiling
-  *through the live route*.
+- 2026-06-30 — **M2 LANDED (DONE-LIVE, composition + lookahead trap).** Added null-safe TARGET-KIND conditioning to the
+  navigator (`NavQueryPolicyNet._kindEnc`, W_k·kindFace folded into the same un-saturated cue channel as self/cue → no
+  head re-wiring, M1 byte-identical when kind absent), threaded through `QueryNavPolicy`/`NavQueryDaggerTrainer`/the
+  `NavigatorDisambiguator` hook. Kind learned from the query as a high-degree category hub (`DeriveNavKind`, no word
+  list). Deepened the gym sampler (`SampleCompositionQueries`: BFS ≥2-hop targets that belong to a category hub, Genus
+  cue so the halt stops on the specific member not the hub, skipped when the degree-climb already reaches the target so a
+  pure is-a taxonomy emits none → M1 gym training byte-stable, `NavigatorGymTrainTests` green). LIVE
+  `Tests/NavigatorM2MultiHop.cs`: navigator **66.7% (4/6) vs one-shot 0%** held-out, 4/4 single-kind held-out clear a
+  1-hop same-kind distractor trap, cold 0 mis-emits, clear case byte-identical. Fast suite **251/0/48**. Remaining =
+  same-anchor multi-kind arbitration (M3-adjacent) + self-conditioning placed right (M3).
+- **M2 — Multi-hop via composition / lookahead.** ✅ **DONE-LIVE (composition + lookahead trap).** The navigator now
+  carries a **target-KIND** conditioning (`NavQueryPolicyNet._kindEnc`, null-safe → M1 byte-identical): the walk is
+  seeded/per-hop-biased by the FACE of the answer's category (the "country" hub), learned as a high-degree category (no
+  relation-name word list, `GenesisInferenceEngine.DeriveNavKind`). The gym sampler is deepened
+  (`SampleCompositionQueries`): for each member, any concept ≥2 hops away that belongs to a category hub becomes a
+  Genus+kind composition target, skipped when the cheap degree-climb already reaches it (so a pure is-a taxonomy emits
+  none — M1 level training byte-stable). The flow-field oracle to the specific answer routes around the 1-hop distractor.
+  **DONE =** held-out `PredictAsync` over `WithProductionMechanisms` (nav ON, trained by `TrainNavigatorCycle` ALONE):
+  **navigator 66.7% (4/6) vs one-shot 0%**, 2-hop trajectories proven (`dave->madrid->spain`), all 4 single-kind
+  held-out persons clear a 1-hop SAME-KIND distractor trap (baseline always lands on the 1-hop city/distractor),
+  cold-safe 0 mis-emits, clear case byte-identical. **REMAINING:** same-anchor MULTI-kind selection (a person with BOTH
+  a country and an industry chain) cross-contaminates and abstains — the kind face composes one chain well but doesn't
+  yet cleanly arbitrate two equal-depth chains from one anchor.
 - **M3 — Self-loop placed right.** Inference folds the *resolution* (not gym drills); re-enable DAgger safely.
   **DONE =** a live ablation shows the self changes the *ambiguous* answers in the running engine; prebake stable.
 - **M4 — An overnight run that demonstrably improves reasoning.** number-word gym feed + the loop. **DONE =** the

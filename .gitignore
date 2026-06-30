@@ -18,3 +18,5 @@ obj/
 *.log
 # Local Claude Code overrides stay private; the shared SessionStart hook (.claude/settings.json) is tracked.
 .claude/settings.local.json
+
+Tests/TestResults/

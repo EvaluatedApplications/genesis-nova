@@ -94,6 +94,43 @@ public sealed class SelfHealMisroutedCueTests
         Assert.Equal("greater", cmp.Output.Trim());
     }
 
+    // The SOURCE GUARD (the permanent half): LearnIntentCue must NEVER relate an arithmetic operator to ∘cmp, so the
+    // corpus's hyphenated number facts ("2008 - 2009" → a word) can no longer breed "-"→∘cmp in the first place. Without
+    // this the self-heal is a tug-of-war it loses (every cycle re-creates the edge) — which is why 26 live cycles showed
+    // "no healing". With it, a genuine comparison still learns and routes (the guard is surgical).
+    [Fact]
+    public void LearnIntentCue_NeverContaminatesAnOperatorSymbol_WhileGenuineCompareStillLearns()
+    {
+        var config = new GenesisNovaConfig(HiddenSize: ProductionDims.HiddenSize);
+        var space = new DialecticalSpace(config.FaceDimension, seed: 7);
+        var eng = new GenesisInferenceEngine(new WhitespaceGenesisTokenizer(), new GenesisNeuralModel(config), space, null)
+        {
+            ConsciousField = true,
+            LearnedCuesOnly = true,
+        };
+        // Seed the number-word lexicon so LearnIntentCue can type outputs (it no-ops without one).
+        for (long v = 0; v <= 20; v++) eng.LearnNumberWord($"{v} in words", NumberWordVocabulary.ToWords(v));
+
+        // CONTAMINATION ATTEMPT: the exact corpus shape that bred "-"→∘cmp — a hyphenated number range answered by a WORD.
+        for (var i = 0; i < 5; i++) eng.LearnIntentCue("2008 - 2009", "span");
+        // GENUINE comparison: the real cue + outcome vocabulary must still be learned.
+        foreach (var (a, b) in new[] { (8, 3), (2, 9), (5, 1), (3, 7) })
+            for (var i = 0; i < 3; i++)
+                eng.LearnIntentCue($"{a} compared to {b}", a > b ? "greater" : "less");
+
+        // The operator "-" was NOT contaminated ⇒ subtraction computes (never hijacked to the compare route).
+        var sub = eng.Generate(new GenerationRequest("12 - 1", 4));
+        _out.WriteLine($"'12 - 1' path={sub.DecisionPath} -> '{sub.Output.Trim()}'");
+        Assert.Equal("field-compute", sub.DecisionPath);
+        Assert.Equal(11.0, double.Parse(sub.Output.Trim(), NumberStyles.Float, Inv), 6);
+
+        // …and a GENUINE comparison still routes to the compare path (the guard is surgical, not a blanket disable).
+        var cmp = eng.Generate(new GenerationRequest("8 compared to 3", 4));
+        _out.WriteLine($"'8 compared to 3' path={cmp.DecisionPath} -> '{cmp.Output.Trim()}'");
+        Assert.Equal("field-predicate", cmp.DecisionPath);
+        Assert.Equal("greater", cmp.Output.Trim());
+    }
+
     [Fact]
     public void Default_Off_IsByteIdentical_NoHealing()
     {

@@ -348,7 +348,11 @@ public sealed partial class GenesisInferenceEngine
         string? anchor =
             (nums == 1 && outIsNumberWord) ? "∘tow" :
             (outIsDigit && nums == 0 && inHasNumberWord) ? "∘tod" :
-            (nums == 2 && outAllLetters && !outIsNumberWord) ? "∘cmp" :
+            // …two operands + a relational WORD answer = Compare — UNLESS an arithmetic OPERATOR token is present
+            // ("12 - 1", a date range "2008 - 2009"): that is arithmetic / a span, NEVER a comparison. Without this the
+            // corpus's hyphenated number facts mislabel the example ∘cmp and relate "-" → ∘cmp, which then HIJACKS every
+            // "a - b" subtraction to the predicate route (see nova-subtract-stuck-compare-hijack — the contamination source).
+            (nums == 2 && outAllLetters && !outIsNumberWord && !merged.Any(t => TryOpToken(t, out _))) ? "∘cmp" :
             // RETRIEVAL: no operands, the answer is a single content word that is a CATEGORY HUB (many concepts point to
             // it). The category-ness is the SPACE's own structure (GetRelationDegree), never a kind/type/synonym list.
             (nums == 0 && outToks.Count == 1 && outAllLetters && !outIsNumberWord && ds.GetRelationDegree(outToks[0]) >= CategoryHubDegree) ? "∘ret" :
@@ -356,6 +360,10 @@ public sealed partial class GenesisInferenceEngine
         if (anchor is null) return;
         foreach (var t in merged)
             if (!IsNumericLike(t) && !lex.KnowsAtom(t)
+                // An arithmetic OPERATOR (symbol or word: -, +, x, /, minus, plus, times, over) is an ARITHMETIC cue,
+                // never an INTENT cue — so it is never related to ∘cmp/∘tow/∘tod/∘ret (the general hygiene that stops a
+                // corpus "-" polluting the compare route; mirrors LearnArithmeticCue, which already skips op examples).
+                && !TryOpToken(t, out _)
                 // For ∘ret, exclude the LEARNED function words (copula/articles: is/a/of) — else the shared copula "is"
                 // would map every "X is Y" FACT to retrieval. The category-specific marker ("kind"/"synonym") is NOT
                 // function-like, so it survives. This is the learned filler signal, not a stop-list (warm-start).

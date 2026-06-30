@@ -60,7 +60,9 @@ public sealed class DialecticalSpace : IPlatonicSpace
     // WEAK floor and failures as a penalty. An element is released only once it has gone STALE beyond the grace its
     // utility earned. So a useful edge/concept is effectively immortal (it keeps earning answers long before the grace
     // expires) while a merely-co-observed one decays out. "Helped answer" outranks "was seen often"; everything decays.
-    // No cap — the space holds exactly the relevant, recently-useful structure. (See DischargeIrrelevant / RelationUtility.)
+    // The decay holds the relevant, recently-useful structure; ON TOP of it a HARD MaxActiveConcepts cap is the pure-
+    // overflow safety net (a corpus stream re-observes its long tail → nothing goes stale → decay alone can't bound it),
+    // evicting the lowest-utility excess by the SAME metric. (See DischargeIrrelevant / EnforceActiveConceptCap / RelationUtility.)
     // BASE grace (observation-steps); utility MULTIPLIES it. Sized to comfortably exceed the FocusedCurriculum ROTATION
     // gap — a muscle/the foundation is only re-observed during its focus turn, so the gap between turns is large; if the
     // grace is shorter than that gap, learned vocab decays BETWEEN turns (catastrophic forgetting — an overnight run
@@ -68,6 +70,14 @@ public sealed class DialecticalSpace : IPlatonicSpace
     // deliberately large: reinforced/recurring structure survives the whole run; only genuinely-abandoned hapax decays.
     public long DischargeStalenessWindow { get; set; } = 1_048_576;
     public long DischargeInterval { get; set; } = 4_096;        // sweep once per ~this many observations
+    // HARD ACTIVE-CONCEPT CAP (the pure-overflow safety net the grace curve alone cannot provide). Relevance-decay
+    // releases STALE noise, but a corpus stream (e.g. a 100% Wikipedia prebake) keeps re-observing the same long-tail
+    // vocab, so every word's LastSeenStep stays current → nothing ever goes stale → the active set grows unbounded
+    // (the checkpoint bloated to ~2 GB). So ON TOP OF decay we enforce a ceiling by distributional VALUE: when the
+    // active concept count exceeds this cap, the LOWEST-UTILITY excess are evicted down to the cap (same success-
+    // weighted utility the grace path uses, no word lists). Protected and never counted against / evicted by the cap:
+    // ∘-anchors, atoms, Functions, numbers, and ▷-referenced components. 0 disables the cap (unbounded, legacy).
+    public int MaxActiveConcepts { get; set; } = 12_000;
     private long _observeStep;                                  // monotone observation clock (drives recency)
     private long _lastDischargeStep;
 
@@ -847,6 +857,44 @@ public sealed class DialecticalSpace : IPlatonicSpace
             (deadConcepts ??= new()).Add(e.Symbol);
         }
         if (deadConcepts is not null) foreach (var s in deadConcepts) DischargeConcept(s);
+
+        // HARD CAP — the overflow safety net. Decay above only releases STALE concepts; a corpus stream re-observes its
+        // long tail so nothing goes stale and the active set can still blow past any reasonable size. Enforce the ceiling
+        // by distributional VALUE regardless of recency, so the useless long tail is dropped even when "recently seen".
+        EnforceActiveConceptCap();
+    }
+
+    /// <summary>
+    /// Enforce the <see cref="MaxActiveConcepts"/> ceiling (the pure-overflow safety net). After the grace-decay prune,
+    /// if the active CONCEPT count still exceeds the cap, evict the LOWEST-UTILITY excess concepts down to the cap —
+    /// using the SAME success-weighted distributional utility the grace path uses (<c>2·bestSuccess + log(1+obs)</c>),
+    /// no word lists. PROTECTED (never evicted): ∘-anchors, atoms, Functions, numbers, and a concept still referenced as
+    /// a ▷-component of a retained whole — so arithmetic, operations and relation structure are untouched. Unlike the
+    /// grace path this ignores recency, so it holds even when NOTHING has decayed (every word "recently seen").
+    /// </summary>
+    private void EnforceActiveConceptCap()
+    {
+        var cap = MaxActiveConcepts;
+        if (cap <= 0) return;
+        var overflow = _concepts.ActiveConceptCount - cap;
+        if (overflow <= 0) return;
+
+        var bestSuccess = BuildBestRelationSuccess();
+        var referenced = BuildReferencedComponentIds();
+        List<(string Symbol, double Util)>? candidates = null;
+        foreach (var e in _concepts.All)
+        {
+            if (e.Archived || e.Kind == ElementKind.Atom || e.Kind == ElementKind.Function) continue;
+            if (e.Symbol.StartsWith('∘') || FaceCodec.IsNumeric(e.Symbol)) continue;  // anchors + numbers are protected
+            if (referenced.Contains(e.Id)) continue;                                  // a part of a retained whole (keeps ▷ / ById valid)
+            var succ = bestSuccess.TryGetValue(e.Symbol, out var s) ? s : 0;
+            var util = 2.0 * succ + Math.Log(1.0 + e.ObservationCount);
+            (candidates ??= new()).Add((e.Symbol, util));
+        }
+        if (candidates is null) return;
+        candidates.Sort((a, b) => a.Util.CompareTo(b.Util));                          // ascending — weakest first
+        var drop = Math.Min(overflow, candidates.Count);
+        for (var i = 0; i < drop; i++) DischargeConcept(candidates[i].Symbol);
     }
 
     // RELEVANCE = success-weighted contribution to CORRECT ANSWERS (strong), with log-damped observation as a weak floor
@@ -1760,16 +1808,18 @@ public sealed class DialecticalSpace : IPlatonicSpace
             r.Mean, r.Min, r.Max, u.Mean, u.Min, u.Max);
     }
 
-    // ─────────────────────────────────────────────────────────────────────── Maintenance — discharge by relevance (no cap)
+    // ──────────────────────────────────────────────────────────── Maintenance — discharge by relevance + enforce the cap
     /// <summary>
-    /// The LIVE maintenance path: release stale noise by relevance-decay (see <see cref="DischargeIrrelevant"/>). It does
-    /// NOT contract the space to any cap — it only ever touches barely-observed, stale concepts, never a reinforced or
-    /// recently-active one, so an in-progress lesson (and the reinforced function-word geometry) is always safe.
+    /// The LIVE/per-epoch maintenance path: release stale noise by relevance-decay AND enforce the hard
+    /// <see cref="MaxActiveConcepts"/> ceiling (both run inside <see cref="DischargeIrrelevant"/>). Decay only touches
+    /// barely-observed, stale concepts (an in-progress lesson and the reinforced function-word geometry stay safe); the
+    /// cap then drops the lowest-utility overflow so a corpus stream that keeps everything "recently seen" still cannot
+    /// grow the active set without bound. Anchors/atoms/Functions/numbers/referenced components are protected in both.
     /// </summary>
     public PlatonicSpaceMemory.SpaceMaintenanceResult ApplyMaintenance(PlatonicSpaceMemory.SpaceMaintenanceRequest request)
     {
         var before = _concepts.ActiveCount;
-        DischargeIrrelevant();
+        DischargeIrrelevant();        // grace-decay prune + EnforceActiveConceptCap (the hard ceiling)
         _lastDischargeStep = _observeStep;
         return new(0, Math.Max(0, before - _concepts.ActiveCount), 0);
     }

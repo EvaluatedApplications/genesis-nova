@@ -110,4 +110,59 @@ public sealed class SpaceEvictionTests
         Assert.True(space.GetRelationDegree("useful") > 0, "the credited edge was dropped");
         Assert.Equal(0, space.GetRelationDegree("idle"));     // the un-credited edge decayed away
     }
+
+    [Fact]
+    public void Hard_cap_evicts_lowest_utility_overflow_even_when_nothing_decayed()
+    {
+        // THE PURE-OVERFLOW SAFETY NET: relevance-decay alone CANNOT bound a corpus stream — every re-observed word
+        // keeps its LastSeenStep current, so nothing ever goes stale and decay evicts NOTHING (the ~2 GB checkpoint
+        // bloat). The hard MaxActiveConcepts cap fixes that: when the active concept count overflows the ceiling, the
+        // LOWEST-UTILITY excess are dropped regardless of recency. Protected: ∘-anchors / atoms / numbers / referenced.
+        var space = new DialecticalSpace(faceDimension: 64)
+        {
+            MaxActiveConcepts = 0,                       // start UNCAPPED to prove the decay path evicts nothing here
+            DischargeStalenessWindow = 10_000_000,        // ≫ this test's observation clock → NOTHING goes stale (pure overflow)
+            DischargeInterval = 1_000_000_000,            // never auto-sweep; we drive maintenance explicitly
+        };
+
+        // A protected ∘-anchor (an operation): must survive the cap unconditionally.
+        space.RegisterOperationToken("plus");
+
+        // High-utility KEEPERS: heavily observed AND credited for correct answers (utility ≫ a once-seen hapax).
+        string[] keep = { "alpha", "bravo", "charlie", "delta", "echo" };
+        for (var r = 0; r < 20; r++)
+            foreach (var k in keep)
+            {
+                space.ObserveContradiction(k, "kept", 0.1);
+                space.ReinforceEvidence(new[] { new PlatonicEvidence(k, "kept", 1.0, 1) }, success: true);
+            }
+
+        // A LONG TAIL of low-utility concepts, each observed exactly ONCE and all "recently seen" (never stale).
+        const int tail = 400;
+        for (var i = 0; i < tail; i++) space.ObserveContradiction("lo" + i, "lop" + i, 0.2);
+
+        var beforeReq = new PlatonicSpaceMemory.SpaceMaintenanceRequest();
+
+        // PURE-OVERFLOW PROOF: with the cap OFF, maintenance evicts nothing (nothing has decayed).
+        var uncapped = space.NodeCount;
+        space.ApplyMaintenance(beforeReq);
+        Assert.Equal(uncapped, space.NodeCount); // decay alone bounds nothing — the long tail all stays
+        Assert.True(uncapped > 600, $"expected the planted overflow to stand; got {uncapped}");
+
+        // Now turn the HARD CAP on and run the SAME maintenance — the ceiling must hold even though nothing decayed.
+        const int cap = 50;
+        space.MaxActiveConcepts = cap;
+        space.ApplyMaintenance(beforeReq);
+
+        _out.WriteLine($"uncapped={uncapped}  afterCap={space.NodeCount}  cap={cap}");
+        Assert.True(space.NodeCount <= cap, $"cap not enforced: {space.NodeCount} active > cap {cap}");
+
+        // The high-utility keepers (top of the utility order) survive; the protected ∘-anchor survives.
+        foreach (var k in keep) Assert.True(space.ContainsConcept(k), $"high-utility '{k}' was wrongly evicted by the cap");
+        Assert.True(space.IsOperationToken("plus"), "the protected ∘-anchor (operation) was evicted by the cap");
+
+        // The useless long tail was dropped to make room (nearly all of it, since it is the lowest utility).
+        var tailGone = Enumerable.Range(0, tail).Count(i => !space.ContainsConcept("lo" + i));
+        Assert.True(tailGone > tail - 80, $"low-utility tail not evicted: only {tailGone}/{tail} dropped");
+    }
 }

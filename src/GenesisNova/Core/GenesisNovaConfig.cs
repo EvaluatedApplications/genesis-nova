@@ -29,6 +29,12 @@ public sealed record GenesisNovaConfig(
     // hard eviction and the SpaceManager's maintenance pruning share the same limits.
     int MaxPlatonicNodes = 100_000,
     int MaxPlatonicRelations = 500_000,
+    // HARD active-concept ceiling for the DialecticalSpace core (the default substrate). Relevance-decay alone cannot
+    // bound a corpus stream (every re-observed word stays "recently seen" → never goes stale), so the space enforces
+    // this cap by distributional VALUE: when the active concept count exceeds it, the lowest-utility excess concepts are
+    // evicted down to the cap (∘-anchors / atoms / Functions / numbers / ▷-referenced components are protected). 0 =
+    // unbounded (legacy). Sized for a vocab + learned-concept graph; the pure-overflow safety net for prebake bloat.
+    int MaxActiveConcepts = 12_000,
     double L2RegularizationCoefficient = 0.0,
     // DECOUPLED platonic face width. 1024 (default) = the PRODUCTION substrate width: frozen address bands
     // [0,416) + a 608-dim learned orbital tail [416,1024) (see FaceLayout). Set 0 to track HiddenSize (legacy

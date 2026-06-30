@@ -290,6 +290,16 @@ public sealed partial class GenesisEvalAppRuntime : ILearningRuntime
         });
     }
     
+    /// <summary>
+    /// Per-epoch/cycle PLATONIC-SPACE MAINTENANCE — the LIVE eviction pass. Runs the trainer's space maintenance
+    /// (relevance-decay discharge + the hard active-concept cap) under the model-ops gate so it never races a
+    /// train/predict step. The legacy <see cref="GenesisTrainingOrchestrator"/> calls the trainer directly per epoch;
+    /// the modular gym path (which trains via <see cref="TrainAsync"/>, not a held trainer) drives it through here, so
+    /// BOTH orchestrators keep the space bounded. No-op when AutoManagePlatonicSpace is off (the SpaceManager gates it).
+    /// </summary>
+    public SpaceManagementResult MaintainPlatonicSpace()
+        => WithModelGate(() => _state.Trainer.ManagePlatonicSpace());
+
     private T WithModelGate<T>(Func<T> action)
     {
         _modelOpsGate.Wait();

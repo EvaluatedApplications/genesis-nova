@@ -91,6 +91,12 @@ public sealed class GenesisModularTrainingOrchestrator
             }
             cycle++;
 
+            // PER-CYCLE SPACE MAINTENANCE — the LIVE eviction pass (relevance-decay discharge + the hard active-concept
+            // cap). The legacy orchestrator runs this per epoch; the modular gym trains via runtime.TrainAsync (no held
+            // trainer) so it never ran here, letting corpus vocab grow the space unbounded. Drive it through the runtime
+            // each cycle so the space stays bounded. Best-effort: a maintenance hiccup must never stop training.
+            try { runtime.MaintainPlatonicSpace(); } catch { }
+
             // PER-UNIT probe + grade (read AFTER NextTrainBatch so a focused curriculum has set its active set):
             // each curriculum advances its OWN difficulty/mastery on its OWN score.
             var units = curriculum.Units;

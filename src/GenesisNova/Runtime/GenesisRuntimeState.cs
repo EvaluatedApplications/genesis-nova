@@ -185,6 +185,7 @@ public sealed class GenesisRuntimeState
     private static IPlatonicSpace CreateMemory(GenesisNovaConfig config)
         => config.UseDialecticalCore
             ? new Cognition.Platonic.DialecticalSpace(config.FaceDimension, config.Seed)
+                { MaxActiveConcepts = config.MaxActiveConcepts } // hard ceiling — bounds corpus-vocab overflow (decay alone can't)
             : new PlatonicSpaceMemory(
                 faceDimension: config.FaceDimension,
                 seed: config.Seed,

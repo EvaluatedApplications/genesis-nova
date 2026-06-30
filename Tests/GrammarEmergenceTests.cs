@@ -21,7 +21,7 @@ public sealed class GrammarEmergenceTests
     private readonly ITestOutputHelper _out;
     public GrammarEmergenceTests(ITestOutputHelper o) => _out = o;
 
-    [SlowFact]
+    [Fact(Skip = "Retired: asserts the deprecated 4-role NN role head (ProbeRoles → SUBJECT/QUERY/VALUE). The project subtracts this classifier — the conscious-field copula-pivot replaced it for fact parsing (uses no role head). See nova-grammar-role-regression.")]
     public async Task NN_RecognisesGrammarRoles_AfterWarmup()
     {
         var backend = Environment.GetEnvironmentVariable("GYM_GPU") == "1" ? ComputeBackend.Gpu : ComputeBackend.Cpu;

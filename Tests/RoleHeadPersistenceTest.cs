@@ -19,7 +19,7 @@ public sealed class RoleHeadPersistenceTest
     private readonly ITestOutputHelper _out;
     public RoleHeadPersistenceTest(ITestOutputHelper o) => _out = o;
 
-    [SlowFact]
+    [Fact(Skip = "Retired: asserts the deprecated 4-role NN role head (ProbeRoles). The project subtracts this classifier — the conscious-field copula-pivot is the fact-parsing path (uses no role head; runtime fact recall passes via it). See nova-grammar-role-regression.")]
     public async Task TrainedRoleParser_SurvivesSaveAndReload()
     {
         var backend = Environment.GetEnvironmentVariable("GYM_GPU") == "1" ? ComputeBackend.Gpu : ComputeBackend.Cpu;

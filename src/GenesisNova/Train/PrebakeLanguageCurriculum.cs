@@ -37,10 +37,14 @@ public sealed class PrebakeLanguageCurriculum : ITrainingCurriculum
     // ("cat eats fish", never "cat eats screw") lives in the DATA. That keeps co-occurrence STRUCTURED — a content word
     // keeps a distinctive in-domain neighbourhood instead of smearing across everything, which is what averaged the
     // clustering signal to death. Function words and verbs stay universal; they SHOULD bridge.
-    private static readonly string[] Animals = { "cat", "dog", "bird", "fish", "horse", "cow", "frog", "bee", "duck", "goat" };
+    // CONTENT exemplars must be UNAMBIGUOUS concrete nouns: words that ALSO double as common verbs (fish, duck, park,
+    // shop, …) legitimately co-occur broadly and read function-like, so the learned classifier is RIGHT to flag them —
+    // using them as "clean content" makes the function-word-separation probe lie. (These clusters feed only the inspect
+    // probe / SelfAssess now that the prebake trains on 100% real corpus, so this is a probe-validity fix, not training.)
+    private static readonly string[] Animals = { "cat", "dog", "bird", "owl", "horse", "cow", "frog", "bee", "swan", "goat" };
     private static readonly string[] Colours = { "red", "blue", "green", "yellow", "black", "white", "pink", "gray", "brown", "gold" };
     private static readonly string[] Food = { "apple", "bread", "rice", "soup", "cake", "egg", "milk", "pear", "plum", "jam" };
-    private static readonly string[] Places = { "park", "house", "school", "shop", "farm", "lake", "road", "hill", "town", "beach" };
+    private static readonly string[] Places = { "barn", "house", "school", "cabin", "farm", "lake", "road", "hill", "town", "beach" };
     private static readonly string[] Objects = { "ball", "book", "cup", "hat", "key", "box", "lamp", "clock", "bag", "toy" };
     private static readonly string[] Body = { "hand", "foot", "head", "eye", "ear", "nose", "arm", "leg", "hair", "tooth" };
     private static readonly string[] Clothes = { "shirt", "coat", "shoe", "sock", "dress", "glove", "scarf", "belt", "cap", "boot" };

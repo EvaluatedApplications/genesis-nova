@@ -23,6 +23,8 @@ public class MainWindow : Form
     private readonly bool _seededFromStarter; // true if this fresh start was seeded from the committed repo starter
     private CancellationTokenSource? _autonomousTrainingCts;
     private CancellationTokenSource? _gymCts;
+    private Task? _gymLoopTask;            // the in-flight GymLoopAsync (tracked so a stop/restart can AWAIT it drain)
+    private readonly SemaphoreSlim _gymLifecycleGate = new(1, 1); // serialize start/stop/restart — no overlapping loops, no start-before-save
     private GymTrainer? _gym;
     private int _gymCycle;
     private int _lastDifficulty;
@@ -182,11 +184,11 @@ public class MainWindow : Form
         flow.Controls.Add(new Label { Text = "Trains the GRU's core skills on synthetic data.\nDifficulty is an unbounded, mastery-gated LEVEL.\nRuns automatically on startup.", AutoSize = true, Margin = new Padding(0, 0, 0, 12) });
 
         var startBtn = new Button { Text = "▶ Start Gym", Width = 280, Height = 38, BackColor = Color.FromArgb(51, 153, 102), ForeColor = Color.White, Font = new Font("Segoe UI", 11, FontStyle.Bold), Name = "AutoTrainBtn" };
-        startBtn.Click += (s, e) => StartGym();
+        startBtn.Click += (s, e) => _ = StartGymAsync();
         flow.Controls.Add(startBtn);
 
         var stopBtn = new Button { Text = "⏸ Pause Gym", Width = 280, Height = 38, BackColor = Color.FromArgb(204, 51, 51), ForeColor = Color.White, Font = new Font("Segoe UI", 11, FontStyle.Bold), Name = "AutoStopBtn", Enabled = false };
-        stopBtn.Click += (s, e) => StopGym();
+        stopBtn.Click += (s, e) => _ = StopGymAsync();
         flow.Controls.Add(stopBtn);
 
         flow.Controls.Add(new Label { Text = "Mastery bar (level-up threshold)", AutoSize = true, Margin = new Padding(0, 16, 0, 2) });
@@ -235,7 +237,7 @@ public class MainWindow : Form
 
         flow.Controls.Add(new Label
         {
-            Text = "Control endpoint (headless):\nhttp://127.0.0.1:8787/\n  /status\n  /recall?q=...   /query?q=...\n  /probe?q=CONCEPT\n  /log?tail=N   /nav\n  /throttle?pct=0..500\n  /gym/start   /gym/stop  (= resume/pause)",
+            Text = "Control endpoint (headless):\nhttp://127.0.0.1:8787/\n  /status\n  /recall?q=...   /query?q=...\n  /probe?q=CONCEPT\n  /log?tail=N   /nav\n  /throttle?pct=0..500\n  /gym/start   /gym/stop  (= resume/pause)\n  /gym/restart  (clean stop+save → start)\n  /gym/trainers[?set=|enable=|disable=]",
             AutoSize = true,
             ForeColor = Color.DimGray,
             Margin = new Padding(0, 20, 0, 0)
@@ -1113,7 +1115,7 @@ public class MainWindow : Form
             Font = new Font("Segoe UI", 11, FontStyle.Bold),
             Name = "AutoTrainBtn"
         };
-        startBtn.Click += (s, e) => StartGym();
+        startBtn.Click += (s, e) => _ = StartGymAsync();
         layout.Controls.Add(startBtn);
 
         var stopBtn = new Button
@@ -1127,7 +1129,7 @@ public class MainWindow : Form
             Name = "AutoStopBtn",
             Enabled = false
         };
-        stopBtn.Click += (s, e) => StopGym();
+        stopBtn.Click += (s, e) => _ = StopGymAsync();
         layout.Controls.Add(stopBtn);
 
         panel.Controls.Add(layout);
@@ -1606,12 +1608,12 @@ public class MainWindow : Form
                 ? "[train] personality is SEEDED + chat-ready. Tick a Gym skill to run the training loop alongside it."
                 : "[train] no curriculum enabled — tick Gym and/or Memory+Code.");
             _gymCts.Cancel();
+            _gymLoopTask = null; // nothing launched — clear any stale tracked loop so a later start isn't blocked
             return;
         }
         _gym = gymChildren.FirstOrDefault(); // for /status (first muscle; each muscle persists its own level below)
 
-        var startBtn = GetControl<Button>("AutoTrainBtn"); if (startBtn != null) startBtn.Enabled = false;
-        var stopBtn = GetControl<Button>("AutoStopBtn"); if (stopBtn != null) stopBtn.Enabled = true;
+        SetGymButtons(running: true);
         // Multiple trainers: FOCUSED with REHEARSAL (FocusedCurriculum) by default — it focuses one muscle, hands
         // off via EXHAUSTION (gym muscles are UNBOUNDED so they never "master"; a low focusBudget makes the handoff
         // prompt instead of trapping on the first), and the already-touched muscles RIDE ALONG as light replay,
@@ -1634,17 +1636,88 @@ public class MainWindow : Form
         // Read the navigator toggle on the UI thread NOW (captured into the loop so the background thread never touches
         // a WinForms control). Default ON so an overnight run trains the platonic walker.
         var trainNavigator = GetControl<CheckBox>("CurTrainNavigator")?.Checked ?? true;
-        _ = RunLowPriorityTrainingAsync(async () => { await GymLoopAsync(curriculum, gymChildren, persona, trainNavigator, ct); return 0; }, ct);
+        // TRACK the loop Task so a stop/restart can AWAIT it actually drain before the final save (no fire-and-forget).
+        _gymLoopTask = RunLowPriorityTrainingAsync(async () => { await GymLoopAsync(curriculum, gymChildren, persona, trainNavigator, ct); return 0; }, ct);
     }
 
-    private void StopGym()
+    // ── GYM LIFECYCLE (gate-serialized so start/stop/restart never overlap and a start can never race ahead of a
+    // pending stop's final save). All three acquire _gymLifecycleGate; the HTTP control endpoints AWAIT these so the
+    // response only returns once the requested state (and, for stop, the on-disk save) is reached. ──────────────────
+
+    // CLEAN STOP: cancel the loop, AWAIT it to fully finish, then AWAIT one final SaveAsync. When this returns the
+    // model IS on disk. Caller must hold _gymLifecycleGate.
+    private async Task StopGymCoreAsync()
     {
-        if (_gymCts is null || _gymCts.IsCancellationRequested) return;
-        AppendOutput("[gym] pause requested...");
-        _gymCts.Cancel();
-        var startBtn = GetControl<Button>("AutoTrainBtn"); if (startBtn != null) startBtn.Enabled = true;
-        var stopBtn = GetControl<Button>("AutoStopBtn"); if (stopBtn != null) stopBtn.Enabled = false;
+        var cts = _gymCts;
+        var loop = _gymLoopTask;
+        if (cts is not null && !cts.IsCancellationRequested)
+        {
+            AppendOutput("[gym] stop requested — draining loop, then saving...");
+            try { cts.Cancel(); } catch { }
+        }
+        await InvokeOnUiAsync(() => SetGymButtons(running: false));
+        // (a) AWAIT the loop Task to actually finish shutting down (it observes the cancellation and exits RunAsync).
+        if (loop is not null)
+        {
+            try { await loop; }
+            catch (OperationCanceledException) { }
+            catch (Exception ex) { AppendOutput($"[gym] loop ended with error: {ex.Message}"); }
+        }
+        _gymLoopTask = null;
+        // (b) AWAIT one final save through the model gate — guaranteed on disk before we return.
+        try { await _runtime.SaveAsync(_runtime.AutoCheckpointPath); AppendOutput("[gym] model saved to disk."); }
+        catch (Exception ex) { AppendOutput($"[gym] final save failed: {ex.Message}"); }
     }
+
+    // Public stop entry (HTTP /gym/stop|/gym/pause + the Pause button). Returns only after drain + save complete.
+    private async Task StopGymAsync()
+    {
+        await _gymLifecycleGate.WaitAsync();
+        try { await StopGymCoreAsync(); }
+        finally { _gymLifecycleGate.Release(); }
+    }
+
+    // Public start entry (HTTP /gym/start|/gym/resume + the Start button). Waits for any in-flight stop+save to fully
+    // release the gate FIRST (so we never start a new loop before the old one is saved/drained), then builds the
+    // curricula + launches the loop on the UI thread. StartGym's own guard makes a start on an already-running gym a no-op.
+    private async Task StartGymAsync()
+    {
+        await _gymLifecycleGate.WaitAsync();
+        try { await InvokeOnUiAsync(StartGym); }
+        finally { _gymLifecycleGate.Release(); }
+    }
+
+    // RESTART: clean stop (awaits the final save) → start fresh with the CURRENT checkbox config (for safe reconfiguration).
+    private async Task RestartGymAsync()
+    {
+        await _gymLifecycleGate.WaitAsync();
+        try
+        {
+            await StopGymCoreAsync();
+            await InvokeOnUiAsync(StartGym);
+        }
+        finally { _gymLifecycleGate.Release(); }
+    }
+
+    private void SetGymButtons(bool running)
+    {
+        var startBtn = GetControl<Button>("AutoTrainBtn"); if (startBtn != null) startBtn.Enabled = !running;
+        var stopBtn = GetControl<Button>("AutoStopBtn"); if (stopBtn != null) stopBtn.Enabled = running;
+    }
+
+    // Marshal a UI-thread action/func and AWAIT it (WinForms has no awaitable Invoke). Runs inline if already on the UI
+    // thread; otherwise BeginInvoke + a TaskCompletionSource so the caller's await completes when the UI work is done.
+    private Task InvokeOnUiAsync(Action action) => InvokeOnUiAsync(() => { action(); return true; });
+
+    private Task<T> InvokeOnUiAsync<T>(Func<T> func)
+    {
+        if (!InvokeRequired) return Task.FromResult(func());
+        var tcs = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
+        BeginInvoke(new Action(() => { try { tcs.SetResult(func()); } catch (Exception ex) { tcs.SetException(ex); } }));
+        return tcs.Task;
+    }
+
+    private bool GymRunning => _gymCts is not null && !_gymCts.IsCancellationRequested;
 
     /// <summary>
     /// The gym training loop — hosted IN the app (this is what the retired ClaudeMemory daemon did). Trains the
@@ -1996,7 +2069,7 @@ public class MainWindow : Form
             _control = new HttpListener();
             _control.Prefixes.Add($"http://127.0.0.1:{port}/");
             _control.Start();
-            AppendOutput($"[ctrl] http://127.0.0.1:{port}/   endpoints: /status  /recall?q=  /probe?q=  /log?tail=N  /nav  /throttle?pct=  /gym/start  /gym/stop");
+            AppendOutput($"[ctrl] http://127.0.0.1:{port}/   endpoints: /status  /recall?q=  /probe?q=  /log?tail=N  /nav  /throttle?pct=  /gym/start  /gym/stop  /gym/restart  /gym/trainers[?set=|enable=|disable=]");
             _ = Task.Run(async () =>
             {
                 while (_control.IsListening)
@@ -2025,7 +2098,7 @@ public class MainWindow : Form
                     var mem = _runtime.State?.Memory;
                     body = JsonSerializer.Serialize(new
                     {
-                        running = _gymCts is not null && !_gymCts.IsCancellationRequested,
+                        running = GymRunning,
                         cycle = _gymCycle,
                         level = _lastDifficulty,
                         loss = _lastLoss,
@@ -2107,10 +2180,26 @@ public class MainWindow : Form
                     break;
                 case "/gym/pause":
                 case "/gym/stop":
-                    BeginInvoke(new Action(StopGym)); body = "{\"ok\":\"paused\"}"; break;
+                    // CLEAN async shutdown: cancel + AWAIT the loop drain + AWAIT one final save. The response below is
+                    // only written AFTER this returns, so when the client sees 200 the model IS on disk.
+                    await StopGymAsync();
+                    body = "{\"ok\":\"stopped\",\"saved\":true}";
+                    break;
                 case "/gym/resume":
                 case "/gym/start":
-                    BeginInvoke(new Action(StartGym)); body = "{\"ok\":\"resumed\"}"; break;
+                    // Waits for any in-flight stop+save to fully complete (gate) before launching — no start-before-save,
+                    // no overlapping loops. No-op if the gym is already running.
+                    await StartGymAsync();
+                    body = $"{{\"ok\":\"started\",\"running\":{GymRunning.ToString().ToLowerInvariant()}}}";
+                    break;
+                case "/gym/restart":
+                    // Clean stop (awaits the final save) → start fresh with the current trainer config.
+                    await RestartGymAsync();
+                    body = $"{{\"ok\":\"restarted\",\"running\":{GymRunning.ToString().ToLowerInvariant()}}}";
+                    break;
+                case "/gym/trainers":
+                    body = await HandleGymTrainersAsync(ctx);
+                    break;
                 case "/throttle":
                     if (!int.TryParse(ctx.Request.QueryString["pct"], out var pct) || pct < 0 || pct > 500) { status = 400; body = "{\"error\":\"?pct=0..500\"}"; break; }
                     _gymThrottlePct = pct;
@@ -2119,7 +2208,7 @@ public class MainWindow : Form
                     break;
                 default:
                     status = 404;
-                    body = "{\"error\":\"unknown path\",\"endpoints\":[\"/status\",\"/recall?q=\",\"/query?q=\",\"/probe?q=\",\"/log?tail=N\",\"/nav\",\"/throttle?pct=\",\"/gym/pause\",\"/gym/resume\",\"/gym/start\",\"/gym/stop\"]}";
+                    body = "{\"error\":\"unknown path\",\"endpoints\":[\"/status\",\"/recall?q=\",\"/query?q=\",\"/probe?q=\",\"/log?tail=N\",\"/nav\",\"/throttle?pct=\",\"/gym/pause\",\"/gym/resume\",\"/gym/start\",\"/gym/stop\",\"/gym/restart\",\"/gym/trainers\",\"/gym/trainers?set=A,B\",\"/gym/trainers?enable=A\",\"/gym/trainers?disable=A\"]}";
                     break;
             }
         }
@@ -2133,6 +2222,105 @@ public class MainWindow : Form
             ctx.Response.OutputStream.Close();
         }
         catch { /* client gone */ }
+    }
+
+    // The progressive-trainer registry — every curriculum checkbox an external orchestrator can stage, mapped to its
+    // friendly Name (used in ?set=/?enable=/?disable=), its UI control, and a human label. Order = staging order
+    // (prebake → op-cues → number-words → nav-reasoning → gym skills → the rest). Generated each call so the GymSkill
+    // enum is the single source of truth for the gym muscles.
+    private static IReadOnlyList<(string Name, string Control, string Label)> GymTrainerRegistry()
+    {
+        var list = new List<(string, string, string)>
+        {
+            ("PrebakeLanguage", "CurPrebakeLanguage", "Prebake — warm function-word recognition (real corpus + synthetic L1)"),
+            ("OpCues",          "CurOpCues",          "Op-cue words — sum / difference / product / quotient → operator"),
+            ("NumberWords",     "CurNumberWords",     "Number words — digit ↔ word lexicon"),
+            ("NavReasoning",    "CurNavReasoning",    "Nav-reasoning — is-a taxonomy + level cues (HELD-OUT curve)"),
+            ("TrainNavigator",  "CurTrainNavigator",  "Train Navigator — the platonic walker learns the live space each cycle"),
+            ("Creators",        "CurCreators",        "Creators — skill ladder"),
+            ("MemCode",         "CurMemCode",         "Memory + Code index"),
+            ("Personality",     "CurPersonality",     "Personality — rude chatbot (seeded reply chunks)"),
+        };
+        foreach (var skill in Enum.GetValues<GenesisNova.Train.GymSkill>())
+            list.Add(("Gym" + skill, "GymSkill_" + skill, "Gym — " + GymSkillLabel(skill)));
+        return list;
+    }
+
+    // GET /gym/trainers                      → JSON list of every trainer + enabled(checked) state + running + a note.
+    // /gym/trainers?set=Name1,Name2,...      → enable EXACTLY those, disable the rest (thread-safe via UI Invoke).
+    // /gym/trainers?enable=Name[,Name] / ?disable=Name[,Name] → incremental toggles.
+    // A token matches a trainer by its friendly Name OR its control name, case-insensitively. Changes take effect on
+    // the NEXT /gym/start or /gym/restart (StartGym reads the checkboxes); we say so in the response.
+    private async Task<string> HandleGymTrainersAsync(HttpListenerContext ctx)
+    {
+        var reg = GymTrainerRegistry();
+        var setParam = ctx.Request.QueryString["set"];
+        var enableParam = ctx.Request.QueryString["enable"];
+        var disableParam = ctx.Request.QueryString["disable"];
+
+        string? Resolve(string tok)
+        {
+            tok = tok.Trim();
+            foreach (var r in reg)
+                if (string.Equals(r.Name, tok, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(r.Control, tok, StringComparison.OrdinalIgnoreCase))
+                    return r.Control;
+            return null;
+        }
+        static IEnumerable<string> Split(string s) =>
+            s.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+        var unknown = new List<string>();
+        var changed = new List<string>();
+        if (setParam != null || enableParam != null || disableParam != null)
+        {
+            // Apply ALL checkbox writes on the UI thread in one marshalled+awaited unit (checkboxes are UI-thread state).
+            await InvokeOnUiAsync(() =>
+            {
+                if (setParam != null)
+                {
+                    var wanted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var tok in Split(setParam)) { var c = Resolve(tok); if (c != null) wanted.Add(c); else unknown.Add(tok); }
+                    foreach (var r in reg)
+                    {
+                        var cb = GetControl<CheckBox>(r.Control); if (cb == null) continue;
+                        var on = wanted.Contains(r.Control);
+                        if (cb.Checked != on) { cb.Checked = on; changed.Add((on ? "+" : "-") + r.Name); }
+                    }
+                }
+                foreach (var (param, on) in new[] { (enableParam, true), (disableParam, false) })
+                {
+                    if (param == null) continue;
+                    foreach (var tok in Split(param))
+                    {
+                        var c = Resolve(tok);
+                        if (c == null) { unknown.Add(tok); continue; }
+                        var cb = GetControl<CheckBox>(c); if (cb == null) continue;
+                        if (cb.Checked != on) { cb.Checked = on; changed.Add((on ? "+" : "-") + reg.First(r => r.Control == c).Name); }
+                    }
+                }
+                return true;
+            });
+            if (changed.Count > 0) AppendOutput($"[ctrl] trainers reconfigured: {string.Join(" ", changed)} (applies on next /gym/start or /gym/restart)");
+        }
+
+        // Read the (possibly just-updated) state on the UI thread.
+        var trainers = await InvokeOnUiAsync(() => reg.Select(r => new
+        {
+            name = r.Name,
+            control = r.Control,
+            label = r.Label,
+            enabled = GetControl<CheckBox>(r.Control)?.Checked ?? false
+        }).ToArray());
+
+        return JsonSerializer.Serialize(new
+        {
+            running = GymRunning,
+            note = "enabled = checked. Changes take effect on the next /gym/start or /gym/restart.",
+            changed = changed.ToArray(),
+            unknown = unknown.ToArray(),
+            trainers
+        });
     }
 
     private void HandleAutonomousTrainingProgress(GenesisAutonomousTrainingEventPayload payload)

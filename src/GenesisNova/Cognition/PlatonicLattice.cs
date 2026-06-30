@@ -37,7 +37,11 @@ internal sealed class PlatonicLattice
     // scores live faces over a bounded candidate set, so a correct edit is recognised in the SAME step
     // regardless of when this last fired. Lower the fraction to spend compute on accuracy.
     private const int RebuildMinMutations = 16;
-    private const double RebuildSpaceFraction = 0.05;
+    // PERF: raised 0.05 → 0.20 — a global VP-tree rebuild re-assembles ALL N faces (no assembled-face cache), so at ~10k
+    // nodes it was firing every ~50 examples and dominating substrate time. Within-step correctness is unaffected
+    // (GetNearestConceptsFresh seeds live adjacency + always live-rescores); a staler global tree only widens the
+    // candidate pool slightly. Quarters the rebuild churn.
+    private const double RebuildSpaceFraction = 0.20;
 
     // Strict numeric classification: a genuine concept token is a plain signed decimal.
     // NumberStyles.Any would accept trailing-sign garbage like "0+"/"5-" (parses as 0/5),

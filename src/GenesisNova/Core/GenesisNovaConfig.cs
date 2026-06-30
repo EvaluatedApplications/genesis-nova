@@ -121,5 +121,9 @@ public sealed record GenesisNovaConfig(
         NavigatorDisambiguation = true, // M1 CUTOVER — the trained navigator owns the AMBIGUOUS branch of TryFieldRelax
                                       // (multi-hop walk), gated to a CONFIDENT halt: an untrained/cold walk does not
                                       // confidently resolve → falls through to the one-shot reason (cold-safe, proven).
+        BatchedCloudGpu = true,       // PERF: GPU-batched RecomputeCloud (Cloud = A·T via index_select/index_add_ on
+                                      // CUDA) replacing the scalar per-observation hot loop that was ~90% of training
+                                      // CPU. Fully wired (defer+flush; every read flushes via EnsureCloudsFresh); cloud
+                                      // cos≈1.0 vs scalar (float32 write-back, semantically safe for gym retrieval).
     };
 }

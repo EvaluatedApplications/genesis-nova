@@ -31,6 +31,10 @@ public class MainWindow : Form
     private int _gymTrainPerCycle = 256;
     private int _gymThrottlePct = 0;  // 0..500 — rest this % of the last cycle's time between cycles (0 = full speed)
     private HttpListener? _control;
+    // Bounded in-memory mirror of the UI output log so the headless /log endpoint can serve the tail (gym/nav/train
+    // lines) without the WinForms TextBox. Newest at the back; lock-guarded since AppendOutput runs off many threads.
+    private readonly Queue<string> _logRing = new();
+    private const int LogRingCapacity = 1000;
     private string _exampleFolder;
     private TabControl _tabControl = null!;
     private readonly List<(int Cycle, double Acc, double Loss)> _warmHistory = new(); // Inspect-tab warming curve
@@ -231,7 +235,7 @@ public class MainWindow : Form
 
         flow.Controls.Add(new Label
         {
-            Text = "Control endpoint (headless):\nhttp://127.0.0.1:8787/\n  /status\n  /recall?q=...\n  /throttle?pct=0..500\n  /gym/pause   /gym/resume",
+            Text = "Control endpoint (headless):\nhttp://127.0.0.1:8787/\n  /status\n  /recall?q=...   /query?q=...\n  /probe?q=CONCEPT\n  /log?tail=N   /nav\n  /throttle?pct=0..500\n  /gym/start   /gym/stop  (= resume/pause)",
             AutoSize = true,
             ForeColor = Color.DimGray,
             Margin = new Padding(0, 20, 0, 0)
@@ -1992,7 +1996,7 @@ public class MainWindow : Form
             _control = new HttpListener();
             _control.Prefixes.Add($"http://127.0.0.1:{port}/");
             _control.Start();
-            AppendOutput($"[ctrl] http://127.0.0.1:{port}/   endpoints: /status  /recall?q=...  /gym/pause  /gym/resume");
+            AppendOutput($"[ctrl] http://127.0.0.1:{port}/   endpoints: /status  /recall?q=  /probe?q=  /log?tail=N  /nav  /throttle?pct=  /gym/start  /gym/stop");
             _ = Task.Run(async () =>
             {
                 while (_control.IsListening)
@@ -2055,12 +2059,57 @@ public class MainWindow : Form
                         output = pr.Result.Output,
                         platonic = !pr.Result.UsedNeuralFallback,
                         neuralFallback = pr.Result.UsedNeuralFallback,
-                        confidence = pr.Result.PlatonicConfidence
+                        confidence = pr.Result.PlatonicConfidence,
+                        decisionPath = pr.Result.DecisionPath  // navigator-walk / field-relax / platonic-abstain / neural-token ...
+                    });
+                    break;
+                case "/log":
+                    {
+                        var tail = int.TryParse(ctx.Request.QueryString["tail"], out var t) ? Math.Clamp(t, 1, 400) : 40;
+                        var lines = LogTail(tail);
+                        body = JsonSerializer.Serialize(new { count = lines.Length, lines });
+                    }
+                    break;
+                case "/nav":
+                    {
+                        var nav = _runtime.LastNavTrain;
+                        var curve = _runtime.NavHeldOutHistory
+                            .Select(h => new { cycle = h.Cycle, accuracyPct = h.AccuracyPct, resolvePct = h.ResolvePct, count = h.Count })
+                            .ToArray();
+                        body = JsonSerializer.Serialize(new
+                        {
+                            lastTrain = new { loss = nav.Loss, queries = nav.Queries, resolvePct = nav.ResolvePct, abstainPct = nav.AbstainPct },
+                            resolveRunningPct = _runtime.NavResolveRunningPct,
+                            heldOutCount = _runtime.NavHeldOutCount,
+                            heldOut = curve
+                        });
+                    }
+                    break;
+                case "/probe":
+                    if (string.IsNullOrWhiteSpace(q)) { status = 400; body = "{\"error\":\"missing ?q=\"}"; break; }
+                    ConceptProbe? probe = null;
+                    try { probe = _runtime.ProbeConcept(q); } catch (Exception ex) { status = 500; body = JsonSerializer.Serialize(new { error = ex.Message }); break; }
+                    if (probe is null) { status = 503; body = "{\"error\":\"no diagnostics (non-dialectical space or no model)\"}"; break; }
+                    body = JsonSerializer.Serialize(new
+                    {
+                        concept = probe.Concept,
+                        exists = probe.Exists,
+                        isFunctionLike = probe.IsFunctionLike,
+                        neighbourCoherence = probe.NeighbourCoherence,
+                        coherenceThreshold = probe.CoherenceThreshold,
+                        coherenceFloor = probe.CoherenceFloor,
+                        functionEvidence = probe.FunctionEvidence,
+                        strongRelationDegree = probe.StrongRelationDegree,
+                        relationDegree = probe.RelationDegree,
+                        activeConcepts = probe.ActiveConcepts,
+                        nearest = probe.Nearest.Select(n => new { symbol = n.Symbol, distance = n.Distance }).ToArray()
                     });
                     break;
                 case "/gym/pause":
+                case "/gym/stop":
                     BeginInvoke(new Action(StopGym)); body = "{\"ok\":\"paused\"}"; break;
                 case "/gym/resume":
+                case "/gym/start":
                     BeginInvoke(new Action(StartGym)); body = "{\"ok\":\"resumed\"}"; break;
                 case "/throttle":
                     if (!int.TryParse(ctx.Request.QueryString["pct"], out var pct) || pct < 0 || pct > 500) { status = 400; body = "{\"error\":\"?pct=0..500\"}"; break; }
@@ -2070,7 +2119,7 @@ public class MainWindow : Form
                     break;
                 default:
                     status = 404;
-                    body = "{\"error\":\"unknown path\",\"endpoints\":[\"/status\",\"/recall?q=\",\"/throttle?pct=\",\"/gym/pause\",\"/gym/resume\"]}";
+                    body = "{\"error\":\"unknown path\",\"endpoints\":[\"/status\",\"/recall?q=\",\"/query?q=\",\"/probe?q=\",\"/log?tail=N\",\"/nav\",\"/throttle?pct=\",\"/gym/pause\",\"/gym/resume\",\"/gym/start\",\"/gym/stop\"]}";
                     break;
             }
         }
@@ -2287,7 +2336,26 @@ public class MainWindow : Form
 
     private void AppendOutput(string message)
     {
+        // Mirror into the bounded ring buffer FIRST (thread-safe, no UI marshalling) so the headless /log endpoint
+        // sees every line even before/independent of the UI marshalling in AppendToLogBox.
+        lock (_logRing)
+        {
+            _logRing.Enqueue($"[{DateTime.Now:HH:mm:ss}] {message}");
+            while (_logRing.Count > LogRingCapacity) _logRing.Dequeue();
+        }
         AppendToLogBox("AutoOutputBox", message);
+    }
+
+    /// <summary>The last <paramref name="tail"/> lines of the app output log from the in-memory ring buffer (newest
+    /// last), for the headless /log endpoint. Capped at the ring capacity.</summary>
+    private string[] LogTail(int tail)
+    {
+        lock (_logRing)
+        {
+            var all = _logRing.ToArray();
+            var n = Math.Clamp(tail, 1, all.Length);
+            return all.Length <= n ? all : all[^n..];
+        }
     }
 
      private void AppendToLogBox(string boxName, string message)

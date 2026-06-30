@@ -35,6 +35,25 @@ public sealed record GenesisRuntimeDiagnostics(
     ChunkSummary[] Chunks);
 
 public sealed record RelationSummary(string Left, string Right, long ObservationCount);
+
+/// <summary>READ-ONLY single-concept diagnostics on the live dialectical space (produced by
+/// <see cref="GenesisEvalAppRuntime.ProbeConcept"/>): whether the concept is classified function-like and the
+/// neighbour-coherence reading (+ thresholds) that drives that, its strong-relation degree and total relation degree,
+/// and the nearest neighbours — the headless equivalent of the inspect <c>probe</c>.</summary>
+public sealed record ConceptProbe(
+    string Concept,
+    bool Exists,
+    bool IsFunctionLike,
+    double NeighbourCoherence,
+    double CoherenceThreshold,
+    double CoherenceFloor,
+    double FunctionEvidence,
+    int StrongRelationDegree,
+    int RelationDegree,
+    int ActiveConcepts,
+    IReadOnlyList<ConceptProbeNeighbor> Nearest);
+
+public sealed record ConceptProbeNeighbor(string Symbol, double Distance);
 public sealed record FunctionElementSummary(string Symbol, string[] References);
 public sealed record TransformSummary(string Name, int ObservationCount, double Confidence, string State);
 public sealed record ChunkSummary(string Tag, string Chunk, int Count);

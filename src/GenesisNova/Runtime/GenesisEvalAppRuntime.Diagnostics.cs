@@ -1,5 +1,6 @@
 using EvalApp.Consumer;
 using GenesisNova.Cognition;
+using GenesisNova.Cognition.Platonic;
 using GenesisNova.Core;
 using GenesisNova.Data;
 using GenesisNova.Data.Creators;
@@ -132,6 +133,36 @@ public sealed partial class GenesisEvalAppRuntime
                 Anchors: anchors,
                 Nodes: selectedNodes,
                 Edges: edges);
+        });
+    }
+
+    /// <summary>READ-ONLY single-concept diagnostics on the LIVE dialectical space (the same data the gym/navigator
+    /// reason over): is-function-like + the neighbour-coherence reading that drives it, strong-relation degree, and the
+    /// nearest neighbours. Gated like a predict so it never races a training mutation. Returns <see langword="null"/>
+    /// when the space is non-dialectical (no diagnostics available) — the caller reports that as a 404/empty.</summary>
+    public ConceptProbe? ProbeConcept(string concept, int maxNeighbors = 8)
+    {
+        return WithModelGate(() =>
+        {
+            if (_state.Memory is not DialecticalSpace ds) return null;
+            var key = concept ?? string.Empty;
+            var exists = ds.ContainsConcept(key);
+            var (coherence, _, _, threshold, floor, active, degree, evidence) = ds.FunctionStats(key);
+            var nearest = ds.GetNearestConcepts(key, maxNeighbors: Math.Clamp(maxNeighbors, 1, 32))
+                .Select(n => new ConceptProbeNeighbor(n.Symbol, n.Distance))
+                .ToArray();
+            return new ConceptProbe(
+                Concept: key,
+                Exists: exists,
+                IsFunctionLike: exists && ds.IsFunctionLike(key),
+                NeighbourCoherence: coherence,
+                CoherenceThreshold: threshold,
+                CoherenceFloor: floor,
+                FunctionEvidence: evidence,
+                StrongRelationDegree: ds.StrongRelationDegree(key),
+                RelationDegree: degree,
+                ActiveConcepts: active,
+                Nearest: nearest);
         });
     }
 

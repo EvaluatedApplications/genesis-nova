@@ -84,8 +84,10 @@ public sealed partial class GenesisInferenceEngine
         _foldPathDiscovery = foldPathDiscovery;
         _maxPlatonicAssistInvocations = Math.Clamp(maxPlatonicAssistInvocations, 0, 16);
 
-        // The platonic reasoning ladder, in priority order. Each route abstains when it can't answer; edge-following
-        // routes are dropped automatically when EdgeRoutingEnabled is false. Reorder/extend by editing THIS list only.
+        // LEGACY CLASSIFIER FALLBACK ladder (reached only when ConsciousField is OFF; production thinks by the field —
+        // see Generate/GenerateSingle). In priority order; each route abstains when it can't answer; edge-following
+        // routes are dropped automatically when EdgeRoutingEnabled is false. The glider-plan/gru-query routes consult
+        // the GRU plan/op heads — that classifier machinery is what the field path replaces and is NOT in production.
         _platonicRoutes = new IGenerationRoute[]
         {
             new DelegateRoute("glider-plan",         TryGenerateFromGliderPlan),         // GRU plan head → composition shape
@@ -123,15 +125,24 @@ public sealed partial class GenesisInferenceEngine
 
     // The conversation threads ONE self — but in MEANING-space, inside conscious-field cognition (the persistent
     // _selfField, which conditions reasoning and is shaped by learning). There is no separate GRU-hidden self.
+    /// <summary>The single public generation entry point. In PRODUCTION (<see cref="ConsciousField"/> = true, set by
+    /// WithProductionMechanisms) this routes to <see cref="GenerateFromField"/> — field relaxation + the navigator in
+    /// the ambiguous branch, with NO route/plan/op classifier. The legacy classifier ladder (<see cref="GenerateSingle"/>
+    /// → <see cref="GenerateSinglePass"/>) is the FALLBACK reached ONLY when ConsciousField is off.</summary>
     public GenerationResult Generate(GenerationRequest request) => GenerateSingle(request);
 
+    /// <summary>The PRODUCTION primary path is <see cref="GenerateFromField"/> (conscious-field cognition); everything
+    /// below the ConsciousField guard — the route ladder (glider-plan / gru-query / …), the GRU plan/op heads and the
+    /// label resolvers they feed — is the LEGACY CLASSIFIER FALLBACK. It runs ONLY when <see cref="ConsciousField"/> is
+    /// off (default-off / A-B characterization tests), never in production. Do not extend it (CLAUDE.md: the
+    /// task-classifier over the gym taxonomy is the thing to SUBTRACT); it is kept reachable purely for reversibility.</summary>
     private GenerationResult GenerateSingle(GenerationRequest request)
     {
         _model.EnsureVocabularySize(_tokenizer.VocabularySize);
 
-        // CONSCIOUS-FIELD COGNITION: bypass the entire route/plan/op classifier — the field relaxes to its answer or
-        // abstains (PLATONIC_MIND.md). This IS the model's thinking when alive; the classifier ladder below is the
-        // legacy path kept only for the default-off / A-B case.
+        // CONSCIOUS-FIELD COGNITION (PRODUCTION PRIMARY): bypass the entire route/plan/op classifier — the field relaxes
+        // to its answer or abstains (PLATONIC_MIND.md). This IS the model's thinking when alive. Everything BELOW this
+        // guard is the LEGACY CLASSIFIER FALLBACK, reached only when ConsciousField is off (default-off / A-B case).
         if (ConsciousField)
             return GenerateFromField(request);
 

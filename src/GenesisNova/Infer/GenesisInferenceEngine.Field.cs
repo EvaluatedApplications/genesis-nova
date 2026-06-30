@@ -298,33 +298,75 @@ public sealed partial class GenesisInferenceEngine
     public bool SelfHealMisroutedCues { get; set; }
 
     /// <summary>SELF-HEAL a CUE MISROUTE from a graded-WRONG training probe (gated by <see cref="SelfHealMisroutedCues"/>).
-    /// The example's own STRUCTURE supervises it — no word lists: a NUMERIC true answer produced as a non-number WORD
-    /// over a ≥2-operand input means an arithmetic query was answered by the COMPARE route, so each learned compare-cue
-    /// token in the input was misapplied → contradict its ∘cmp relation (<see cref="DialecticalSpace.DisruptCueRelation"/>
-    /// drops it once thoroughly contradicted). No-op unless the misroute shape holds, so a genuine comparison query
-    /// (numeric input, WORD answer that IS the right outcome) never disrupts anything.</summary>
-    public void HealMisroutedCue(string query, IReadOnlyList<string> allowed, string output)
+    /// GENERAL across the cue-GATED intent routes (compare / to-word / to-digit), with NO arithmetic→compare hardcode:
+    /// the <paramref name="decisionPath"/> (plus the produced-answer structure for the shared number-word path) names
+    /// the intent that FIRED; if the TRUE answer's STRUCTURE is incompatible with the shape that intent PRODUCES, the
+    /// route misfired, so every input token resolving to that intent is contradicted (<see
+    /// cref="DialecticalSpace.DisruptCueRelation"/> drops it once thoroughly contradicted). A genuine intent whose VALUE
+    /// is merely wrong (the produced shape FITS the truth) disrupts nothing — that is the gradient/disruption modules'
+    /// job. So a subtract→compare hijack AND a to-word/to-digit hijack self-correct by the SAME structural path. (∘ret/
+    /// ∘qst route via structural FRAMES — relaxation / the wh-floor — not a single cue-gated route, so a wrong answer
+    /// there is healed by answer-disruption, not by cue-drop; honestly out of scope for this cue-drop path.)</summary>
+    public void HealMisroutedCue(string query, IReadOnlyList<string> allowed, string output, string decisionPath)
     {
         if (!SelfHealMisroutedCues || _memory is not DialecticalSpace ds) return;
-        if (string.IsNullOrWhiteSpace(query) || allowed is not { Count: > 0 }) return;
-        var inv = CultureInfo.InvariantCulture;
-        // The TRUE answer must be a NUMBER (an arithmetic example) ...
-        if (!double.TryParse((allowed[0] ?? string.Empty).Trim(), NumberStyles.Float, inv, out _)) return;
-        // ... and the PRODUCED answer a non-empty, non-number WORD (the compare outcome greater/less/equal) — a misroute.
-        var outToks = TokenizeField(output);
-        if (outToks.Count == 0 || outToks.Any(t => double.TryParse(t, NumberStyles.Float, inv, out _))) return;
-        // ... over an arithmetic-shaped input (≥2 operands), so we only ever contradict a cue that should NOT have
-        // selected compare — never a genuine 2-number comparison whose answer just happens to be a word.
-        var inToks = SignMerge(TokenizeField(query));
-        if (inToks.Count(t => double.TryParse(t, NumberStyles.Float, inv, out _)) < 2) return;
-        foreach (var t in inToks)
-            if (!IsNumericLike(t) && ResolveLearnedIntent(t) == FieldIntent.Compare)
-                ds.DisruptCueRelation(t, "∘cmp");
+        if (string.IsNullOrWhiteSpace(query) || allowed is not { Count: > 0 } || string.IsNullOrEmpty(decisionPath)) return;
+
+        // WHICH intent route FIRED? The cue-gated intent routes are the predicate (CompareCue → a comparison WORD) and
+        // the shared number-word route (ToWord → a number-WORD, ToDigit → a DIGIT); the produced OUTPUT shape splits the
+        // latter two, which share one DecisionPath. A non-intent route (arithmetic / relax / abstain) → nothing to heal.
+        var produced = ClassifyAnswer(output);
+        var fired = decisionPath switch
+        {
+            "field-predicate" => FieldIntent.Compare,
+            "field-numberword" or "field-compute-word" =>
+                produced == AnswerKind.NumberWord ? FieldIntent.ToWord :
+                produced == AnswerKind.Number ? FieldIntent.ToDigit : FieldIntent.None,
+            _ => FieldIntent.None,
+        };
+        if (fired == FieldIntent.None) return;
+
+        // Did it MISFIRE? Compare the TRUE answer's STRUCTURE to the shape the fired intent PRODUCES. A match (a genuine
+        // intent whose value is just wrong) heals NOTHING; a mismatch means a cue selected the wrong route entirely.
+        var truth = ClassifyAnswer(allowed[0]);
+        var routeFits = fired switch
+        {
+            FieldIntent.Compare => truth != AnswerKind.Number,     // a comparison yields a WORD; a NUMBER truth ⇒ arithmetic wanted
+            FieldIntent.ToWord  => truth == AnswerKind.NumberWord, // to-word yields a number-WORD
+            FieldIntent.ToDigit => truth == AnswerKind.Number,     // to-digit yields a DIGIT
+            _ => true,
+        };
+        if (routeFits) return;
+
+        // Contradict every input token that RESOLVES to the misfired intent — the structural trigger of the wrong route.
+        var anchor = IntentAnchors.First(a => a.Intent == fired).Anchor;
+        foreach (var t in SignMerge(TokenizeField(query)))
+            if (!IsNumericLike(t) && ResolveLearnedIntent(t) == fired)
+                ds.DisruptCueRelation(t, anchor);
+    }
+
+    private enum AnswerKind { Empty, Number, NumberWord, Word, Other }
+
+    // STRUCTURAL type of an answer string (no word lists): a single digit ⇒ Number; an all-letters run the number-word
+    // lexicon parses ⇒ NumberWord; any other all-letters run ⇒ Word; else Other/Empty. Lets the self-heal compare what a
+    // route PRODUCES against what the truth WANTS, so a misroute is read from STRUCTURE for ANY cue-gated intent.
+    private AnswerKind ClassifyAnswer(string? text)
+    {
+        var toks = TokenizeField(text ?? string.Empty);
+        if (toks.Count == 0) return AnswerKind.Empty;
+        if (toks.Count == 1 && IsNumericLike(toks[0])) return AnswerKind.Number;
+        var allLetters = toks.All(t => t.Length > 0 && t.All(char.IsLetter));
+        if (allLetters && NumberWords is { } lex && lex.TryParse(toks, out _) && toks.Any(lex.KnowsAtom)) return AnswerKind.NumberWord;
+        return allLetters ? AnswerKind.Word : AnswerKind.Other;
     }
 
     private enum FieldIntent { None, Compare, ToWord, ToDigit, Retrieve, Question }
     private static readonly (string Anchor, FieldIntent Intent)[] IntentAnchors =
         { ("∘cmp", FieldIntent.Compare), ("∘tow", FieldIntent.ToWord), ("∘tod", FieldIntent.ToDigit), ("∘ret", FieldIntent.Retrieve), ("∘qst", FieldIntent.Question) };
+    // The intents LearnIntentCue itself assigns — the COMPETING set a cue token must DISCRIMINATE across (∘qst is owned
+    // by LearnQuestionCue, a separate axis with its own structural evidence, so it stays out of this discrimination).
+    private static readonly (string Anchor, FieldIntent Intent)[] DiscriminativeIntentAnchors =
+        { ("∘cmp", FieldIntent.Compare), ("∘tow", FieldIntent.ToWord), ("∘tod", FieldIntent.ToDigit), ("∘ret", FieldIntent.Retrieve) };
     // #2 de-hardcoded: a CATEGORY is recognised STRUCTURALLY (genesis Law S, reuse-as-target) — a concept many things
     // point to (high relation degree) — not by the kind/type/synonym word-list. An example whose answer is such a hub is
     // a category/synonym RETRIEVAL; its framing cue ("kind"/"synonym") is related to ∘ret and abstains elsewhere.
@@ -345,38 +387,62 @@ public sealed partial class GenesisInferenceEngine
         var outAllLetters = outToks.Count > 0 && outToks.All(t => t.All(char.IsLetter));
         var outIsNumberWord = outAllLetters && lex.TryParse(outToks, out _) && outToks.Any(lex.KnowsAtom);
         var inHasNumberWord = merged.Any(lex.KnowsAtom);
+        // The intent this example MARKS, inferred from STRUCTURE alone. NO operator special-case in the ∘cmp shape: an
+        // operator that shows up here (a corpus date-range "2008 - 2009"→word) is allowed to mark ∘cmp this once — the
+        // discrimination below makes it net out instead, so no hyphen-blacklist is needed.
         string? anchor =
             (nums == 1 && outIsNumberWord) ? "∘tow" :
             (outIsDigit && nums == 0 && inHasNumberWord) ? "∘tod" :
-            // …two operands + a relational WORD answer = Compare — UNLESS an arithmetic OPERATOR token is present
-            // ("12 - 1", a date range "2008 - 2009"): that is arithmetic / a span, NEVER a comparison. Without this the
-            // corpus's hyphenated number facts mislabel the example ∘cmp and relate "-" → ∘cmp, which then HIJACKS every
-            // "a - b" subtraction to the predicate route (see nova-subtract-stuck-compare-hijack — the contamination source).
-            (nums == 2 && outAllLetters && !outIsNumberWord && !merged.Any(t => TryOpToken(t, out _))) ? "∘cmp" :
+            (nums == 2 && outAllLetters && !outIsNumberWord) ? "∘cmp" :
             // RETRIEVAL: no operands, the answer is a single content word that is a CATEGORY HUB (many concepts point to
             // it). The category-ness is the SPACE's own structure (GetRelationDegree), never a kind/type/synonym list.
             (nums == 0 && outToks.Count == 1 && outAllLetters && !outIsNumberWord && ds.GetRelationDegree(outToks[0]) >= CategoryHubDegree) ? "∘ret" :
             null;
-        if (anchor is null) return;
-        foreach (var t in merged)
-            if (!IsNumericLike(t) && !lex.KnowsAtom(t)
-                // An arithmetic OPERATOR (symbol or word: -, +, x, /, minus, plus, times, over) is an ARITHMETIC cue,
-                // never an INTENT cue — so it is never related to ∘cmp/∘tow/∘tod/∘ret (the general hygiene that stops a
-                // corpus "-" polluting the compare route; mirrors LearnArithmeticCue, which already skips op examples).
-                && !TryOpToken(t, out _)
-                // For ∘ret, exclude the LEARNED function words (copula/articles: is/a/of) — else the shared copula "is"
-                // would map every "X is Y" FACT to retrieval. The category-specific marker ("kind"/"synonym") is NOT
-                // function-like, so it survives. This is the learned filler signal, not a stop-list (warm-start).
-                && (anchor != "∘ret" || !ds.IsFunctionLike(t)))
-                ds.FineEditFromExample(new[] { t }, new[] { anchor }, isNegativeExample: false);
 
-        // #3 TWIN — learn the comparison OUTPUT vocabulary (greater/less/equal). The OUTCOME is universal arithmetic
-        // (sign of operand0 − operand1); the WORD for it is LEARNED by relating the output to the sign's outcome anchor.
-        if (anchor == "∘cmp")
+        // A CANDIDATE cue token: non-numeric, non-number-word. Operators are INCLUDED on purpose — they must be free to
+        // accrue the NEGATIVE evidence that makes them self-exclude. No TryOpToken pre-filter, no word lists.
+        bool IsCandidate(string t) => t.Length > 0 && !IsNumericLike(t) && !lex.KnowsAtom(t);
+
+        if (anchor is not null)
         {
-            var ops = merged.Where(t => double.TryParse(t, NumberStyles.Float, inv, out _)).Select(t => double.Parse(t, NumberStyles.Float, inv)).ToList();
-            if (ops.Count == 2 && outToks.Count == 1)
-                ds.FineEditFromExample(new[] { outToks[0] }, new[] { ops[0] > ops[1] ? "∘gt" : ops[0] < ops[1] ? "∘lt" : "∘eq" }, isNegativeExample: false);
+            // DISCRIMINATIVE cue-learning (replaces relate-on-sight): a token earns an intent edge by DISCRIMINATING —
+            // POSITIVE to the intent it MARKS, NEGATIVE to every COMPETING intent it is NOT. Net edge to ∘X =
+            // (marks-X) − (appears-in-not-X): a marker that consistently names one intent nets strongly positive; a
+            // promiscuous token (a framing word, an operator that also lives in arithmetic) nets ~0 and never resolves
+            // (ResolveLearnedIntent's confidence floor reads the net). No operator special-case — operators self-exclude.
+            foreach (var t in merged)
+            {
+                if (!IsCandidate(t)) continue;
+                // The shared copula/glue ("is"/"a"/"of") must not become a ∘ret category cue (every "X is Y" fact would
+                // mis-read as retrieval) — exclude function-like tokens from the ∘ret POSITIVE only; they still take the
+                // competing negatives like any token (reinforcing they are not the OTHER intents either).
+                if (!(anchor == "∘ret" && ds.IsFunctionLike(t)))
+                    ds.FineEditFromExample(new[] { t }, new[] { anchor }, isNegativeExample: false);
+                foreach (var (a, _) in DiscriminativeIntentAnchors)
+                    if (a != anchor)
+                        ds.FineEditFromExample(new[] { t }, new[] { a }, isNegativeExample: true);
+            }
+
+            // #3 TWIN — learn the comparison OUTPUT vocabulary (greater/less/equal). The OUTCOME is universal arithmetic
+            // (sign of operand0 − operand1); the WORD for it is LEARNED by relating the output to the sign's outcome anchor.
+            if (anchor == "∘cmp")
+            {
+                var ops = merged.Where(t => double.TryParse(t, NumberStyles.Float, inv, out _)).Select(t => double.Parse(t, NumberStyles.Float, inv)).ToList();
+                if (ops.Count == 2 && outToks.Count == 1)
+                    ds.FineEditFromExample(new[] { outToks[0] }, new[] { ops[0] > ops[1] ? "∘gt" : ops[0] < ops[1] ? "∘lt" : "∘eq" }, isNegativeExample: false);
+            }
+        }
+        else if (outIsDigit && nums >= 1)
+        {
+            // ARITHMETIC (a numeric result computed from operands — none of the four intents). LearnArithmeticCue owns the
+            // POSITIVE op-cue; here we emit only the NEGATIVE intent signal for its non-numeric tokens, so an operator /
+            // framing word LIVING in arithmetic accrues ∘cmp/∘tow/∘tod/∘ret negatives across the stream. THIS is what nets
+            // an operator to ~0 — a one-off mislabel (the date-range "2008 - 2009"→word) can never outweigh the operator's
+            // constant arithmetic negatives — so the compare route stops being hijackable with NO operator special-case.
+            foreach (var t in merged)
+                if (IsCandidate(t))
+                    foreach (var (a, _) in DiscriminativeIntentAnchors)
+                        ds.FineEditFromExample(new[] { t }, new[] { a }, isNegativeExample: true);
         }
     }
 
@@ -407,11 +473,17 @@ public sealed partial class GenesisInferenceEngine
         return word.Length > 0;
     }
 
+    // A learned intent cue must carry NET-POSITIVE evidence to select a route. The relational CONFIDENCE is the edge
+    // STRENGTH (1 − contradiction), so this floor demands more agreement than contradiction (Strength > 0.5). A token
+    // beaten down by the discriminative negatives — an operator that lives across arithmetic — falls below it and
+    // ABSTAINS: this is what turns "nets ~0" into "never a cue", with no word list. Genuine markers sit near 0.9.
+    private const double IntentCueMinConfidence = 0.5;
+
     private FieldIntent ResolveLearnedIntent(string token)
     {
         if (_memory is not DialecticalSpace ds) return FieldIntent.None;
         var hits = ds.GetNeighbors(token, PlatonicNeighborhoodType.Relational, maxNeighbors: 12, minConfidence: 0.0)
-            .Where(n => IntentAnchors.Any(a => a.Anchor == n.Concept))
+            .Where(n => n.Confidence >= IntentCueMinConfidence && IntentAnchors.Any(a => a.Anchor == n.Concept))
             .Select(n => (Intent: IntentAnchors.First(a => a.Anchor == n.Concept).Intent, n.Confidence))
             .OrderByDescending(x => x.Confidence).ToList();
         if (hits.Count == 0) return FieldIntent.None;
@@ -947,6 +1019,10 @@ public sealed partial class GenesisInferenceEngine
 
     /// <summary>DIAGNOSTIC (tests): does the active path treat this input as a query/retrieval frame (not a statement)?</summary>
     public bool IsQueryOrRetrievalForTests(string input) { var t = TokenizeField(input); return QuestionFrame(t) || RetrievalFrame(t); }
+
+    /// <summary>DIAGNOSTIC (tests): the LEARNED intent a token resolves to (0=None 1=Compare 2=ToWord 3=ToDigit
+    /// 4=Retrieve 5=Question), so a test can prove discrimination directly without driving a whole route.</summary>
+    public int ResolveIntentForTests(string token) => (int)ResolveLearnedIntent(token);
 
 
     private enum FrameKind { None, Assertion, Question }

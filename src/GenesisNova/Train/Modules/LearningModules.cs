@@ -110,7 +110,7 @@ public sealed class CueSelfHealModule : IProbeOutcomeModule
     public void OnGradedProbe(in ProbeOutcome o)
     {
         if (!o.ValueCorrect)
-            try { o.Runtime.HealMisroutedCue(o.Probe.Query, o.Probe.Allowed, o.Output); _healed++; } catch { }
+            try { o.Runtime.HealMisroutedCue(o.Probe.Query, o.Probe.Allowed, o.Output, o.DecisionPath); _healed++; } catch { }
     }
 
     public IReadOnlyDictionary<string, double> Metrics() => new Dictionary<string, double> { ["healed"] = _healed };

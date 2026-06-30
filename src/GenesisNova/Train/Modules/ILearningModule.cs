@@ -39,4 +39,5 @@ public readonly record struct ProbeOutcome(
     bool Neural,
     bool ValueCorrect,
     double Quality,
-    IReadOnlyList<PlatonicEvidence> Evidence);
+    IReadOnlyList<PlatonicEvidence> Evidence,
+    string DecisionPath);

@@ -144,7 +144,7 @@ public sealed class GenesisModularTrainingOrchestrator
                     // weaken the edges the answer used) → Rung-1 disruption (repel a value-wrong answer off the anchor)
                     // → Rung-2 function gradient. Each self-gates; adding a probe-stage mechanism is adding a module.
                     var outcome = new ProbeOutcome(runtime, probe, output, neural, valueCorrect, pq,
-                        res.Result.Evidence ?? Array.Empty<PlatonicEvidence>());
+                        res.Result.Evidence ?? Array.Empty<PlatonicEvidence>(), res.Result.DecisionPath ?? string.Empty);
                     foreach (var m in probeModules)
                         try { m.OnGradedProbe(in outcome); } catch { }
                     if (capture)

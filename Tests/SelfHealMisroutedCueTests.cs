@@ -78,7 +78,7 @@ public sealed class SelfHealMisroutedCueTests
             {
                 var r = eng.Generate(new GenerationRequest(q, 4));
                 if (r.Output.Trim() != a)
-                    eng.HealMisroutedCue(q, new[] { a }, r.Output);
+                    eng.HealMisroutedCue(q, new[] { a }, r.Output, r.DecisionPath);
             }
 
         // HEALED: the same query now computes the difference via the arithmetic route.
@@ -94,41 +94,124 @@ public sealed class SelfHealMisroutedCueTests
         Assert.Equal("greater", cmp.Output.Trim());
     }
 
-    // The SOURCE GUARD (the permanent half): LearnIntentCue must NEVER relate an arithmetic operator to ∘cmp, so the
-    // corpus's hyphenated number facts ("2008 - 2009" → a word) can no longer breed "-"→∘cmp in the first place. Without
-    // this the self-heal is a tug-of-war it loses (every cycle re-creates the edge) — which is why 26 live cycles showed
-    // "no healing". With it, a genuine comparison still learns and routes (the guard is surgical).
-    [Fact]
-    public void LearnIntentCue_NeverContaminatesAnOperatorSymbol_WhileGenuineCompareStillLearns()
+    private const int Compare = 1; // FieldIntent.Compare code returned by ResolveIntentForTests
+
+    private static GenesisInferenceEngine FreshEngine(out DialecticalSpace space, int seed = 7, bool selfHeal = false)
     {
         var config = new GenesisNovaConfig(HiddenSize: ProductionDims.HiddenSize);
-        var space = new DialecticalSpace(config.FaceDimension, seed: 7);
+        space = new DialecticalSpace(config.FaceDimension, seed: seed);
         var eng = new GenesisInferenceEngine(new WhitespaceGenesisTokenizer(), new GenesisNeuralModel(config), space, null)
         {
             ConsciousField = true,
             LearnedCuesOnly = true,
+            SelfHealMisroutedCues = selfHeal,
         };
-        // Seed the number-word lexicon so LearnIntentCue can type outputs (it no-ops without one).
         for (long v = 0; v <= 20; v++) eng.LearnNumberWord($"{v} in words", NumberWordVocabulary.ToWords(v));
+        return eng;
+    }
 
-        // CONTAMINATION ATTEMPT: the exact corpus shape that bred "-"→∘cmp — a hyphenated number range answered by a WORD.
-        for (var i = 0; i < 5; i++) eng.LearnIntentCue("2008 - 2009", "span");
-        // GENUINE comparison: the real cue + outcome vocabulary must still be learned.
+    // GENERAL DISCRIMINATION (the operator special-cases are DELETED — no TryOpToken exclusion anywhere): an operator
+    // earns NO stable intent cue because it LIVES in arithmetic — every subtraction emits "-"→∘cmp/∘tow/∘tod/∘ret
+    // NEGATIVES, which a one-off corpus mislabel (a hyphenated date range answered by a WORD, the old contamination
+    // source — which NOW relates "-"→∘cmp, no longer blocked) can never outweigh. So "-" nets out and subtraction
+    // computes — a CONSEQUENCE of discrimination, not a special-case — while a genuine marker ("compared") still routes.
+    [Fact]
+    public void LearnIntentCue_OperatorSelfExcludesByDiscrimination_NoSpecialCase()
+    {
+        var eng = FreshEngine(out _);
+
+        // THE CONTAMINATION the old special-case blocked: a hyphenated number range answered by a WORD now DOES relate
+        // "-"→∘cmp. Discrimination must net it out — not a blacklist.
+        for (var i = 0; i < 4; i++) eng.LearnIntentCue("2008 - 2009", "span");
+        // ARITHMETIC the operator genuinely lives in — each subtraction emits "-" NEGATIVE to every intent. THIS is what
+        // makes "-" self-exclude. (In the gym every example flows through LearnIntentCue, arithmetic included.)
+        foreach (var (a, b) in new[] { (12, 1), (9, 4), (15, 6), (8, 3), (20, 7), (11, 2) })
+            for (var i = 0; i < 3; i++)
+                eng.LearnIntentCue($"{a} - {b}", (a - b).ToString());
+        // GENUINE comparison: the discriminative cue + outcome vocabulary still learn and route.
         foreach (var (a, b) in new[] { (8, 3), (2, 9), (5, 1), (3, 7) })
             for (var i = 0; i < 3; i++)
                 eng.LearnIntentCue($"{a} compared to {b}", a > b ? "greater" : "less");
 
-        // The operator "-" was NOT contaminated ⇒ subtraction computes (never hijacked to the compare route).
+        // "-" nets out ⇒ resolves to NO intent ⇒ subtraction computes (never hijacked to compare). NO special-case did this.
+        _out.WriteLine($"intent '-'={eng.ResolveIntentForTests("-")}, 'compared'={eng.ResolveIntentForTests("compared")}");
+        Assert.NotEqual(Compare, eng.ResolveIntentForTests("-"));
         var sub = eng.Generate(new GenerationRequest("12 - 1", 4));
         _out.WriteLine($"'12 - 1' path={sub.DecisionPath} -> '{sub.Output.Trim()}'");
         Assert.Equal("field-compute", sub.DecisionPath);
         Assert.Equal(11.0, double.Parse(sub.Output.Trim(), NumberStyles.Float, Inv), 6);
 
-        // …and a GENUINE comparison still routes to the compare path (the guard is surgical, not a blanket disable).
+        // …a GENUINE comparison still routes to the compare path (discrimination is surgical, not a blanket disable).
+        Assert.Equal(Compare, eng.ResolveIntentForTests("compared"));
         var cmp = eng.Generate(new GenerationRequest("8 compared to 3", 4));
         _out.WriteLine($"'8 compared to 3' path={cmp.DecisionPath} -> '{cmp.Output.Trim()}'");
         Assert.Equal("field-predicate", cmp.DecisionPath);
         Assert.Equal("greater", cmp.Output.Trim());
+    }
+
+    // DISCRIMINATION on ARBITRARY tokens (a non-operator case, so the "-" result is clearly a CONSEQUENCE, not a patch):
+    // a PROMISCUOUS nonce that co-occurs with compare in a few examples but ALSO lives across arithmetic NETS OUT (never
+    // a stable cue), while a nonce that CONSISTENTLY marks compare sticks.
+    [Fact]
+    public void Discrimination_PromiscuousNonce_NetsOut_While_ConsistentNonce_Sticks()
+    {
+        var eng = FreshEngine(out _, seed: 11);
+        var pairs = new[] { (8, 3), (2, 9), (5, 1), (3, 7), (6, 2), (4, 9) };
+
+        // CONSISTENT marker "qwib" — only ever a compare frame.
+        foreach (var (a, b) in pairs)
+            for (var i = 0; i < 3; i++)
+                eng.LearnIntentCue($"{a} qwib {b}", a > b ? "greater" : "less");
+        // PROMISCUOUS nonce "zlorp" — a few compare mislabels, but it ALSO lives across many arithmetic examples.
+        foreach (var (a, b) in pairs)
+            eng.LearnIntentCue($"{a} zlorp {b}", a > b ? "greater" : "less");
+        foreach (var (a, b) in pairs)
+            for (var i = 0; i < 3; i++)
+                eng.LearnIntentCue($"zlorp {a} + {b}", (a + b).ToString());
+
+        _out.WriteLine($"qwib -> intent {eng.ResolveIntentForTests("qwib")}, zlorp -> intent {eng.ResolveIntentForTests("zlorp")}");
+        Assert.Equal(Compare, eng.ResolveIntentForTests("qwib"));      // consistent marker sticks
+        Assert.NotEqual(Compare, eng.ResolveIntentForTests("zlorp"));  // promiscuous token nets out
+    }
+
+    // GENERAL SELF-HEAL on a DIFFERENT intent than compare: a to-WORD hijack self-corrects through the SAME structural
+    // path. A contaminated cue "grok"→∘tow routes "grok 5" to the number-word route (spelling the digit → "five"); the
+    // TRUE answer is a NUMBER, whose structure does not fit what to-word PRODUCES (a number-word) → the cue is disrupted.
+    // Proves the self-heal is general (DecisionPath + true-answer structure), not an arithmetic→compare hardcode.
+    [Fact]
+    public void GeneralSelfHeal_HealsAToWordHijack_ThroughTheSamePath()
+    {
+        var eng = FreshEngine(out var space, seed: 5, selfHeal: true);
+        for (var i = 0; i < 3; i++)
+        {
+            space.FineEditFromExample(new[] { "words" }, new[] { "∘tow" }, isNegativeExample: false); // genuine to-word cue
+            space.FineEditFromExample(new[] { "grok" }, new[] { "∘tow" }, isNegativeExample: false);   // THE CONTAMINATION
+        }
+
+        // REPRODUCE THE HIJACK: "grok" routes "grok 5" to the to-word route, spelling the digit instead of the wanted number.
+        var hijack = eng.Generate(new GenerationRequest("grok 5", 4));
+        _out.WriteLine($"before: 'grok 5' path={hijack.DecisionPath} -> '{hijack.Output.Trim()}'");
+        Assert.Equal("field-numberword", hijack.DecisionPath);
+        Assert.Equal("five", hijack.Output.Trim());
+
+        // SELF-HEAL: the SAME general signal — the true answer ("8", a NUMBER) does not fit to-word's produced shape.
+        for (var pass = 0; pass < 4; pass++)
+        {
+            var r = eng.Generate(new GenerationRequest("grok 5", 4));
+            if (r.Output.Trim() != "8") eng.HealMisroutedCue("grok 5", new[] { "8" }, r.Output, r.DecisionPath);
+        }
+
+        // HEALED: "grok" no longer selects the to-word route (the cue was unlearned by the general path).
+        var healed = eng.Generate(new GenerationRequest("grok 5", 4));
+        _out.WriteLine($"after:  'grok 5' path={healed.DecisionPath} -> '{healed.Output.Trim()}'");
+        Assert.NotEqual("field-numberword", healed.DecisionPath);
+        Assert.NotEqual("five", healed.Output.Trim());
+
+        // SURGICAL: a GENUINE to-word query still routes and spells (only "grok" was unlearned, not "words").
+        var genuine = eng.Generate(new GenerationRequest("5 in words", 4));
+        _out.WriteLine($"genuine:'5 in words' path={genuine.DecisionPath} -> '{genuine.Output.Trim()}'");
+        Assert.Equal("field-numberword", genuine.DecisionPath);
+        Assert.Equal("five", genuine.Output.Trim());
     }
 
     [Fact]
@@ -145,7 +228,7 @@ public sealed class SelfHealMisroutedCueTests
             foreach (var (q, a) in SubProbes)
             {
                 var r = eng.Generate(new GenerationRequest(q, 4));
-                if (r.Output.Trim() != a) eng.HealMisroutedCue(q, new[] { a }, r.Output);
+                if (r.Output.Trim() != a) eng.HealMisroutedCue(q, new[] { a }, r.Output, r.DecisionPath);
             }
 
         // … and the hijack persists (the regimen can NOT recover — the very gap this feature closes).

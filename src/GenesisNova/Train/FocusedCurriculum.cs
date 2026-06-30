@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using GenesisNova.Runtime;
 
 namespace GenesisNova.Train;
 
@@ -40,6 +41,22 @@ public sealed class FocusedCurriculum : ITrainingCurriculum
         // re-introduces them — which reads as "training always starts lower than it ended" on every reload. With this,
         // the full trained mix is graded + rehearsed from cycle 1, so the resumed accuracy matches where it left off.
         if (resuming) foreach (var u in _all) u.MarkIntroduced();
+    }
+
+    /// <summary>ASSESS each unit's CURRENT mastery against the resumed/live model at gym start, BEFORE the first cycle.
+    /// THE FIX for "every restart re-runs the prebake foundation first": on a fresh restart every unit is a NEW object
+    /// (all "fresh", no signal), so <see cref="NextWeakest"/> picked fresh[0] = the foundation (list order) even when it
+    /// was already mastered — re-training a warm prebake instead of the newly-added weakest skill. Seeding from each
+    /// unit's <see cref="ITrainingCurriculum.SelfAssess"/> (the foundation curricula grade by a PROPERTY OF THE SPACE,
+    /// so a resumed model already scores) gives a real signal: a unit that scores is no longer "fresh" (so it won't lead
+    /// over a genuinely-newer/weaker unit), and one already past the bar drops straight to rehearsal. Units that can't
+    /// self-assess (return null — e.g. the gym muscles, op-cues, number-words) stay fresh and keep their deterministic
+    /// foundation list order among themselves, so a genuinely-COLD model still trains the foundation first.</summary>
+    public void SeedFromAssessment(GenesisEvalAppRuntime runtime)
+    {
+        foreach (var u in _all)
+            if (u.SelfAssess(runtime) is double g)
+                u.SeedFromAssessment(g);
     }
 
     public string Name => "focused(" + string.Join(",", _all.Select(u => u.Name)) + ")";
@@ -145,6 +162,18 @@ public sealed class FocusUnit : ITrainingCurriculum
     public void BeginTurn() { HasBeenFocused = true; _turnAttempts = 0; } // claim focus: introduce + fresh budget
     public void ResetTurn() => _turnAttempts = 0;                         // hand off: clear the spent turn counter
     public void MarkIntroduced() => HasBeenFocused = true;               // resume: this unit was trained before → already in the mix
+
+    /// <summary>Seed mastery state from a START-OF-GYM self-assessment against the resumed model (see
+    /// <see cref="FocusedCurriculum.SeedFromAssessment"/>). A unit that already SCORES (a warm foundation) gets that
+    /// score as its accuracy and is marked INTRODUCED — it has a real signal, so it's no longer "fresh" and won't be
+    /// chosen as focus ahead of a genuinely-newer/weaker unit. If it already clears the bar (or its inner curriculum
+    /// reports mastery) it drops straight to capped rehearsal instead of re-claiming focus.</summary>
+    public void SeedFromAssessment(double assessed)
+    {
+        RecentAccuracy = assessed;
+        HasBeenFocused = true;                                            // has a real signal now → not "fresh"
+        if (assessed >= _bar || _inner.IsMastered) { Mastered = true; _streak = Math.Max(_streak, _window); }
+    }
 
     public string Name => _inner.Name;
     public int Difficulty => _inner.Difficulty;

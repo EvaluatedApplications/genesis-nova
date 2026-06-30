@@ -87,6 +87,62 @@ public sealed class FocusedCurriculumRotationTests
         }
     }
 
+    // A foundation-style unit graded by a PROPERTY OF THE SPACE: it self-assesses a fixed readiness score (ignoring
+    // the runtime, which is unused here) instead of emitting surface probes. The prebake/corpus warmers are these.
+    private sealed class SelfAssessUnit : ITrainingCurriculum
+    {
+        private const int BatchSize = 20;
+        private readonly double _score;
+        public SelfAssessUnit(string name, double score) { Name = name; _score = score; }
+        public string Name { get; }
+        public int Difficulty => 1;
+        public int MasteryDepth => 1;
+        public IReadOnlyList<(string Input, string Output)> NextTrainBatch() =>
+            Enumerable.Range(0, BatchSize).Select(i => ($"{Name}-{i}", "o")).ToList();
+        public IReadOnlyList<TrainingProbe> NextProbes() => Array.Empty<TrainingProbe>();
+        public double? SelfAssess(GenesisNova.Runtime.GenesisEvalAppRuntime runtime) => _score;
+        public void RecordCycle(CycleGrade grade) { }
+    }
+
+    // THE BUG FIX: on a restart that adds a new weak skill atop an already-MASTERED foundation, the FIRST focus must be
+    // the new (most-unknown) skill, NOT the warm foundation — even though the foundation leads the list. SeedFromAssessment
+    // assesses the resumed model so the mastered foundation drops to rehearsal and the genuinely-weakest unit leads.
+    [Fact]
+    public void SeedFromAssessment_MasteredFoundationFirstInList_FocusesNewWeakSkillNotFoundation()
+    {
+        const int replayCap = 5;
+        // 'foundation' is FIRST in the list (its deterministic prerequisite slot) and already scores past the bar;
+        // 'opcues' is a freshly-added skill that cannot self-assess (null) — the genuinely-unknown unit.
+        var c = new FocusedCurriculum(
+            new ITrainingCurriculum[] { new SelfAssessUnit("foundation", 0.95), new FakeUnit("opcues") },
+            masteryBar: 0.80, focusBudget: 8, replayCap: replayCap);
+
+        c.SeedFromAssessment(null!); // resumed model: foundation already warm (>= bar), opcues untouched/fresh
+
+        var counts = CountByUnit(Step(c, _ => 0.0));
+        Assert.True(counts.TryGetValue("opcues", out var on) && on > replayCap,
+            "the fresh, unassessable skill must take focus at depth");                                   // weakest-first → new skill
+        Assert.False(counts.TryGetValue("foundation", out var fn) && fn > replayCap,
+            "the already-mastered foundation must NOT re-claim focus");                                  // mastered foundation rides, not refocuses
+    }
+
+    // A genuinely COLD model (foundation cannot self-assess yet, or scores 0) must still train the foundation FIRST —
+    // the deterministic prerequisite order is preserved among un-assessable/unmastered fresh units.
+    [Fact]
+    public void SeedFromAssessment_ColdModel_StillTrainsFoundationFirst()
+    {
+        const int replayCap = 5;
+        var c = new FocusedCurriculum(
+            new ITrainingCurriculum[] { new FakeUnit("foundation"), new FakeUnit("opcues") },
+            masteryBar: 0.80, focusBudget: 8, replayCap: replayCap);
+
+        c.SeedFromAssessment(null!); // nothing self-assesses → no unit seeded → all still fresh, list order kept
+
+        var counts = CountByUnit(Step(c, _ => 0.0));
+        Assert.True(counts.TryGetValue("foundation", out var fn) && fn > replayCap,
+            "a cold model trains the foundation (list-first fresh unit) first");
+    }
+
     [Fact]
     public void MasteredBoundedUnit_DropsOutOfRotation_StillRehearsesCapped()
     {

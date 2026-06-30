@@ -1624,12 +1624,26 @@ public class MainWindow : Form
         // RESUMING = any muscle restored above level 1 (it was trained before). Then mark all units introduced so the
         // FULL trained mix is probed from cycle 1 — otherwise the reported accuracy starts at just the first focus
         // muscle and only climbs back as the rotation re-introduces them (reads as "starts lower than it ended").
-        var resuming = gymChildren.Any(g => g.Level > 1);
-        ITrainingCurriculum curriculum = children.Count == 1
-            ? children[0]
-            : (GetControl<CheckBox>("CurFocused")?.Checked ?? true)
-                ? new FocusedCurriculum(children, focusBudget: 8, resuming: resuming) // focus + rider-replay; prompt handoff for unbounded muscles
-                : new CompositeCurriculum(children);
+        // RESUMING = the model carries PRIOR TRAINING — either a gym muscle restored above level 1, OR a resumed
+        // NON-EMPTY platonic space (AutoResume loaded a checkpoint with substantial nodes). The latter matters during a
+        // FOUNDATION-ONLY stage (no gym skills yet, all muscles at level 1) where the muscle check alone reads false.
+        var spaceNodes = (_runtime?.State?.Memory as DialecticalSpace)?.NodeCount ?? 0;
+        var resuming = gymChildren.Any(g => g.Level > 1) || spaceNodes >= 256;
+        ITrainingCurriculum curriculum;
+        if (children.Count == 1)
+            curriculum = children[0];
+        else if (GetControl<CheckBox>("CurFocused")?.Checked ?? true)
+        {
+            var focused = new FocusedCurriculum(children, focusBudget: 8, resuming: resuming); // focus + rider-replay; prompt handoff for unbounded muscles
+            // THE FIX: assess each unit's CURRENT mastery against the just-resumed model BEFORE the first cycle, so an
+            // already-warm foundation (a mastered prebake) does NOT re-claim focus ahead of a newly-added weak skill
+            // (e.g. op-cues just enabled). The mastered foundation rides as bounded rehearsal; the weakest UNMASTERED
+            // unit leads. A genuinely-COLD model (nothing assessable scores) still trains the foundation first.
+            if (_runtime is not null) focused.SeedFromAssessment(_runtime);
+            curriculum = focused;
+        }
+        else
+            curriculum = new CompositeCurriculum(children);
         if (persona is not null)
             curriculum = new ProbeAlongsideCurriculum(curriculum, persona); // graded each cycle → shows in the list, kept alive
         var ct = _gymCts.Token;

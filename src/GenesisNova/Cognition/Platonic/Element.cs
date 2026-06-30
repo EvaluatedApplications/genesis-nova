@@ -62,7 +62,13 @@ public sealed class Element
     /// composites (reuse ⇒ bounded growth, Law S).</summary>
     public int[] Components { get; }
 
-    /// <summary>G6: dormant rather than deleted. Archived elements are retained (reactivatable), never destroyed.</summary>
+    /// <summary>G6-DORMANCY flag. Set only when restoring G6-dormancy on snapshot import (see
+    /// <see cref="ElementStore.Archive"/>) — it is NOT the evictor. Live eviction
+    /// (<c>DischargeIrrelevant → DischargeConcept → ElementStore.Remove</c>) genuinely DELETES the element. That stays
+    /// G6-faithful because the address space is a LATENT coordinate system: an element's IDENTITY is a deterministic
+    /// decodable coordinate (a pure function of its symbol), so a delete only DE-MATERIALISES it (frees working memory).
+    /// Re-observing the symbol re-derives the EXACT same frozen face; the non-derivable learned tail (the orbital +
+    /// <see cref="FunctionEvidence"/>) re-accumulates. The distinction is never unmade — the coordinate is the record.</summary>
     public bool Archived { get; set; }
 
     /// <summary>How many times this element has participated in an observation (drives plasticity / lifecycle).</summary>

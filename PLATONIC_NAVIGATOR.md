@@ -252,7 +252,7 @@ reward at every state the learner could occupy.
 
 ## 11. Build order (§10 settled)
 
-1. **Flow-field oracle** *(done partly — motion seams landed: `TryLand`/`Materialise`/`NavNeighborhood`/`Landmarks`)*.
+1. **Flow-field oracle** *(done partly — motion seams landed: `TryLand`/`Materialise`; the navigator senses the frozen address via `NavQueryFeatures` / `FrozenIdentityDistance`)*.
    Port the backward-Dijkstra pattern (`NavMeshFlowField.Compute`, ~30 lines, **not** the navmesh geometry) over the
    platonic **action-graph**: from a known answer coordinate, fill `cost[node]` (dense reward) + `next[node]` (expert
    action) over the reachable graph. Compute once per answer, cache. Handle the reverse-graph (relations reversed,

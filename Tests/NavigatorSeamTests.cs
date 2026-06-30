@@ -13,8 +13,6 @@ namespace GenesisNova.Tests;
 /// <see cref="DialecticalSpace"/> at the address-space dim (512):
 ///   • TryLand        — "the lattice lands the step": decode-first on a clean address, else snap to the nearest real coord.
 ///   • Materialise    — the genesis-tick write-path: a passed-through latent coordinate becomes a realised element.
-///   • NavNeighborhood— the navigation sensor ranked over the FROZEN ADDRESS (stable identity), not the drifting tail.
-///   • Landmarks      — TOWARD-landmark targets: the highest-relation-degree hubs near a symbol.
 /// </summary>
 public sealed class NavigatorSeamTests
 {
@@ -81,48 +79,8 @@ public sealed class NavigatorSeamTests
         _out.WriteLine($"[3] after Materialise(wug): ContainsConcept(wug)={space.ContainsConcept("wug")}");
         Assert.True(space.ContainsConcept("wug"), "Materialise must realise the decoded symbol");
 
-        var near = space.NavNeighborhood("wig", 8);
-        _out.WriteLine($"[3] NavNeighborhood(wig)=[{string.Join(", ", near.Select(n => $"{n.Symbol}:{n.Distance:F3}"))}]");
+        var near = space.Neighborhood("wig", 8);
+        _out.WriteLine($"[3] Neighborhood(wig)=[{string.Join(", ", near.Select(n => $"{n.Symbol}:{n.Distance:F3}"))}]");
         Assert.Contains(near, n => n.Symbol == "wug");
-    }
-
-    // 4. NavNeighborhood ranks by FROZEN IDENTITY — a spelling-near sibling ranks above a spelling-far one.
-    [Fact]
-    public void NavNeighborhood_RanksBy_FrozenAddressProximity()
-    {
-        var space = new DialecticalSpace(Dim);
-        space.Materialise("cat");
-        space.Materialise("cot");        // one char from "cat" → frozen-near
-        space.Materialise("elephant");   // spelling-far
-
-        var near = space.NavNeighborhood("cat", 8);
-        _out.WriteLine($"[4] NavNeighborhood(cat)=[{string.Join(", ", near.Select(n => $"{n.Symbol}:{n.Distance:F3}"))}]");
-
-        var iCot = Array.FindIndex(near.ToArray(), n => n.Symbol == "cot");
-        var iElephant = Array.FindIndex(near.ToArray(), n => n.Symbol == "elephant");
-        Assert.True(iCot >= 0, "the near sibling must be present");
-        Assert.True(iElephant < 0 || iCot < iElephant, $"frozen-near 'cot' (idx {iCot}) must rank above 'elephant' (idx {iElephant})");
-    }
-
-    // 5. Landmarks returns higher-relation-degree concepts first — a hub (one concept related to many) is the landmark.
-    [Fact]
-    public void Landmarks_ReturnsHighestDegreeFirst()
-    {
-        var space = new DialecticalSpace(Dim);
-        // Hub: "sun" related to eight star names → degree 8 (the landmark / centroid).
-        foreach (var star in new[] { "vega", "rigel", "sirius", "altair", "deneb", "spica", "antares", "capella" })
-            space.ObserveContradiction("sun", star, 0.1);
-        // A low-degree concept elsewhere to navigate FROM.
-        space.ObserveContradiction("moon", "night", 0.1);
-
-        var landmarks = space.Landmarks("moon", 3);
-        _out.WriteLine($"[5] Landmarks(moon)=[{string.Join(", ", landmarks.Select(l => $"{l.Symbol}:{l.Degree}"))}]");
-
-        Assert.NotEmpty(landmarks);
-        Assert.Equal("sun", landmarks[0].Symbol);
-        Assert.Equal(8, landmarks[0].Degree);
-        // degrees are non-increasing (highest landmark first).
-        for (var i = 1; i < landmarks.Count; i++)
-            Assert.True(landmarks[i - 1].Degree >= landmarks[i].Degree, "landmarks must be ordered by descending degree");
     }
 }

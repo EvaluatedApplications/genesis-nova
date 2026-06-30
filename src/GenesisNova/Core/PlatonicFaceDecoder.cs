@@ -13,7 +13,6 @@ namespace GenesisNova.Core;
 /// exact algebraic inverse:
 /// <list type="bullet">
 ///   <item><see cref="DecodeNumericFromPrediction"/> ↔ <see cref="PlatonicFaceComposer.GetFreshNumericEmbedding"/></item>
-///   <item><see cref="WordSlotDecode"/> ↔ <see cref="PlatonicFaceComposer.GetWordComposedEmbedding"/></item>
 /// </list>
 /// </para>
 /// <para>
@@ -173,83 +172,6 @@ internal static class PlatonicFaceDecoder
             residual += diff * diff;
         }
         return Math.Clamp(1.0 - Math.Sqrt(residual), 0.0, 1.0);
-    }
-
-    /// <summary>
-    /// Decode a predicted embedding back to a sentence by reading each word slot independently — the
-    /// inverse of <see cref="PlatonicFaceComposer.GetWordComposedEmbedding"/>.
-    /// <para>
-    /// Word slots live at <see cref="FaceLayout.WordFaceStart"/> (falling back to dim/2 when
-    /// <see cref="FaceLayout.WordFaceDims"/> == 0, exactly like the composer). Explicit space tokens
-    /// are interleaved at odd slot indices identically to the encode, so they are skipped here and the
-    /// decoded words are re-joined with single spaces. Each word slot is matched to the nearest word in
-    /// <paramref name="wordVocab"/> by comparing the slot dims against that word's atom
-    /// (<see cref="PlatonicFaceComposer.GetChunkComposedEmbedding"/> read from [dim/2..dim)).
-    /// </para>
-    /// </summary>
-    public static string WordSlotDecode(double[] predicted, int dim, IReadOnlyCollection<string> wordVocab)
-    {
-        if (predicted is null || dim <= 0 || wordVocab is null || wordVocab.Count == 0)
-            return string.Empty;
-
-        var wordStart = FaceLayout.WordFaceStart(dim);
-        var wordDims = FaceLayout.WordFaceDims(dim);
-        var atomStart = dim / 2; // GetChunkComposedEmbedding fills [dim/2..dim)
-
-        // No dedicated word face at this dim → fall back to the full semantic half (composer parity).
-        if (wordDims == 0)
-        {
-            wordStart = dim / 2;
-            wordDims = dim - wordStart;
-        }
-
-        var wSlotDims = FaceLayout.WordSlotDims(wordDims);
-        var maxWSlots = wSlotDims > 0 ? wordDims / wSlotDims : 0;
-        if (maxWSlots <= 0)
-            return string.Empty;
-
-        // Precompute each candidate word's atom slice [atomStart..atomStart+wSlotDims).
-        var spaceAtom = PlatonicFaceComposer.GetChunkComposedEmbedding(" ", dim);
-
-        var decoded = new List<string>();
-        for (var i = 0; i < maxWSlots; i++)
-        {
-            var slotStart = wordStart + (i * wSlotDims);
-
-            // End of sentence: first near-zero slot.
-            if (RangeNorm(predicted, slotStart, slotStart + wSlotDims) < 1e-9)
-                break;
-
-            // Odd slots ARE the explicit space token (encode interleaves words and spaces). The space
-            // is implicit when we re-join, so just skip these positions.
-            if (i % 2 == 1)
-                continue;
-
-            var best = string.Empty;
-            var bestDist = double.MaxValue;
-            foreach (var word in wordVocab)
-            {
-                if (string.IsNullOrEmpty(word))
-                    continue;
-                var wordAtom = PlatonicFaceComposer.GetChunkComposedEmbedding(word, dim);
-                var dist = SlotDistance(predicted, slotStart, wordAtom, atomStart, wSlotDims, dim);
-                if (dist < bestDist)
-                {
-                    bestDist = dist;
-                    best = word;
-                }
-            }
-
-            // Also consider the literal space atom — if the slot is closest to it, treat as a gap.
-            var spaceDist = SlotDistance(predicted, slotStart, spaceAtom, atomStart, wSlotDims, dim);
-            if (spaceDist < bestDist)
-                continue;
-
-            if (best.Length > 0)
-                decoded.Add(best);
-        }
-
-        return string.Join(' ', decoded);
     }
 
     // ============================================================================================
@@ -418,18 +340,6 @@ internal static class PlatonicFaceDecoder
             if (dist < bestDist) { bestDist = dist; best = cand; }
         }
         return best;
-    }
-
-    private static double SlotDistance(
-        double[] predicted, int slotStart, double[] atom, int atomStart, int slotDims, int dim)
-    {
-        var dist = 0.0;
-        for (var k = 0; k < slotDims && atomStart + k < dim && slotStart + k < dim; k++)
-        {
-            var diff = predicted[slotStart + k] - atom[atomStart + k];
-            dist += diff * diff;
-        }
-        return dist;
     }
 
     /// <summary>Euclidean norm of <paramref name="vec"/> over [start, end).</summary>

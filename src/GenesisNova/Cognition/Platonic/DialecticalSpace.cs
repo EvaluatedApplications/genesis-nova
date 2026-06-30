@@ -29,7 +29,7 @@ public sealed class DialecticalSpace : IPlatonicSpace
     private readonly Dictionary<string, Dictionary<string, int>> _chunks = new(StringComparer.Ordinal);
     private readonly FunctionElementRegistry _functions;
     // Distinct Merge LABELS seen this session (seeded with the fact label "is") — the candidate role/label vocab the
-    // address-space structure decoder (TryDecodeStructure / TryDecodeCoordinate) resolves a slot's role code against.
+    // address-space structure decoder (PlatonicFaceDecoder.DecodeStructure via TryDecodeCoordinate) resolves a slot's role code against.
     private readonly HashSet<string> _mergeLabels = new(StringComparer.Ordinal) { "is" };
 
     /// <summary>The LEARNED number-word lexicon (de-hardcoding #5). Lives on the SPACE (not the engine) so it is SHARED
@@ -361,7 +361,7 @@ public sealed class DialecticalSpace : IPlatonicSpace
         // ADDRESS SPACE (A): a COMPOSITE (Merge ⟨a·label·b⟩) carries a DECODABLE identity in the FROZEN structure band
         // [208,400) — the ordered child coordinates + label. AssemblePositiveFace only overlays the orbital onto the
         // tail [OrbitalStart,dim), so it never clobbers the structure band; we mirror the element's ▷ children into it
-        // here so the composite decodes from its frozen face (TryDecodeStructure), not just its symbol/lossy orbital.
+        // here so the composite decodes from its frozen face (PlatonicFaceDecoder.DecodeStructure), not just its symbol/lossy orbital.
         // The band lies OUTSIDE FaceAwareDistance's [_semStart,dim) tail, so semantic retrieval is unaffected.
         if (element is not null) WriteStructureBand(face, element);
         // ADDRESS SPACE (op band): a FUNCTION element (a realised operation) carries its op-code in the FROZEN op band
@@ -419,35 +419,6 @@ public sealed class DialecticalSpace : IPlatonicSpace
         if (inner.StartsWith(aSym + "·", StringComparison.Ordinal)) inner = inner.Substring(aSym.Length + 1);
         if (inner.EndsWith(bSym, StringComparison.Ordinal)) inner = inner.Substring(0, inner.Length - bSym.Length);
         return inner.Trim('·');
-    }
-
-    /// <summary>
-    /// (A) Read a COMPOSITE's identity back from its FROZEN structure band — the face-level mirror of its ▷ children —
-    /// via <see cref="PlatonicFaceDecoder.DecodeStructure"/>. The L1 child digest only holds a child's numeric head +
-    /// first 2 spelling chars, so a long/non-numeric child decodes only to a DIGEST; we CLEAN IT UP against the
-    /// element's authoritative ▷ <see cref="Element.Components"/> symbol (the realised child we hold). The Components
-    /// int[] stays authoritative; the structure band is the decodable face-level mirror. False for a non-composite,
-    /// an absent/archived symbol, or below address-space dims.
-    /// </summary>
-    public bool TryDecodeStructure(string symbol, out string label, out IReadOnlyList<string> children)
-    {
-        label = string.Empty;
-        children = Array.Empty<string>();
-        if (!Core.FaceLayout.IsAddressSpace(_dim)) return false;
-        var key = Normalize(symbol);
-        if (!_concepts.TryGet(key, out var e) || e.Archived || e.Components.Length == 0
-            || !key.StartsWith("⟨", StringComparison.Ordinal)) return false;
-        var face = FullFace(key, e);
-        var decoded = PlatonicFaceDecoder.DecodeStructure(face, _dim, _mergeLabels);
-        var compSyms = new List<string>(e.Components.Length);
-        foreach (var cid in e.Components) compSyms.Add(_concepts.ById(cid).Symbol);
-        var n = Math.Max(decoded.Children.Count, compSyms.Count);
-        var cleaned = new List<string>(n);
-        for (var i = 0; i < n; i++)
-            cleaned.Add(i < compSyms.Count ? compSyms[i] : decoded.Children[i]); // authoritative ▷ child; digest fallback
-        children = cleaned;
-        label = string.IsNullOrEmpty(decoded.Label) ? MergeLabelOf(e) : decoded.Label;
-        return cleaned.Count > 0;
     }
 
     /// <summary>Normalize the large-face region [_semStart, dim) of an assembled face to unit (leaves the frozen
@@ -634,7 +605,7 @@ public sealed class DialecticalSpace : IPlatonicSpace
             }
         }
         // (2) COMPOSITE — decode the ordered child digests + label from the structure band (a best-effort symbol; a
-        // realised composite is cleaned up exactly by TryDecodeStructure, which has the authoritative ▷ children).
+        // realised composite is reconciled against the authoritative ▷ children in Element.Components below).
         if (kind is PlatonicKind.Relation or PlatonicKind.Composition)
         {
             var dec = PlatonicFaceDecoder.DecodeStructure(face, _dim, _mergeLabels);
@@ -676,14 +647,12 @@ public sealed class DialecticalSpace : IPlatonicSpace
     //   The substrate seams a future NN walker STEPS WITH — no NN, no policy, no training here; just the moves. Every
     //   navigator action (STEP-near / FOLLOW-edge / COMPUTE-jump / TOWARD-landmark) reduces to ONE primitive: emit a
     //   target coordinate, then let the lattice LAND the foot on the nearest decodable coordinate (TryLand). The walk
-    //   may also WRITE — a useful passed-through latent coordinate is committed (Materialise, the genesis tick). And the
-    //   walker SENSES over the FROZEN ADDRESS (NavNeighborhood / Landmarks), the drift-free identity, not the live tail.
+    //   may also WRITE — a useful passed-through latent coordinate is committed (Materialise, the genesis tick). It SENSES
+    //   over the FROZEN ADDRESS (FrozenIdentityDistance), the drift-free identity, not the live tail.
 
     // Tunables for the motion primitives (kept local — these are substrate seams, not policy).
     private const double LandDecodeConfidence = 0.55; // below this the target is "between addresses" → SNAP to a real concept
     private const int    LandSnapPool = 64;           // lattice harvest size for the snap rescore
-    private const int    NavHarvestPool = 64;         // lattice harvest size for the frozen-address neighbourhood
-    private const int    LandmarkHarvestPool = 96;     // lattice harvest size for the landmark (hub) scan
 
     /// <summary>
     /// (NAV·1) MOTION PRIMITIVE — "the lattice lands the step" (§5.1). Every action emits/computes a target coordinate;
@@ -746,57 +715,6 @@ public sealed class DialecticalSpace : IPlatonicSpace
         var e = GetOrCreateConcept(symbol);
         e.LastSeenStep = _observeStep; // bump recency — kept by decay only if the walk keeps re-touching it
         return e;
-    }
-
-    /// <summary>
-    /// (NAV·3) THE NAVIGATION SENSOR — egocentric neighbourhood ranked over the FROZEN ADDRESS (stable identity), NOT
-    /// the drifting orbital tail. The walker needs frozen-address proximity because that is the drift-free signal a
-    /// "land near coordinate X" step resolves against (§5.1) and the dense, stable reward gradient a learned walk
-    /// descends (§1) — the live semantic tail shifts under each footfall, the frozen address does not. Harvests a
-    /// generous pool via the lattice, then rescores by <see cref="FrozenIdentityDistance"/>; each neighbour carries its
-    /// relation DEGREE (landmark-ness). (The existing tail-based <see cref="Neighborhood"/> is left in place for the
-    /// semantic-retrieval callers; this is the navigation-specific one.)
-    /// </summary>
-    public IReadOnlyList<(string Symbol, double Distance, int Degree)> NavNeighborhood(string atSymbol, int k)
-    {
-        var limit = Math.Clamp(k, 1, 64);
-        if (!TryGetConceptFace(atSymbol, out var q) || q.Length == 0)
-            return Array.Empty<(string, double, int)>();
-        var self = Normalize(atSymbol);
-        var scored = new List<(string Sym, double Dist)>();
-        var seen = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var cand in HarvestCandidates(q, Math.Max(limit * 4, NavHarvestPool)))
-        {
-            if (cand.Equals(self, StringComparison.Ordinal) || !seen.Add(cand)) continue;
-            if (!_concepts.TryGet(cand, out var ce) || ce.Archived || ce.Kind == ElementKind.Atom) continue;
-            scored.Add((cand, FrozenIdentityDistance(q, FullFace(cand, ce))));
-        }
-        scored.Sort((x, y) => x.Dist.CompareTo(y.Dist));
-        return scored.Take(limit).Select(x => (x.Sym, x.Dist, GetRelationDegree(x.Sym))).ToArray();
-    }
-
-    /// <summary>
-    /// (NAV·4) TOWARD-LANDMARK targets (§5): the k highest-relation-DEGREE active concepts near <paramref name="nearSymbol"/>
-    /// — hubs are the landmarks / category centroids the walker heads toward to reach a region, not just a point. First
-    /// cut: harvest a pool via the lattice and rank by degree. (A true CENTROID index is the later refinement, §9 — degree
-    /// is the proxy today; and at scale the SEMANTIC harvest may miss a frozen-near hub, see HarvestCandidates.)
-    /// </summary>
-    public IReadOnlyList<(string Symbol, int Degree)> Landmarks(string nearSymbol, int k)
-    {
-        var limit = Math.Clamp(k, 1, 64);
-        if (!TryGetConceptFace(nearSymbol, out var q) || q.Length == 0)
-            return Array.Empty<(string, int)>();
-        var self = Normalize(nearSymbol);
-        var cands = new List<(string Sym, int Deg)>();
-        var seen = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var cand in HarvestCandidates(q, Math.Max(limit * 8, LandmarkHarvestPool)))
-        {
-            if (cand.Equals(self, StringComparison.Ordinal) || !seen.Add(cand)) continue;
-            if (!_concepts.TryGet(cand, out var ce) || ce.Archived || ce.Kind == ElementKind.Atom) continue;
-            cands.Add((cand, GetRelationDegree(cand)));
-        }
-        cands.Sort((x, y) => y.Deg.CompareTo(x.Deg)); // highest degree (most landmark-like) first
-        return cands.Take(limit).ToArray();
     }
 
     // The canonical (codec) face of a decoded symbol: a realised concept carries its learned cloud; a latent symbol

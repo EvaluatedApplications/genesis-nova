@@ -3,9 +3,13 @@ using System.Collections.Generic;
 namespace GenesisNova.Cognition.Platonic;
 
 /// <summary>
-/// The carrier E of Π (PLATONIC_THEORY.md §1): the monotone set of elements. G6 (irreversibility) is structural —
-/// <see cref="GetOrCreate"/> only ever ADDS, and removal is <see cref="Archive"/> (dormant), never a delete. Ids are
-/// handed out monotonically and never reused, so a distinction once made is permanent.
+/// The carrier E of Π (PLATONIC_THEORY.md §1): the monotone set of elements. Ids are handed out monotonically and
+/// never reused. G6 (irreversibility) holds NOT because elements are never deleted — live eviction
+/// (<see cref="Remove"/>) genuinely frees them — but because the address space is a LATENT coordinate system: an
+/// element's identity is a deterministic decodable ADDRESS (a pure function of its symbol), so a deleted symbol
+/// re-observed re-derives the EXACT same frozen face. Deletion only DE-MATERIALISES (frees working memory); the
+/// distinction is conserved by the coordinate, not by the live entry. <see cref="Archive"/> (dormant) is NOT the
+/// evictor — its only live use is restoring G6-dormancy on snapshot import.
 ///
 /// This is deliberately a plain, law-shaped store: a symbol→element index (the O(1) access role <c>_nodes</c> played
 /// in the old memory) plus a bounded atom registry (the reusable base for composition, Law S). It holds no geometry
@@ -73,7 +77,9 @@ public sealed class ElementStore
         return element;
     }
 
-    /// <summary>G6: dim an element to dormant. It is retained (reactivatable via <see cref="GetOrCreate"/>), never deleted.</summary>
+    /// <summary>Mark an element G6-dormant (reactivatable via <see cref="GetOrCreate"/>). Its only live caller is
+    /// snapshot import, restoring the dormancy an element had when it was saved — this is NOT the evictor
+    /// (live eviction genuinely deletes via <see cref="Remove"/>).</summary>
     public void Archive(string symbol)
     {
         if (_bySymbol.TryGetValue(symbol, out var e) && !e.Archived)
@@ -85,18 +91,19 @@ public sealed class ElementStore
     }
 
     /// <summary>
-    /// PERMANENTLY forget a deeply-dormant element so the store stays bounded under corpus-scale churn. G6 keeps an
-    /// evicted distinction reactivatable, but an effectively-infinite stream of once-seen tokens would otherwise grow the
-    /// store (and every O(TotalCount) scan / the RAM footprint) without limit. The caller purges only the OLDEST archived
-    /// elements beyond an archive budget, and never one still referenced as a ▷-component — so this is the bounded tail of
-    /// dormancy, consistent with the checkpoint already persisting the active set only. A purged symbol re-creates fresh
-    /// from observation, exactly as first learned.
+    /// The EVICTOR: permanently free an element so the store stays bounded under corpus-scale churn. The live caller
+    /// (<c>DischargeIrrelevant → DischargeConcept</c>) evicts relevance-decayed concepts — never one still referenced as a
+    /// ▷-component (that would break ▷ / ById). This DELETES the live entry, yet stays G6-faithful because the address
+    /// space is a LATENT coordinate system: a removed symbol re-observed re-derives the EXACT same frozen face, so the
+    /// delete only DE-MATERIALISES it (frees working memory + every O(TotalCount) scan), it does not unmake the
+    /// distinction. The non-derivable learned tail (orbital + FunctionEvidence) re-accumulates on re-observation, exactly
+    /// as first learned. Consistent with the checkpoint persisting the active set only.
     /// </summary>
     public void Remove(string symbol)
     {
         if (!_bySymbol.TryGetValue(symbol, out var e)) return;
         _bySymbol.Remove(symbol);
         _byId.Remove(e.Id);
-        if (!e.Archived) { _activeCount--; if (CountsAsConcept(e.Kind)) _activeConcepts--; } // callers only purge archived; stay honest
+        if (!e.Archived) { _activeCount--; if (CountsAsConcept(e.Kind)) _activeConcepts--; } // an evicted ACTIVE concept frees its slot
     }
 }

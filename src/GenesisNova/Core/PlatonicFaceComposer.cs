@@ -195,127 +195,6 @@ internal static class PlatonicFaceComposer
     }
 
     /// <summary>
-    /// Encode a sentence as a word-slot embedding. Tokenises by whitespace, interleaves explicit
-    /// space tokens, and writes each word's chunk-composed atom into its dedicated word slot.
-    /// Numeric tokens additionally sum into the arithmetic face so the homomorphism is preserved
-    /// orthogonally to word routing.
-    /// </summary>
-    public static double[] GetWordComposedEmbedding(string sentence, int dim)
-    {
-        var wordStart = FaceLayout.WordFaceStart(dim);
-        var wordDims = FaceLayout.WordFaceDims(dim);
-        var atomStart = dim / 2;
-
-        // No dedicated word face at this dim → fall back to the full semantic half (compat).
-        if (wordDims == 0)
-        {
-            wordStart = dim / 2;
-            wordDims = dim - wordStart;
-        }
-
-        var wSlotDims = FaceLayout.WordSlotDims(wordDims);
-        var maxWSlots = wSlotDims > 0 ? wordDims / wSlotDims : 0;
-
-        var result = new double[dim];
-        var words = sentence.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-        if (maxWSlots > 0)
-        {
-            var tokenCount = words.Length == 0 ? 0 : (words.Length * 2) - 1;
-            var count = Math.Min(tokenCount, maxWSlots);
-            for (var i = 0; i < count; i++)
-            {
-                var token = (i % 2 == 0) ? words[i / 2] : " ";
-                var wordAtom = GetChunkComposedEmbedding(token, dim);
-                var slotStart = wordStart + (i * wSlotDims);
-                for (var k = 0; k < wSlotDims && atomStart + k < dim && slotStart + k < dim; k++)
-                    result[slotStart + k] = wordAtom[atomStart + k];
-            }
-        }
-
-        // Arithmetic face: sum poly+log for any numeric tokens, preserving the homomorphism.
-        if (dim >= 2)
-        {
-            var numericDims = FaceLayout.NumericDims(dim);
-            var numTokens = sentence.Split(ArithmeticDelimiters, StringSplitOptions.RemoveEmptyEntries);
-            foreach (var tok in numTokens)
-            {
-                if (double.TryParse(tok, NumericStyle, CultureInfo.InvariantCulture, out var numVal))
-                {
-                    var numEmbed = GetFreshNumericEmbedding(numVal, dim);
-                    for (var d = 0; d < numericDims * 2 && d < dim; d++)
-                        result[d] += numEmbed[d];
-                }
-            }
-        }
-        return result;
-    }
-
-    /// <summary>
-    /// Per-word atom generator (5-char chunk hashing). Made public so the inverse decoder
-    /// (<see cref="PlatonicFaceDecoder.WordSlotDecode"/>) can regenerate each word-vocabulary
-    /// candidate's atom to match the encode geometry exactly.
-    /// </summary>
-    public static double[] GetChunkComposedEmbedding(string word, int dim)
-    {
-        var halfDim = dim / 2;
-        var semanticDims = dim - halfDim;
-        var slotDims = FaceLayout.ChunkSlotDims(semanticDims);
-        var maxSlots = slotDims > 0 ? semanticDims / slotDims : 0;
-
-        var result = new double[dim];
-        if (maxSlots <= 0)
-            return result;
-
-        var chunks = GetWordChunks(word);
-        if (chunks.Count == 0)
-            return result;
-
-        var norm = 1.0 / chunks.Count;
-        for (var ci = 0; ci < chunks.Count; ci++)
-        {
-            var h = ChunkHashU32(chunks[ci]);
-            var slot = ci % maxSlots;
-            var slotStart = halfDim + (slot * slotDims);
-            for (var k = 0; k < slotDims && slotStart + k < dim; k++)
-            {
-                // Independent per-dim hash mixing (avoids the geometric decay that collapsed
-                // signal into k=0 and made distinct words nearly indistinguishable).
-                var dk = h ^ ((uint)k * 2654435761u);
-                dk *= 2246822519u;
-                dk ^= dk >> 13;
-                dk *= 3266489917u;
-                dk ^= dk >> 16;
-                result[slotStart + k] += (((double)dk / uint.MaxValue) - 0.5) * 2.0 * norm;
-            }
-        }
-        return result;
-    }
-
-    private static List<string> GetWordChunks(string word, int chunkSize = 5)
-    {
-        var chunks = new List<string>();
-        if (word.Length <= chunkSize)
-        {
-            chunks.Add(word);
-            return chunks;
-        }
-        for (var i = 0; i <= word.Length - chunkSize; i++)
-            chunks.Add(word.Substring(i, chunkSize));
-        return chunks;
-    }
-
-    private static uint ChunkHashU32(string chunk)
-    {
-        var hash = 2166136261u;
-        foreach (var c in chunk)
-        {
-            hash ^= c;
-            hash *= 16777619u;
-        }
-        return hash;
-    }
-
-    /// <summary>
     /// Seed the learnable (non-identity) dims with small deterministic noise so graph alignment
     /// has signal, without disturbing the identity dims (arithmetic face for numbers, char face
     /// for text) that carry exact recall.
@@ -365,7 +244,7 @@ internal static class PlatonicFaceComposer
     // ADDRESS-SPACE ENCODERS (active when dim ≥ 512). Each frozen band is written here and read back
     // by the matching decoder in PlatonicFaceDecoder. These generators are the SOURCE OF TRUTH for the
     // deterministic per-kind / per-char / per-op / per-label codes; the decoder regenerates candidates
-    // from the same functions (exactly like WordSlotDecode regenerates GetChunkComposedEmbedding).
+    // from the same functions (e.g. CharSlotDecode regenerates the spelling band the encoder wrote).
     // ============================================================================================
 
     /// <summary>

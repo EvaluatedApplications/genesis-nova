@@ -163,5 +163,10 @@ public sealed record GenesisNovaConfig(
                                       // CUDA) replacing the scalar per-observation hot loop that was ~90% of training
                                       // CPU. Fully wired (defer+flush; every read flushes via EnsureCloudsFresh); cloud
                                       // cos≈1.0 vs scalar (float32 write-back, semantically safe for gym retrieval).
+        CompositionalTokenEmbedding = true, // LLM-competitive READ-ALL-TOKENS within a bounded budget: the learned
+                                      // per-token table stops growing past MaxModelVocab; any other token is embedded
+                                      // from its DETERMINISTIC CHAR FACE (spelling codec) via a learned projection — no
+                                      // memorised row. Identity is a coordinate, not a lookup. Validate on a FRESH train
+                                      // (function-word separation + arithmetic must hold) — this turns it on for that run.
     };
 }

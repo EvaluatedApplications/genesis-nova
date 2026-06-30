@@ -86,8 +86,25 @@ the old way — **the navigator is a trained passenger, not the driver.**
   yet cleanly arbitrate two equal-depth chains from one anchor.
 - **M3 — Self-loop placed right.** Inference folds the *resolution* (not gym drills); re-enable DAgger safely.
   **DONE =** a live ablation shows the self changes the *ambiguous* answers in the running engine; prebake stable.
-- **M4 — An overnight run that demonstrably improves reasoning.** number-word gym feed + the loop. **DONE =** the
-  warm-history shows held-out navigator resolve% *climbing over the night* — not "it ran".
+- **M4 — An overnight run that demonstrably improves reasoning.** 🟡 **INFRA LANDED + SHORT-RUN PROOF (curve climbs).**
+  Built `NavReasoningCurriculum` (peer to op-cue/number-word, checkbox `CurNavReasoning` in MainWindow): plants a clean
+  multi-hop is-a taxonomy (member→genus→domain→root, adjacency-only via `PlantNavigatorTaxonomy`), emits the level-cue
+  frames as DATA (cue stays LEARNED from answer GRAPH DEPTH via `LearnNavLevelCue`, no hardcoded cue-word list), and
+  plants a HELD-OUT member set the sampler EXCLUDES (`RegisterNavigatorHeldOut`). Added a periodic HELD-OUT eval +
+  warm-history on the runtime (`EvaluateNavigatorHeldOut`/`NavHeldOutHistory`, logged as `[nav-heldout]` in the gym loop,
+  surfaced in `GetNavigatorDiagnostics`) — the M4 acceptance series. `Tests/NavigatorM4Curve.cs` [SlowFact], bounded by
+  default (`NAVM4_CYCLES`, default 6, ~2 min): the held-out **resolve% curve CLEARLY CLIMBS** (~67–77% cold → ~95–100%
+  warm — the policy learns to confidently halt on members it never trained on), held-out **GENUS (1-hop) generalization
+  ≥20–30%**, and the **cue self-teaches** through the curriculum's frames (∘gns/∘dom/∘rut relations form, novel phrasing
+  generalizes). **HONEST GAPS:** (a) the query-conditioned navigator's multi-hop (domain/root) LANDING does not yet
+  generalize to fully-novel anchors in a short run (~0%) — the documented structural multi-hop ceiling; (b) the gym's
+  production observe path (discriminative-coupling + distractor REPULSION) writes weak edges + drifts the taxonomy clouds,
+  which destabilises the navigator's substrate — FIXED the LABEL side (the is-a climb now follows STRONG relations only:
+  `DialecticalSpace.StrongRelationDegree`, `ClimbAncestors`/`ClimbRelationAncestors`), and the curriculum RE-ASSERTS its
+  clean taxonomy + cue each cycle (`SelfAssess`) to counter drift, but the cleanest climb is on the stable planted
+  taxonomy via the DIRECT `TrainNavigatorCycle` loop (what the test uses + what the gym calls each cycle). **DONE (still) =**
+  the warm-history climbing over an actual overnight run; the slope says genus generalization would continue, multi-hop
+  needs architectural work (goal-conditioning / relational-only features), not more cycles.
 - **M5 — Cutover & cleanup.** Old ladder demoted to fallback; the 3 skipped routing tests re-earned *as navigation*;
   dead code gone.
 

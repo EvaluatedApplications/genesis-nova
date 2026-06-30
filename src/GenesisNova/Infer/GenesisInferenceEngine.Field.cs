@@ -440,22 +440,26 @@ public sealed partial class GenesisInferenceEngine
     // Climb the LIVE relation graph upward from `start`, each hop to the strictly-more-general (higher relation-degree)
     // neighbour — categories are relational HUBS, so degree is the substrate's own is-a-parent signal (no taxonomy
     // table; numbers never form ancestor edges). Returns [parent, grandparent, … top]. Mirrors the gym's ClimbAncestors.
+    // Strong-relation floor (mirrors the gym's ClimbAncestors): follow + rank by CONFIDENT is-a edges only, so the
+    // trainer's distractor-repulsion (Strength≈0.1) edges can't inflate a leaf's degree and break the level climb.
+    private const double NavStrongRelation = 0.5;
+
     private static List<string> ClimbRelationAncestors(DialecticalSpace ds, string start, int maxDepth = 4)
     {
         var chain = new List<string>();
         var visited = new HashSet<string>(StringComparer.Ordinal) { start };
         var cur = start;
-        var curDeg = ds.GetRelationDegree(start);
+        var curDeg = ds.StrongRelationDegree(start, NavStrongRelation);
         for (var depth = 0; depth < maxDepth; depth++)
         {
             IReadOnlyList<PlatonicNeighbor> nbrs;
-            try { nbrs = ds.GetNeighbors(cur, PlatonicNeighborhoodType.Relational, 16, 0.0); }
+            try { nbrs = ds.GetNeighbors(cur, PlatonicNeighborhoodType.Relational, 16, NavStrongRelation); }
             catch { break; }
             string? best = null; var bestDeg = curDeg;
             foreach (var n in nbrs)
             {
                 if (visited.Contains(n.Concept) || double.TryParse(n.Concept, out _)) continue;
-                var dg = ds.GetRelationDegree(n.Concept);
+                var dg = ds.StrongRelationDegree(n.Concept, NavStrongRelation);
                 if (dg > bestDeg) { bestDeg = dg; best = n.Concept; }
             }
             if (best is null) break;

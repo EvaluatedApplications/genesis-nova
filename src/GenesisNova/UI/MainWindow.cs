@@ -209,6 +209,7 @@ public class MainWindow : Form
         flow.Controls.Add(Cur("CurPrebakeLanguage", "Prebake — warm function-word recognition from BOTH a real text corpus (Wikipedia) + synthetic L1", runFirst: true));
         flow.Controls.Add(Cur("CurOpCues", "Op-cue words — sum / difference / product / quotient → operator"));
         flow.Controls.Add(Cur("CurNumberWords", "Number words — digit ↔ word lexicon"));
+        flow.Controls.Add(Cur("CurNavReasoning", "Nav-reasoning — grow an is-a taxonomy + level cues; trains the navigator's walk (HELD-OUT curve in [nav-heldout])"));
         foreach (var skill in Enum.GetValues<GenesisNova.Train.GymSkill>())
             flow.Controls.Add(Cur("GymSkill_" + skill, "Gym — " + GymSkillLabel(skill)));
         flow.Controls.Add(Cur("CurMemCode", "Memory + Code index"));
@@ -1533,6 +1534,15 @@ public class MainWindow : Form
             children.Add(new NumberWordCurriculum(trainPerCycle: _gymTrainPerCycle));
             AppendOutput("[train] number-words: clean digit↔word (learns the lexicon atoms → no hardcoded codec)");
         }
+        // NAV-REASONING (M4): grows a multi-hop is-a taxonomy + emits level-cue text frames as DATA (the cue stays
+        // LEARNED from answer graph-depth) so the gym self-teaches the navigator's reasoning, and plants a HELD-OUT
+        // member set the sampler never trains on. The held-out resolve/accuracy curve (logged as [nav-heldout]) is the
+        // M4 acceptance signal — it must CLIMB overnight. Needs the navigator toggle ON to move (it trains the walker).
+        if (GetControl<CheckBox>("CurNavReasoning")?.Checked ?? false)
+        {
+            children.Add(new NavReasoningCurriculum(_runtime, trainPerCycle: _gymTrainPerCycle));
+            AppendOutput("[train] nav-reasoning: is-a taxonomy + learned level cues; navigator HELD-OUT curve in [nav-heldout] (ensure 'Train Navigator' is ticked)");
+        }
         var personalityOn = GetControl<CheckBox>("CurPersonality")?.Checked ?? false;
         PersonalityCurriculum? persona = null;
         if (personalityOn)
@@ -1571,6 +1581,7 @@ public class MainWindow : Form
             PrebakeLanguageCurriculum => 0, // (if used standalone) same prerequisite role
             OpCueCurriculum => 1,                // worded arithmetic synonyms → op
             NumberWordCurriculum => 2,           // digit↔word lexicon atoms
+            NavReasoningCurriculum => 2,         // taxonomy + level cues (a fundamentals-tier foundation)
             _ => 3,                              // the gym muscles + anything else, in their existing order
         };
         children = children.OrderBy(BootstrapRank).ToList(); // OrderBy is STABLE: the prerequisite/fundamentals float to front in rank order; the rest keep their relative order
@@ -1684,6 +1695,18 @@ public class MainWindow : Form
                     _lastNavTrain = nav;
                     if (nav.Queries > 0)
                         AppendOutput($"[nav] cyc {m.Cycle} | loss {nav.Loss:F3} | queries {nav.Queries} | resolve {nav.ResolvePct:P0} abstain {nav.AbstainPct:P0} | running resolve {_runtime.NavResolveRunningPct:P0}");
+                    // HELD-OUT generalization curve (M4) — the honest "is reasoning improving" signal. NavReasoningCurriculum
+                    // registers the held-out set + already evaluates it in SelfAssess each cycle; surface the newest point so
+                    // an overnight run shows it CLIMBING. Skipped (count 0) when no held-out set is registered.
+                    if (_runtime.NavHeldOutCount > 0)
+                    {
+                        var ho = _runtime.NavHeldOutHistory;
+                        if (ho.Count > 0)
+                        {
+                            var h = ho[^1];
+                            AppendOutput($"[nav-heldout] eval {h.Cycle} | accuracy {h.AccuracyPct:P0} resolve {h.ResolvePct:P0} | over {h.Count} HELD-OUT queries (never trained) ← M4 curve");
+                        }
+                    }
                 }
                 catch (Exception ex) { AppendOutput($"[nav] skipped cyc {m.Cycle}: {ex.Message}"); }
             }
@@ -1868,6 +1891,8 @@ public class MainWindow : Form
         sb.AppendLine("VITALS");
         sb.AppendLine($"  last cycle   loss {d.LastLoss:F3}   queries {d.LastQueries}   resolve {d.LastResolvePct:P0}   abstain {d.LastAbstainPct:P0}");
         sb.AppendLine($"  running      resolve {d.RunningResolvePct:P0}");
+        if (d.LastHeldOut.Count > 0)
+            sb.AppendLine($"  HELD-OUT     accuracy {d.LastHeldOut.AccuracyPct:P0}   resolve {d.LastHeldOut.ResolvePct:P0}   over {d.LastHeldOut.Count} never-trained queries   (M4 curve)");
         sb.AppendLine($"  self         ‖SelfField‖ {d.SelfMagnitude:F3}   conditioning {(d.SelfConditions ? "ON" : "OFF")}");
         sb.AppendLine();
         sb.AppendLine("SELF FOCUS   live concepts nearest the self (what the mind is dwelling on)");

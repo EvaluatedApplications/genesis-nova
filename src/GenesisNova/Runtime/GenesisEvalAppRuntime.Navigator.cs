@@ -26,14 +26,27 @@ public readonly record struct NavWalkObservation(
     string Anchor, NavCue Cue, string Answer, bool Reached, bool SelfConditioned,
     IReadOnlyList<string> Trajectory, string Message);
 
+/// <summary>One HELD-OUT navigator evaluation point — the M4 acceptance signal. <see cref="Cycle"/> is the held-out
+/// eval index (every eval appends one), <see cref="ResolvePct"/> = the fraction of held-out queries that confidently
+/// HALTED (in [0,1]), <see cref="AccuracyPct"/> = the fraction that halted ON THE CUED ANCESTOR (correct landing — the
+/// honest generalization number), <see cref="Count"/> = how many held-out queries were evaluated. The held-out set is
+/// PLANTED into the graph but EXCLUDED from <see cref="GenesisEvalAppRuntime.SampleNavigatorQueries"/>, so a CLIMBING
+/// series proves the navigator GENERALIZES the walk to queries it never trained on — not training-set memorization.</summary>
+public readonly record struct NavHeldOutPoint(int Cycle, double ResolvePct, double AccuracyPct, int Count)
+{
+    public static NavHeldOutPoint Empty => new(0, 0.0, 0.0, 0);
+}
+
 /// <summary>A snapshot of the navigator's observable state for the Inspect panel (see
 /// <see cref="GenesisEvalAppRuntime.GetNavigatorDiagnostics"/>): last-cycle training vitals, the running resolve%, the
 /// engine self's magnitude + whether it conditions cognition, the live concepts nearest the self ("what the mind is
-/// dwelling on"), and the most recent `/nav` walk (null until one has run).</summary>
+/// dwelling on"), the most recent `/nav` walk (null until one has run), and the latest HELD-OUT eval point (the M4
+/// generalization curve's newest sample; <see cref="NavHeldOutPoint.Empty"/> until a held-out set is planted).</summary>
 public readonly record struct NavigatorDiagnostics(
     double LastLoss, int LastQueries, double LastResolvePct, double LastAbstainPct,
     double RunningResolvePct, double SelfMagnitude, bool SelfConditions,
-    IReadOnlyList<(string Concept, double Similarity)> SelfFocus, NavWalkObservation? LastWalk);
+    IReadOnlyList<(string Concept, double Similarity)> SelfFocus, NavWalkObservation? LastWalk,
+    NavHeldOutPoint LastHeldOut);
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 //  PER-CYCLE NAVIGATOR TRAINING ON THE LIVE SPACE  (PLATONIC_NAVIGATOR.md §7; the gym loop calls this once per cycle so
@@ -69,6 +82,129 @@ public sealed partial class GenesisEvalAppRuntime
     private NavTrainCycleResult _lastNavTrain = NavTrainCycleResult.Empty;
     private double _navResolveEma;                      // running resolve% (EMA) for a later inspect tab
     private bool _navResolveSeeded;
+
+    // ── HELD-OUT GENERALIZATION EVAL (M4) ────────────────────────────────────────────────────────────────────────
+    // A PLANTED query set the training sampler NEVER sees — the honest "does the walker GENERALIZE" signal an overnight
+    // run must show CLIMBING. Each held-out query is (member, cue, expected-ancestor): the member's ancestor chain is
+    // grown in the live graph (so the walk is structurally possible) but the member is in `_navHeldOutMembers`, which
+    // SampleNavigatorQueries/SampleCompositionQueries SKIP — so its trajectory is never distilled into the policy. The
+    // curriculum (NavReasoningCurriculum) plants the structure + registers this set; EvaluateNavigatorHeldOut walks it
+    // read-only every N cycles and appends a point to the warm-history the Inspect tab / a log line reads.
+    private readonly record struct NavHeldOutQuery(string Member, NavCue Cue, string Ancestor);
+    private readonly List<NavHeldOutQuery> _navHeldOut = new();
+    private readonly HashSet<string> _navHeldOutMembers = new(StringComparer.Ordinal);
+    private readonly List<NavHeldOutPoint> _navHeldOutHistory = new();
+    private int _navHeldOutEvals;                        // monotonic eval index (the held-out curve's x-axis)
+    private NavHeldOutPoint _lastHeldOut = NavHeldOutPoint.Empty;
+
+    /// <summary>The HELD-OUT navigator generalization curve (one point per <see cref="EvaluateNavigatorHeldOut"/> call) —
+    /// the M4 acceptance series. A climbing <see cref="NavHeldOutPoint.AccuracyPct"/> over an overnight run is the proof
+    /// the loop improves GENERALIZING reasoning, not just training fit. Empty until a held-out set is registered.</summary>
+    public IReadOnlyList<NavHeldOutPoint> NavHeldOutHistory { get { lock (_navHeldOutHistory) return _navHeldOutHistory.ToArray(); } }
+
+    /// <summary>How many held-out queries are currently registered (0 = no held-out eval will run).</summary>
+    public int NavHeldOutCount { get { lock (_navHeldOut) return _navHeldOut.Count; } }
+
+    /// <summary>REGISTER a fixed HELD-OUT navigator query set (member, cue, expected-ancestor) plus any extra members to
+    /// EXCLUDE from training (e.g. a curriculum's cue-marker-teaching subjects, whose shortcut edges would otherwise
+    /// corrupt the degree-climb labels). Both the eval members AND <paramref name="trainExclusions"/> are added to the
+    /// sampler's exclude set so their trajectories are NEVER trained — the eval then measures pure generalization.
+    /// Re-registering REPLACES the set. The CALLER must have PLANTED each held-out member's ancestor chain in the live
+    /// graph (adjacency-only, no shortcuts) so the held-out walk is structurally possible.</summary>
+    public void RegisterNavigatorHeldOut(
+        IEnumerable<(string Member, NavCue Cue, string Ancestor)> queries,
+        IEnumerable<string>? trainExclusions = null)
+        => WithModelGate(() =>
+        {
+            lock (_navHeldOut)
+            {
+                _navHeldOut.Clear();
+                _navHeldOutMembers.Clear();
+                foreach (var (m, cue, anc) in queries ?? Array.Empty<(string, NavCue, string)>())
+                {
+                    if (string.IsNullOrWhiteSpace(m) || string.IsNullOrWhiteSpace(anc)) continue;
+                    _navHeldOut.Add(new NavHeldOutQuery(m, cue, anc));
+                    _navHeldOutMembers.Add(m);
+                }
+                foreach (var x in trainExclusions ?? Array.Empty<string>())
+                    if (!string.IsNullOrWhiteSpace(x)) _navHeldOutMembers.Add(x);
+            }
+            return 0;
+        });
+
+    /// <summary>PLANT a set of is-a ADJACENCY edges (child → strictly-more-general parent) into the live relation graph,
+    /// each reinforced <paramref name="reinforce"/> times so the relation is firm. Adjacency-ONLY by contract (the caller
+    /// passes parent = the IMMEDIATE generalisation), which keeps the degree gradient monotone so ClimbAncestors derives
+    /// a clean genus→domain→root chain — the structure SampleNavigatorQueries distils into trajectories. Numbers are
+    /// rejected (the substrate's hard rule). Gated + flushed. Used by NavReasoningCurriculum to grow its taxonomy.</summary>
+    public void PlantNavigatorTaxonomy(IEnumerable<(string Child, string Parent)> edges, int reinforce = 4)
+        => WithModelGate(() =>
+        {
+            if (_state.Memory is not DialecticalSpace ds) return 0;
+            foreach (var (child, parent) in edges ?? Array.Empty<(string, string)>())
+            {
+                if (string.IsNullOrWhiteSpace(child) || string.IsNullOrWhiteSpace(parent)) continue;
+                if (double.TryParse(child, out _) || double.TryParse(parent, out _)) continue; // numbers never form ancestor edges
+                for (var i = 0; i < Math.Max(1, reinforce); i++) ds.ObserveContradiction(child, parent, 0.0);
+            }
+            ds.FlushCloudBatch();
+            return 0;
+        });
+
+    /// <summary>TEACH the LEARNED navigator level cue from one (query, ancestor-answer) frame — the SAME
+    /// <c>LearnNavLevelCue</c> the gym observe path runs, but invoked WITHOUT the structural input→output coupling +
+    /// distractor-repulsion that <c>ObservePlatonicSpace</c> also performs (that repulsion writes weak edges + drifts the
+    /// taxonomy clouds, destabilising the navigator's substrate). The level still comes from the answer's GRAPH DEPTH (no
+    /// hardcoded cue-word list); only the marker→∘level relation is written. Gated. Used by NavReasoningCurriculum so its
+    /// cue frames self-teach the cue as DATA without corrupting the planted is-a taxonomy. No-op for a non-ancestor frame.</summary>
+    public void TeachNavLevelCue(string input, string output)
+        => WithModelGate(() => { try { _state.Inference.LearnNavLevelCue(input, output); } catch { } return 0; });
+
+    /// <summary>EVALUATE the registered held-out query set on the LIVE trained navigator (read-only — no training, no
+    /// self-write), append a point to the warm-history, and return it. Bounded + GPU-OOM-safe (CPU walk of the resting
+    /// thin controller) + gated like a predict. Returns <see cref="NavHeldOutPoint.Empty"/> when nothing is registered
+    /// or the space is non-dialectical. THIS is the series the M4 overnight run must show climbing.</summary>
+    public NavHeldOutPoint EvaluateNavigatorHeldOut()
+        => WithModelGate(EvaluateNavigatorHeldOutLocked);
+
+    private NavHeldOutPoint EvaluateNavigatorHeldOutLocked()
+    {
+        NavHeldOutQuery[] set;
+        lock (_navHeldOut) set = _navHeldOut.ToArray();
+        if (set.Length == 0 || _state.Memory is not DialecticalSpace ds)
+            return _lastHeldOut;
+
+        var net = _state.Navigator;
+        var device = net.parameters().FirstOrDefault()?.device ?? CPU; // walk on whatever device the resting net is on
+        var walk = new NavigatorWalk();
+        int halted = 0, correct = 0, scored = 0;
+        foreach (var q in set)
+        {
+            if (!ds.TryGetConceptFace(q.Member, out var anchor)) continue;
+            scored++;
+            try
+            {
+                using var policy = new QueryNavPolicy(net, ds, anchor, (int)q.Cue, device, NavK, 0.0, 0.5, selfVec: null, kindFace: null);
+                var res = walk.Walk(ds, q.Member, anchor, null, policy, new NavWalkOptions(MaxSteps: NavMaxSteps));
+                if (policy.LastHalt)
+                {
+                    halted++;
+                    if (string.Equals(res.FinalSymbol, q.Ancestor, StringComparison.Ordinal)) correct++;
+                }
+            }
+            catch { /* a single bad walk must never break the held-out read */ }
+        }
+        if (scored == 0) return _lastHeldOut;
+
+        var point = new NavHeldOutPoint(++_navHeldOutEvals, (double)halted / scored, (double)correct / scored, scored);
+        _lastHeldOut = point;
+        lock (_navHeldOutHistory)
+        {
+            _navHeldOutHistory.Add(point);
+            if (_navHeldOutHistory.Count > 2000) _navHeldOutHistory.RemoveAt(0); // bounded for an overnight run
+        }
+        return point;
+    }
 
     /// <summary>The most recent navigator-training cycle result (for a later inspect tab / diagnostics).</summary>
     public NavTrainCycleResult LastNavTrain => _lastNavTrain;
@@ -180,8 +316,12 @@ public sealed partial class GenesisEvalAppRuntime
         // MEMBERS: living, non-numeric concepts with at least one relation (so they CAN have a more-general ancestor).
         // Leaf-first ordering (lowest relational degree) puts the specific concepts — the ones with a real ancestor
         // ladder — first; ThenBy symbol makes the window deterministic across calls (so the trainer actually converges).
+        // EXCLUDE the registered HELD-OUT members (M4): their ancestor chains are in the graph so they CAN be walked,
+        // but the policy must never train on their trajectories — that is what makes EvaluateNavigatorHeldOut an honest
+        // GENERALIZATION signal rather than training fit.
+        bool heldOut(string c) { lock (_navHeldOutMembers) return _navHeldOutMembers.Contains(c); }
         var qualifying = ds.ActiveConcepts
-            .Where(c => !string.IsNullOrWhiteSpace(c) && !double.TryParse(c, out _) && ds.GetRelationDegree(c) > 0)
+            .Where(c => !string.IsNullOrWhiteSpace(c) && !double.TryParse(c, out _) && ds.GetRelationDegree(c) > 0 && !heldOut(c))
             .OrderBy(ds.GetRelationDegree).ThenBy(c => c, StringComparer.Ordinal)
             .ToList();
         if (qualifying.Count == 0) return queries;
@@ -255,6 +395,7 @@ public sealed partial class GenesisEvalAppRuntime
             {
                 if (added >= NavCompPerMemberCap) break;
                 if (double.TryParse(t, out _) || t.Equals(m, StringComparison.Ordinal)) continue;
+                lock (_navHeldOutMembers) { if (_navHeldOutMembers.Contains(t)) continue; } // never train a halt ON a held-out member (M4 leakage)
                 if (climbChain.Contains(t)) continue;       // the degree-climb already reaches t → not a composition gap
                 var tDeg = ds.GetRelationDegree(t);
 
@@ -298,7 +439,7 @@ public sealed partial class GenesisEvalAppRuntime
             var d = dist[cur];
             if (d >= maxDepth) continue;
             IReadOnlyList<PlatonicNeighbor> nbrs;
-            try { nbrs = ds.GetNeighbors(cur, PlatonicNeighborhoodType.Relational, 32, 0.0); }
+            try { nbrs = ds.GetNeighbors(cur, PlatonicNeighborhoodType.Relational, 32, NavStrongRelation); }
             catch { continue; }
             foreach (var n in nbrs)
             {
@@ -315,16 +456,21 @@ public sealed partial class GenesisEvalAppRuntime
     /// (no hardcoded taxonomy, no test-specific labels). Returns the generality chain [parent, grandparent, …]; EMPTY when
     /// the node has no more-general neighbour — a flat space, where only the GENUS cue can be trained (expected early in a
     /// run, deepening as the space grows).</summary>
+    // Strong-relation floor for the is-a climb: an is-a edge is a CONFIDENT relation (planted/reinforced ⇒ Strength≈1.0);
+    // the trainer's distractor REPULSION writes Strength≈0.1 edges that would otherwise inflate a leaf's degree and break
+    // the climb. Following + ranking by STRONG edges only keeps the taxonomy gradient intact under the live observe path.
+    private const double NavStrongRelation = 0.5;
+
     private static List<string> ClimbAncestors(DialecticalSpace ds, string start, int maxDepth = 4)
     {
         var chain = new List<string>();
         var visited = new HashSet<string>(StringComparer.Ordinal) { start };
         var cur = start;
-        var curDeg = ds.GetRelationDegree(start);
+        var curDeg = ds.StrongRelationDegree(start, NavStrongRelation);
         for (var depth = 0; depth < maxDepth; depth++)
         {
             IReadOnlyList<PlatonicNeighbor> nbrs;
-            try { nbrs = ds.GetNeighbors(cur, PlatonicNeighborhoodType.Relational, 16, 0.0); }
+            try { nbrs = ds.GetNeighbors(cur, PlatonicNeighborhoodType.Relational, 16, NavStrongRelation); }
             catch { break; }
             string? best = null;
             var bestDeg = curDeg;
@@ -332,7 +478,7 @@ public sealed partial class GenesisEvalAppRuntime
             {
                 if (visited.Contains(n.Concept)) continue;
                 if (double.TryParse(n.Concept, out _)) continue;   // numbers never form ancestor edges (substrate hard rule)
-                var dg = ds.GetRelationDegree(n.Concept);
+                var dg = ds.StrongRelationDegree(n.Concept, NavStrongRelation);
                 if (dg > bestDeg) { bestDeg = dg; best = n.Concept; }
             }
             if (best is null) break;                                // no strictly-more-general neighbour → top reached
@@ -473,7 +619,7 @@ public sealed partial class GenesisEvalAppRuntime
                 LastLoss: t.Loss, LastQueries: t.Queries, LastResolvePct: t.ResolvePct, LastAbstainPct: t.AbstainPct,
                 RunningResolvePct: _navResolveEma, SelfMagnitude: mag,
                 SelfConditions: _state.Inference.SelfConditionsCognition,
-                SelfFocus: focus, LastWalk: _lastNavWalk);
+                SelfFocus: focus, LastWalk: _lastNavWalk, LastHeldOut: _lastHeldOut);
         });
     }
 

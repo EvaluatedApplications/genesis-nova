@@ -1041,6 +1041,21 @@ public sealed class DialecticalSpace : IPlatonicSpace
     public int GetRelationDegree(string concept)
         => _adjacency.TryGetValue(Normalize(concept), out var s) ? s.Count : 0;
 
+    /// <summary>The relation degree counting ONLY STRONG edges (relation Strength ≥ <paramref name="minStrength"/>) — the
+    /// substrate's is-a-parent signal that IGNORES weak edges. The trainer's discriminative-coupling REPELS a leaf's
+    /// nearest distractors (high-contradiction ⇒ Strength≈0.1 edges), which inflates raw <see cref="GetRelationDegree"/>
+    /// and eventually makes a leaf look like a hub — breaking a degree-based ancestor climb. Ranking the climb by STRONG
+    /// degree (planted/reinforced is-a edges have Strength≈1.0) makes the taxonomy robust to that observe-path noise.</summary>
+    public int StrongRelationDegree(string concept, double minStrength = 0.5)
+    {
+        var c = Normalize(concept);
+        if (!_adjacency.TryGetValue(c, out var adj)) return 0;
+        var n = 0;
+        foreach (var nb in adj)
+            if (_relations.TryGetValue(Key(c, nb), out var r) && r.Strength >= minStrength) n++;
+        return n;
+    }
+
     /// <summary>The body's living concepts (non-atom, non-archived) — what a self can SENSE of its own body.</summary>
     public IReadOnlyList<string> ActiveConcepts
         => _concepts.All.Where(e => !e.Archived && e.Kind != ElementKind.Atom).Select(e => e.Symbol).ToArray();

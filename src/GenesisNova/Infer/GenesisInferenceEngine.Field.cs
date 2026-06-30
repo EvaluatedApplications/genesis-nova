@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using GenesisNova.Cognition;
+using GenesisNova.Cognition.Navigator;
 using GenesisNova.Cognition.Platonic;
 using GenesisNova.Core;
 
@@ -1048,6 +1049,35 @@ public sealed partial class GenesisInferenceEngine
     public void RestoreSelfField(double[]? self)
         => _selfField = self is { Length: > 0 } ? (double[])self.Clone() : null;
 
+    /// <summary>NAVIGATOR DISAMBIGUATOR (M1, PLATONIC_NAVIGATOR.md). Optional hook into the trained platonic navigator
+    /// (the runtime's shared <c>State.Navigator</c>). The runtime sets this to a delegate that runs the navigator as a
+    /// <c>QueryNavPolicy</c> WALK from the anchor under the given cue, conditioned by the engine self, and decodes the
+    /// landing. It is consulted ONLY in the AMBIGUOUS branch of <see cref="TryFieldRelax"/> — where the single-shot
+    /// <c>ds.Reason</c> (1 relaxation) hits its ceiling on a multi-hop answer. Null (default) ⇒ the ambiguous branch is
+    /// byte-identical to the legacy one-shot path. The tuple is (answer, confidence, ok); ok=false ⇒ the walk did not
+    /// confidently resolve, so the caller FALLS THROUGH to the one-shot reason (never regressing the clear cases).</summary>
+    public Func<string, NavCue, double[]?, (string Answer, double Confidence, bool Ok)>? NavigatorDisambiguator { get; set; }
+
+    // CUE MAPPING (M1 FIRST CUT — documented limitation). The learned ∘qst cue tells question-vs-not, NOT the target
+    // ABSTRACTION LEVEL (genus / domain / root). Until that cue is itself learned (M1.1), map by a surface keyword:
+    // "kind/type/sort" → GENUS (the immediate kind); "domain/class/group/family/category" → DOMAIN; "ultimately/root/
+    // fundamentally/overall/essentially" → ROOT. Default GENUS. This is keyword-based, English-only, and a STAND-IN for
+    // a learned cue — the honest first cut. A real cutover replaces it with a learned target-aspect cue off the ∘qst seam.
+    private static NavCue DeriveNavCue(IReadOnlyList<string> toks)
+    {
+        foreach (var t in toks)
+            switch (t)
+            {
+                case "ultimately": case "root": case "fundamentally": case "overall": case "essentially":
+                    return NavCue.Root;
+                case "domain": case "class": case "group": case "family": case "category": case "broadly":
+                    return NavCue.Domain;
+                case "kind": case "type": case "sort":
+                    return NavCue.Genus;
+            }
+        return NavCue.Genus; // default + unknown → the immediate kind (documented first-cut fallback)
+    }
+
     // ── RELAX: recall what the mind HOLDS about the subject. RELATION-FIRST (follow the explicit association — robust
     //    to hub dilution at scale, where a populous category's distributional cloud washes out a member's signal),
     //    context-disambiguated, falling back to semantic relaxation over the clouds when there is no held association. ─
@@ -1109,6 +1139,24 @@ public sealed partial class GenesisInferenceEngine
             Attend();
             return EmitPlatonicResult(rels[0].Concept, "field-relax", Math.Clamp(rels[0].Confidence, 0.0, 1.0),
                 hops: 1, request, evidence: null, out result);
+        }
+
+        // NAVIGATOR (M1) — the AMBIGUOUS branch is exactly where the one-shot ds.Reason hits its ceiling: a multi-hop
+        // answer (domain / root) lies >1 relaxation away and the single shot cannot reach it. If the trained navigator
+        // hook is attached, WALK from the subject under the query's cue (self-conditioned), and emit a CONFIDENT, VALID
+        // landing as "navigator-walk". A non-confident / invalid / self-referential landing FALLS THROUGH to the
+        // one-shot reason below — so the clear cases (dominant relation, handled above) are never regressed and the
+        // ambiguous-but-unwalkable cases keep today's behaviour.
+        if (NavigatorDisambiguator is not null)
+        {
+            var (navAns, navConf, navOk) = NavigatorDisambiguator(subject, DeriveNavCue(toks), _selfField);
+            if (navOk && !Bad(navAns) && ds.ContainsConcept(navAns))
+            {
+                Attend();
+                return EmitPlatonicResult(navAns, "navigator-walk",
+                    Math.Clamp(navConf <= 0.0 ? ReasonMinConfidence : navConf, 0.0, 1.0),
+                    hops: 2, request, evidence: null, out result);
+            }
         }
 
         // AMBIGUOUS (several comparable associations) or none — relax over the clouds, the SELF tipping the basin

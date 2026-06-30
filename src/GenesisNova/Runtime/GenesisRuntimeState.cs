@@ -1,3 +1,4 @@
+using System;
 using System.Linq;
 using System.Text.Json;
 using GenesisNova.Core;
@@ -6,8 +7,11 @@ using GenesisNova.Model;
 using GenesisNova.Persistence;
 using GenesisNova.Cognition;
 using GenesisNova.Cognition.Navigator;
+using GenesisNova.Cognition.Platonic;
 using GenesisNova.Tokenization;
 using GenesisNova.Train;
+using TorchSharp;
+using static TorchSharp.torch;
 
 namespace GenesisNova.Runtime;
 
@@ -33,6 +37,7 @@ public sealed class GenesisRuntimeState
         NovaConfig.FromLegacy(config).ApplyTo(Model, Memory, Inference, Trainer); // ONE place for every mechanism toggle
         Trainer.SetInferencePolicy(Inference);
         Navigator = CreateNavigator(config);
+        WireNavigatorDisambiguator();
     }
 
     public GenesisNovaConfig Config { get; private set; }
@@ -99,6 +104,46 @@ public sealed class GenesisRuntimeState
         Navigator = CreateNavigator(config);
         Navigator.ImportWeights(navigator);
         Inference.RestoreSelfField(navigatorSelfField);
+        WireNavigatorDisambiguator();
+    }
+
+    /// <summary>M1 (PLATONIC_NAVIGATOR.md): attach the trained shared navigator to the inference engine's
+    /// AMBIGUOUS-BRANCH disambiguator hook, when <see cref="GenesisNovaConfig.NavigatorDisambiguation"/> is on and the
+    /// substrate is the dialectical core (the only one the navigator walks). The delegate runs <see cref="Navigator"/>
+    /// as a <see cref="QueryNavPolicy"/> walk from the anchor under the query's cue, seeded by the engine's persistent
+    /// self, and returns the decoded landing + whether the walk CONFIDENTLY halted (so the engine can fall through to
+    /// the one-shot reason on a non-resolve). The net rests on whatever device its weights are on (CPU between gym
+    /// cycles); the walk is serialized with predict/train by the runtime's model gate, so torch is single-threaded here.
+    /// When the flag is off (or the space is legacy) the hook is left null ⇒ the ambiguous branch is byte-identical.</summary>
+    private void WireNavigatorDisambiguator()
+    {
+        if (!Config.NavigatorDisambiguation || Memory is not DialecticalSpace ds)
+        {
+            Inference.NavigatorDisambiguator = null;
+            return;
+        }
+        var net = Navigator;
+        Inference.NavigatorDisambiguator = (anchor, cue, self) =>
+        {
+            if (string.IsNullOrWhiteSpace(anchor) || !ds.TryGetConceptFace(anchor, out var anchorFace))
+                return (string.Empty, 0.0, false);
+            var device = net.parameters().FirstOrDefault()?.device ?? CPU;
+            try
+            {
+                using var policy = new QueryNavPolicy(net, ds, anchorFace, (int)cue, device,
+                    NavQueryDaggerTrainer.DefaultK, minConfidence: 0.0, haltThreshold: 0.5, selfVec: self);
+                var res = new NavigatorWalk().Walk(ds, anchor, anchorFace, goalSymbol: null, policy,
+                    new NavWalkOptions(MaxSteps: 8));
+                // A CONFIDENT halt (the learned halt head fired) on a concept OTHER than the start = the query relaxed
+                // to an answer. A budget-exhausted stop, or halting back on the anchor, is not a resolution → abstain.
+                var ok = policy.LastHalt && !string.Equals(res.FinalSymbol, anchor, StringComparison.Ordinal);
+                return (res.FinalSymbol, ok ? 0.9 : 0.0, ok);
+            }
+            catch
+            {
+                return (string.Empty, 0.0, false); // a single bad walk must never break a predict
+            }
+        };
     }
 
     private void ImportTrainerLearningState(string? trainerLearningStateJson)

@@ -79,7 +79,13 @@ public sealed record GenesisNovaConfig(
     bool MeaningOps = false,
     // Substrate perf: deferred batched-GPU cloud recompute (Cloud = A·T on CUDA) replacing per-observation scalar
     // RecomputeCloud. Default false (byte-identical scalar path); when on, observations defer + flush in batches.
-    bool BatchedCloudGpu = false)
+    bool BatchedCloudGpu = false,
+    // NAVIGATOR DISAMBIGUATION (M1, PLATONIC_NAVIGATOR.md). When true, GenesisRuntimeState attaches the trained shared
+    // navigator (State.Navigator) to the inference engine as the AMBIGUOUS-BRANCH disambiguator: a query that reaches
+    // the no-dominant-relation case is answered by WALKING the platonic space (multi-hop) instead of a single-shot
+    // ds.Reason. false (default) ⇒ the hook is null and the ambiguous branch is byte-identical to the one-shot path
+    // (so the fast suite is unaffected). NOT yet in WithProductionMechanisms — flipping it there is the M1 cutover.
+    bool NavigatorDisambiguation = false)
 {
     /// <summary>
     /// Platonic face (embedding) width. By default equals the GRU width (HiddenSize); when

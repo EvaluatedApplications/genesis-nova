@@ -76,6 +76,10 @@ public sealed partial class GenesisInferenceEngine
     {
         _tokenizer = tokenizer;
         _model = model;
+        // Bounded-vocab + char-face composition: give the model a token-id → spelling resolver so it can COMPOSE an
+        // OOV token's input embedding from its spelling (no per-token row). Consulted only when the feature is on and
+        // a token id exceeds the cap; harmless (idempotent) otherwise. Folded vocab token = the embedding key.
+        _model.SetTokenSpelling(id => id >= 0 && id < _tokenizer.Vocabulary.Count ? _tokenizer.Vocabulary[id] : null);
         _memory = memory;
         _shapeRegistry = new PlatonicShapeRegistry(memory);
         _glider = new PlatonicGliderInterpreter(memory, _shapeRegistry.Library);

@@ -268,4 +268,10 @@ public sealed record ModelSnapshot(
     // PER-TOKEN ROLE head [hidden, RoleCount] + bias [RoleCount] — the learned structure recogniser. Persisted so a
     // reload restores the trained grammar PARSER (name memory etc.) instead of relearning it from the gym each session.
     double[,]? RoleWeights = null,
-    double[]? RoleBias = null);
+    double[]? RoleBias = null,
+    // CHAR-FACE PROJECTION [CharSpellingDims, hidden] + bias [hidden] — the bounded-vocab composition projection that
+    // maps a token's spelling band to an input embedding for OOV tokens. OPTIONAL, appended so existing call sites
+    // compile; null on pre-feature checkpoints (then lazily reinitialised). Persisted so a reload keeps the TRAINED
+    // projection instead of resetting it each session (the same drop-on-load discipline as the GRU/role heads).
+    double[,]? CharProjWeights = null,
+    double[]? CharProjBias = null);

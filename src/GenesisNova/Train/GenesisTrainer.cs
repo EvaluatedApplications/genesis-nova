@@ -123,6 +123,9 @@ public sealed class GenesisTrainer
         _tokenizer = tokenizer;
         _labelResolver = new GenesisLabelResolver(tokenizer);
         _model = model;
+        // Bounded-vocab + char-face composition: resolver so the model can compose OOV input embeddings from spelling
+        // (no per-token row). Consulted only when the feature is on and a token exceeds the cap; idempotent otherwise.
+        _model.SetTokenSpelling(id => id >= 0 && id < tokenizer.Vocabulary.Count ? tokenizer.Vocabulary[id] : null);
         _platonicSpace = platonicSpace;
         var runtimeConfig = config ?? new GenesisNovaConfig();
         _foldPathDiscovery = new FoldPathDiscovery();

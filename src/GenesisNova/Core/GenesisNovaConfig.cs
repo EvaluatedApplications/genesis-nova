@@ -106,7 +106,19 @@ public sealed record GenesisNovaConfig(
     // UNLEARNS the bad cue→∘cmp relation and the skill recovers. Without it a corpus-contaminated operator symbol
     // ("-"→∘cmp) is immortal and focused training can never fix it (see nova-subtract-stuck-compare-hijack). false
     // (default) = byte-identical (no disruption fires). ON in WithProductionMechanisms.
-    bool SelfHealMisroutedCues = false)
+    bool SelfHealMisroutedCues = false,
+    // BOUNDED-VOCAB + CHAR-FACE COMPOSITION (LLM-competitive token reading within a FIXED parameter budget). The
+    // model carries a PER-WORD table (_embT/_wOutT/_bOutT) that only grows — a 100% Wikipedia corpus pushed it to
+    // ~32k rows → ~535 MB → minutes-long loads, and it keeps growing. LLMs don't: a bounded subword vocab composes
+    // any text. We already have the better basis — identity lives in the deterministic CHAR FACE (spelling codec).
+    // When CompositionalTokenEmbedding is on, the learned per-token table STOPS growing past MaxModelVocab; a token
+    // beyond the cap (OOV) has its INPUT embedding COMPOSED from its spelling band via a small learned projection
+    // (Linear(spellingDims→hidden)) — NOT a new row — so ANY token is readable within a bounded budget. false
+    // (default) = the table grows as before, byte-identical legacy. ON in WithProductionMechanisms once proven.
+    bool CompositionalTokenEmbedding = false,
+    // The bounded cap on the learned per-token table (_embT/_wOutT/_bOutT rows) when CompositionalTokenEmbedding is on.
+    // 0 = unbounded (legacy). Tokens with id < cap keep a learned row; tokens beyond it read from their char face.
+    int MaxModelVocab = 16_000)
 {
     /// <summary>
     /// Platonic face (embedding) width. By default equals the GRU width (HiddenSize); when

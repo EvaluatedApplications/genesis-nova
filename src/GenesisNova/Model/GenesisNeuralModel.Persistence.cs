@@ -53,7 +53,10 @@ public partial class GenesisNeuralModel
             _trunkB is not null ? TensorToVector(_trunkB) : null,
             // PER-TOKEN ROLE head (null until lazily initialised by the first grammar example).
             _roleWT is not null ? TensorToMatrix(_roleWT) : null,
-            _roleB is not null ? TensorToVector(_roleB) : null);
+            _roleB is not null ? TensorToVector(_roleB) : null,
+            // CHAR-FACE PROJECTION (null until lazily created by the first OOV composition).
+            _charProjWT is not null ? TensorToMatrix(_charProjWT) : null,
+            _charProjB is not null ? TensorToVector(_charProjB) : null);
     }
 
     public void Import(ModelSnapshot snapshot)
@@ -112,6 +115,13 @@ public partial class GenesisNeuralModel
             _roleWT = MatrixToParameter(snapshot.RoleWeights!);
             _roleB = VectorToParameter(snapshot.RoleBias!);
         }
+        // CHAR-FACE PROJECTION — restore the trained bounded-vocab projection if shape-compatible ([CharSpellingDims,
+        // hidden]), else leave null so it lazily reinitialises on the next OOV composition (graceful, like the heads).
+        if (HasUsableCharProj(snapshot.CharProjWeights, snapshot.CharProjBias, _hiddenSize))
+        {
+            _charProjWT = MatrixToParameter(snapshot.CharProjWeights!);
+            _charProjB = VectorToParameter(snapshot.CharProjBias!);
+        }
         RecreateOptimizer();
     }
 
@@ -121,6 +131,16 @@ public partial class GenesisNeuralModel
             return false;
         return roleWeights.GetLength(0) == hiddenSize && roleWeights.GetLength(1) == RoleCount
             && roleBias.Length == RoleCount;
+    }
+
+    private static bool HasUsableCharProj(double[,]? charWeights, double[]? charBias, int hiddenSize)
+    {
+        if (charWeights is null || charBias is null || hiddenSize <= 0)
+            return false;
+        // Fixed [CharSpellingDims, hidden] projection with a matching [hidden] bias. Any other shape (a different
+        // hidden size, or a pre-feature checkpoint carrying nulls) is rejected → reinitialised, like the other heads.
+        return charWeights.GetLength(0) == CharSpellingDims && charWeights.GetLength(1) == hiddenSize
+            && charBias.Length == hiddenSize;
     }
 
     private static bool HasUsableQueryPlanHeads(ModelSnapshot s, int hiddenSize)
@@ -274,6 +294,19 @@ public partial class GenesisNeuralModel
                 try { oldBhh.Dispose(); } catch { }
             }
 
+            // CHAR-FACE PROJECTION — clone+detach like the trunk/heads (autograd param trained by the token loss).
+            if (_charProjWT is not null)
+            {
+                var cwClone = _charProjWT.clone().detach().to(_trainingDevice);
+                var cbClone = _charProjB!.clone().detach().to(_trainingDevice);
+                var oldCw = _charProjWT;
+                var oldCb = _charProjB;
+                _charProjWT = new TorchSharp.Modules.Parameter(cwClone, true);
+                _charProjB = new TorchSharp.Modules.Parameter(cbClone, true);
+                try { oldCw.Dispose(); } catch { }
+                try { oldCb!.Dispose(); } catch { }
+            }
+
             // NOW create a fresh optimizer with the new parameters
             RecreateOptimizer();
         }
@@ -281,6 +314,12 @@ public partial class GenesisNeuralModel
 
     private void EnsureVocabularySizeGpu(int vocabSize)
     {
+        // BOUNDED VOCAB: when char-face composition is on, the learned per-token tables (_embT/_wOutT/_bOutT) STOP
+        // growing past the cap. Tokens beyond it are read from their deterministic spelling band on the INPUT side
+        // (GetEmbeddingTensor → ComposeFromCharFace); the OUTPUT decoder stays bounded (vestigial in the field path).
+        // Default-off ⇒ this clamp never fires and growth is byte-identical to the legacy unbounded behaviour.
+        if (CompositionalEmbeddingOn && vocabSize > BoundedVocabCap)
+            vocabSize = BoundedVocabCap;
         if (vocabSize <= _vocabSize)
             return;
 
@@ -440,6 +479,20 @@ public partial class GenesisNeuralModel
             try { oldBhh?.Dispose(); } catch { }
         }
 
+        // CHAR-FACE PROJECTION is [CharSpellingDims, oldHidden] / [oldHidden] — its hidden dim changed, so
+        // reinitialize a fresh projection at the new hidden size (graceful, like the GRU/heads above).
+        if (_charProjWT is not null)
+        {
+            var oldCw = _charProjWT;
+            var oldCb = _charProjB;
+            _charProjWT = new TorchSharp.Modules.Parameter(
+                ((rand(new long[] { CharSpellingDims, hiddenSize }, device: _trainingDevice) * 2.0) - 1.0) * 0.05, true);
+            _charProjB = new TorchSharp.Modules.Parameter(
+                zeros(new long[] { hiddenSize }, dtype: ScalarType.Float32, device: _trainingDevice), true);
+            try { oldCw.Dispose(); } catch { }
+            try { oldCb?.Dispose(); } catch { }
+        }
+
         RecreateOptimizer();
     }
 
@@ -470,6 +523,11 @@ public partial class GenesisNeuralModel
         // SHARED REASONING TRUNK — autograd-trained with the heads it feeds (route/op/plan).
         if (_trunkW is not null) parameters.Add(_trunkW);
         if (_trunkB is not null) parameters.Add(_trunkB!);
+        // CHAR-FACE PROJECTION (bounded-vocab composition) — autograd-trained: it learns to map a token's spelling
+        // band to a useful input embedding, folded into the shared token/route backward pass. Null unless OOV
+        // composition has been exercised (lazily created), so it never registers when the feature is off.
+        if (_charProjWT is not null) parameters.Add(_charProjWT);
+        if (_charProjB is not null) parameters.Add(_charProjB!);
         _optimizer = torch.optim.SGD(parameters, _currentLearningRate);
     }
 
@@ -486,7 +544,7 @@ public partial class GenesisNeuralModel
             _embT, _wOutT, _bOutT, _routeWT, _routeB,
             _gruWih, _gruWhh, _gruBih, _gruBhh,
             _queryOpWT, _queryOpB, _queryOperandWT, _queryOperandB, _planWT, _planB, _editWT, _editB,
-            _trunkW, _trunkB
+            _trunkW, _trunkB, _charProjWT, _charProjB
         })
             if (p is not null) n += p.numel();
         return n;
@@ -588,6 +646,11 @@ public partial class GenesisNeuralModel
         _gruWhh = null;
         _gruBih = null;
         _gruBhh = null;
+        // CHAR-FACE PROJECTION (bounded-vocab composition) — torn down with the rest (same discipline).
+        try { _charProjWT?.Dispose(); } catch { }
+        try { _charProjB?.Dispose(); } catch { }
+        _charProjWT = null;
+        _charProjB = null;
     }
 
     private double[,] TensorToMatrix(Tensor tensor)

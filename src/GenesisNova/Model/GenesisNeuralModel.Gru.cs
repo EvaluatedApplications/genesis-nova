@@ -98,7 +98,7 @@ public partial class GenesisNeuralModel
         try
         {
             var hInput = promptState ?? EncodeInput(inputTokens, scratch, _inferenceDevice);
-            var prevEmb = GetEmbeddingTensor(previousToken, _inferenceDevice);
+            var prevEmb = GetEmbeddingTensor(previousToken, _inferenceDevice, scratch);
             scratch.Add(prevEmb);
             var hDec = GruStep(prevEmb, hInput, scratch, _inferenceDevice);
 
@@ -209,7 +209,7 @@ public partial class GenesisNeuralModel
             var hDec = hInput;
             for (var t = 0; t < targetTokens.Count; t++)
             {
-                var prevEmb = GetEmbeddingTensor(prev);
+                var prevEmb = GetEmbeddingTensor(prev, _trainingDevice, forwardTensors);
                 forwardTensors.Add(prevEmb);
 
                 // GRU step: h_t = GRU(embedding(prev), h_{t-1}). Intermediates tracked in forwardTensors.
@@ -483,19 +483,30 @@ public partial class GenesisNeuralModel
         return penalty * _config.L2RegularizationCoefficient * 0.5;
     }
 
-    private Tensor GetEmbeddingTensor(int token, Device? device = null)
+    private Tensor GetEmbeddingTensor(int token, Device? device = null, List<Tensor>? scratch = null)
     {
         device ??= _trainingDevice;
         EnsureModelInitialized();
-        if (token < 0 || token >= _vocabSize)
-            return zeros(new long[] { HiddenSize }, dtype: ScalarType.Float32, device: device);
-        using var idx = tensor(new long[] { token }, dtype: ScalarType.Int64, device: _trainingDevice);
-        var emb = _embT!.index_select(0, idx).squeeze(0);
+        if (token >= 0 && token < _vocabSize)
+        {
+            using var idx = tensor(new long[] { token }, dtype: ScalarType.Int64, device: _trainingDevice);
+            var emb = _embT!.index_select(0, idx).squeeze(0);
+            if (device != _trainingDevice)
+                emb = emb.to(device);
+            return emb;
+        }
 
-        if (device != _trainingDevice)
-            emb = emb.to(device);
-
-        return emb;
+        // OOV / beyond the bounded table: COMPOSE the input embedding from the token's deterministic spelling band
+        // via the learned projection (no new row), when bounded-vocab composition is on and a spelling is resolvable.
+        // Otherwise fall back to the legacy zero vector (byte-identical when the feature is off, since then a valid
+        // token id is always < _vocabSize and this branch is never reached for it).
+        if (token >= 0 && CompositionalEmbeddingOn && _tokenSpelling is not null)
+        {
+            var spelling = _tokenSpelling(token);
+            if (!string.IsNullOrEmpty(spelling))
+                return ComposeFromCharFace(spelling!, device, scratch);
+        }
+        return zeros(new long[] { HiddenSize }, dtype: ScalarType.Float32, device: device);
     }
 
     private void EnsureModelInitialized()
@@ -627,7 +638,7 @@ public partial class GenesisNeuralModel
 
         foreach (var tok in inputTokens)
         {
-            var emb = GetEmbeddingTensor(tok, device);
+            var emb = GetEmbeddingTensor(tok, device, scratch);
             scratch.Add(emb);
             h = GruStep(emb, h, scratch, device);
             // Per-token hidden states feed the query operand head ("is THIS token an operand?").

@@ -1482,8 +1482,8 @@ public class MainWindow : Form
             var synthFoundation = new PrebakeLanguageCurriculum(trainPerCycle: _gymTrainPerCycle, seed: 7);
             var corpusFoundation = new CorpusWarmCurriculum(trainPerCycle: _gymTrainPerCycle);
             try { _inspectGlue = synthFoundation.Glue.Take(14).ToArray(); _inspectContent = synthFoundation.SampleContent(12).ToArray(); } catch { } // Inspect-tab probe words = actual trained vocab
-            children.Add(new FoundationBlendCurriculum(synthFoundation, corpusFoundation, trainPerCycle: _gymTrainPerCycle, syntheticFraction: 0.95));
-            AppendOutput("[train] PREBAKE: warming function-word recognition from a 95% SYNTHETIC / 5% CORPUS blend (synthetic shows the pattern; a little corpus keeps it honest without collapsing the signal)");
+            children.Add(new FoundationBlendCurriculum(synthFoundation, corpusFoundation, trainPerCycle: _gymTrainPerCycle, syntheticFraction: 0.0));
+            AppendOutput("[train] PREBAKE: warming function-word recognition from 100% REAL CORPUS (Wikipedia) — natural text gives function-word breadth for free, no per-word synthetic hand-tuning (synthetic kept only for the inspect-probe vocab)");
         }
         if (GetControl<CheckBox>("CurCreators")?.Checked ?? false)
         {
@@ -1566,7 +1566,7 @@ public class MainWindow : Form
         // never-seen units in LIST order (see NextWeakest), so this prefix IS that order.
         static int BootstrapRank(ITrainingCurriculum c) => c switch
         {
-            FoundationBlendCurriculum => 0, // prerequisite — warms function-word recognition (80% synthetic / 20% corpus blend)
+            FoundationBlendCurriculum => 0, // prerequisite — warms function-word recognition (100% real corpus; synthetic kept only for inspect-probe vocab)
             CorpusWarmCurriculum => 0,      // (if used standalone) same prerequisite role
             PrebakeLanguageCurriculum => 0, // (if used standalone) same prerequisite role
             OpCueCurriculum => 1,                // worded arithmetic synonyms → op

@@ -126,3 +126,38 @@ the old way — **the navigator is a trained passenger, not the driver.**
   `navigator-walk`; COLD navigator 0 mis-emits (falls through, cutover-safe); clear case `dog` byte-identical. Fast suite
   **251/0/47** — no regression with the cutover ON. Remaining for a true overnight payoff: gym CURRICULUM level-cue frames
   (M4) + walk self-conditioning (M3).
+
+## North Star — why the navigator ladder, and what's beyond M5 (the program-apex)
+These are the founding insights the milestones serve, written here so the *direction* is in the plan, not just the
+sprint. (Full detail + the built-but-gated foundation: `nova-nn-directed-generative-tick`, `nova-conscious-field-mind`.)
+
+**The reasoning model (why elements + relations exist at all).** The substrate is a decodable **address space / void**:
+every coordinate decodes to an identity by a deterministic, invertible codec (the frozen face bands) — so identity is a
+**conserved latent coordinate** (G6 holds; de-materialising an element frees a working-memory slot but the address still
+means what it meant — the decode-from-void stack, currently BUILT-NOT-WIRED, is what reads it). But the codec only runs
+the easy way (`coordinate → identity`); reasoning needs the reverse (`"the thing that means X" → which coordinate?`),
+which the void gives nothing for. So **realized elements + relations are a structure laid over the void = remembered
+PATHS between ideas** — you start at a known landmark and *walk*, instead of searching an intractable space by meaning.
+
+**The unification (the kinds of path).**
+- **Relation** = a remembered **arbitrary** path (`apple → fruit`) — works for that one binding; most of meaning is this.
+- **Function** = a remembered **lawful** path (a transform) — works for *any* input, because it rides a regularity.
+- **Composition of Functions = a PROGRAM.** The one region needing **no** path is numbers — lawful, so you *compute* the
+  coordinate (the homomorphism), no stored fact, infinite generalization.
+
+**The apex (beyond M5).** The end goal is the NN **directing the generative instrument**: composing Function elements
+into programs over a tick loop — so *"the model outputs code directly"*, where a program is a composed Function-element
+**structure** executed in the space (apply/fold) and the printed code is a *decode* of it (≠ an LLM predicting program
+text). The foundation is BUILT but gated/default-off (generative primitives compose/decompose/apply/fold, the tick
+cascade, a Stage-2 *learned director* demo); the missing piece is the LEARNED director live + a richer generative
+curriculum.
+
+**The bridge (why the navigator ladder is the first rung, not a detour).** M1–M5 + the multi-hop ceiling-break (#54) are
+building a **path-composer + its director over RELATION paths** — M2 already composed two relation-paths into one it had
+never walked. **Generalize the same machine from Relation-paths to FUNCTION-paths and the navigator-director *becomes* the
+generative-tick σ** that composes programs, with Function/Composition (already real element kinds) as the operands. Same
+machine, harder operands.
+
+**Priority (honest):** the **navigator ladder is the active sprint** — it's where the ~99% reasoning lives *and* it is
+the bridge to the apex; the **program-apex is the next arc after M5**, reusing the navigator's composer + director rather
+than a new subsystem. Finish the bridge before crossing it.

@@ -49,6 +49,11 @@ public sealed class CorpusWarmCurriculum : ITrainingCurriculum
         "country", "system", "language", "science", "history", "art", "war", "land", "church", "money", "art", "story",
     };
 
+    /// <summary>The SHARED Wikipedia corpus source (same on-disk cache / hydration) so a peer corpus curriculum —
+    /// e.g. <see cref="CorpusPredictionCurriculum"/> (masked cloze) — streams from the exact same text, not a second
+    /// download. The standalone <see cref="CorpusWarmCurriculum"/> falls back to it too.</summary>
+    public static PublicTextCorpusCreator SharedCorpus => Wikipedia;
+
     private readonly PublicTextCorpusCreator _corpus;
     private readonly int _trainPerCycle;
     private double _lastScore;

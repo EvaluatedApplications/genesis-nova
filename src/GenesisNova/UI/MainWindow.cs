@@ -210,11 +210,14 @@ public class MainWindow : Form
 
         // Uniform peer checkbox — same indent for every task. The `startChecked` ones are the PRODUCTION hot path that runs
         // by default (run order is set by BootstrapRank below, NOT by this flag): the prebake prerequisite + nav-reasoning
-        // (so the navigator actually trains on a taxonomy and its HELD-OUT curve populates without the user ticking it).
+        // (so the navigator trains on a taxonomy and its HELD-OUT curve populates without the user ticking it). Corpus
+        // prediction (masked-cloze base-model objective) is OPT-IN — its production learn path is unexercised, so the user
+        // enables it deliberately and watches its first run, rather than mixing an untested objective into cycle 1.
         static CheckBox Cur(string name, string text, bool startChecked = false) =>
             new() { Name = name, Text = text, Checked = startChecked, AutoSize = true, Margin = new Padding(20, 1, 0, 1) };
 
         flow.Controls.Add(Cur("CurPrebakeLanguage", "Prebake — warm function-word recognition from BOTH a real text corpus (Wikipedia) + synthetic L1", startChecked: true));
+        flow.Controls.Add(Cur("CurCorpusPrediction", "Corpus prediction (masked cloze) — self-supervised: predict a held-out CONTENT word from context; corpus BUILDS knowledge into the substrate", startChecked: false));
         flow.Controls.Add(Cur("CurOpCues", "Op-cue words — sum / difference / product / quotient → operator"));
         flow.Controls.Add(Cur("CurNumberWords", "Number words — digit ↔ word lexicon"));
         flow.Controls.Add(Cur("CurNavReasoning", "Nav-reasoning — grow an is-a taxonomy + level cues; trains the navigator's walk (HELD-OUT curve in [nav-heldout])", startChecked: true));
@@ -1494,6 +1497,17 @@ public class MainWindow : Form
             children.Add(new FoundationBlendCurriculum(synthFoundation, corpusFoundation, trainPerCycle: _gymTrainPerCycle, syntheticFraction: 0.0));
             AppendOutput("[train] PREBAKE: warming function-word recognition from 100% REAL CORPUS (Wikipedia) — natural text gives function-word breadth for free, no per-word synthetic hand-tuning (synthetic kept only for the inspect-probe vocab)");
         }
+        // CORPUS PREDICTION (masked cloze) — the genesis-native "base-model" objective (PLATONIC_MIND: reasoning = the
+        // field relaxing its own surprise): predict a held-out CONTENT word from its context, drive the error back via the
+        // substrate's own FineEditFromExample coupling, so corpus text actively BUILDS knowledge (NextTrainBatch emits the
+        // masked skeleton→target pairs; SelfAssess reports the HELD-OUT cloze curve). Foundation-tier (warms before the
+        // skills, and the retained function-word skeleton also warms recognition — could subsume the passive prebake).
+        // EXPERIMENTAL, default-OFF (opt-in) — same shared Wikipedia source CorpusWarm uses. See [[nova-corpus-masked-cloze]].
+        if (GetControl<CheckBox>("CurCorpusPrediction")?.Checked ?? false)
+        {
+            children.Add(new CorpusPredictionCurriculum(CorpusWarmCurriculum.SharedCorpus, trainPerCycle: _gymTrainPerCycle));
+            AppendOutput("[train] corpus-prediction (masked cloze): predict a held-out content word from context; held-out cloze accuracy is the climb signal (self-supervised base-model objective on the substrate)");
+        }
         if (GetControl<CheckBox>("CurCreators")?.Checked ?? false)
         {
             children.AddRange(CreatorUnit.SkillLadder(trainCount: _gymTrainPerCycle));   // each creator = one focusable trainer
@@ -1587,6 +1601,7 @@ public class MainWindow : Form
             FoundationBlendCurriculum => 0, // prerequisite — warms function-word recognition (100% real corpus; synthetic kept only for inspect-probe vocab)
             CorpusWarmCurriculum => 0,      // (if used standalone) same prerequisite role
             PrebakeLanguageCurriculum => 0, // (if used standalone) same prerequisite role
+            CorpusPredictionCurriculum => 0, // masked-cloze base-model objective — foundation-tier (warms before the skills, after the prebake by list order)
             OpCueCurriculum => 1,                // worded arithmetic synonyms → op
             NumberWordCurriculum => 2,           // digit↔word lexicon atoms
             NavReasoningCurriculum => 2,         // taxonomy + level cues (a fundamentals-tier foundation)
@@ -2247,6 +2262,7 @@ public class MainWindow : Form
         var list = new List<(string, string, string)>
         {
             ("PrebakeLanguage", "CurPrebakeLanguage", "Prebake — warm function-word recognition (real corpus + synthetic L1)"),
+            ("CorpusPrediction","CurCorpusPrediction","Corpus prediction (masked cloze) — self-supervised base-model objective (default on)"),
             ("OpCues",          "CurOpCues",          "Op-cue words — sum / difference / product / quotient → operator"),
             ("NumberWords",     "CurNumberWords",     "Number words — digit ↔ word lexicon"),
             ("NavReasoning",    "CurNavReasoning",    "Nav-reasoning — is-a taxonomy + level cues (HELD-OUT curve)"),

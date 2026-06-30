@@ -99,7 +99,14 @@ public sealed record GenesisNovaConfig(
     // store slot were freed. The materialised space becomes a CACHE over the conserved decodable void — the navigator's
     // walk (TryLand) and reasoning (Reason) decode a missing concept back when they reach its address, instead of missing.
     // false (default) = the substrate misses on an evicted/latent coordinate, byte-identical. ON in WithProductionMechanisms.
-    bool DecodeFromVoidRecovery = false)
+    bool DecodeFromVoidRecovery = false,
+    // SELF-HEAL MISROUTED CUES — the missing "learn from a WRONG ROUTE" signal in training. When true, a value-wrong
+    // training probe whose TRUE answer is a NUMBER but whose produced answer is a compare WORD (an arithmetic query
+    // hijacked to the predicate/compare route) CONTRADICTS the operator/cue that selected that route, so training
+    // UNLEARNS the bad cue→∘cmp relation and the skill recovers. Without it a corpus-contaminated operator symbol
+    // ("-"→∘cmp) is immortal and focused training can never fix it (see nova-subtract-stuck-compare-hijack). false
+    // (default) = byte-identical (no disruption fires). ON in WithProductionMechanisms.
+    bool SelfHealMisroutedCues = false)
 {
     /// <summary>
     /// Platonic face (embedding) width. By default equals the GRU width (HiddenSize); when
@@ -137,6 +144,9 @@ public sealed record GenesisNovaConfig(
         DecodeFromVoidRecovery = true, // the materialised space is a CACHE over the conserved decodable void — the walk
                                       // (TryLand) and reasoning (Reason) DECODE + re-materialise an evicted/latent concept
                                       // from its coordinate on demand, guarded to a confident valid decode (no junk).
+        SelfHealMisroutedCues = true, // training LEARNS FROM A WRONG ROUTE — a numeric example answered via the compare
+                                      // route contradicts the operator/cue that hijacked it, so a corpus-contaminated
+                                      // cue→∘cmp edge is UNLEARNED and the skill recovers (else it's immortal, stuck).
         BatchedCloudGpu = true,       // PERF: GPU-batched RecomputeCloud (Cloud = A·T via index_select/index_add_ on
                                       // CUDA) replacing the scalar per-observation hot loop that was ~90% of training
                                       // CPU. Fully wired (defer+flush; every read flushes via EnsureCloudsFresh); cloud

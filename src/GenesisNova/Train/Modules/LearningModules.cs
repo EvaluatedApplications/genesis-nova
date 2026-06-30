@@ -96,6 +96,26 @@ public sealed class DisruptionModule : IProbeOutcomeModule
     public IReadOnlyDictionary<string, double> Metrics() => new Dictionary<string, double> { ["disrupted"] = _disrupted };
 }
 
+/// <summary>SELF-HEAL a CUE MISROUTE — the missing "learn from a WRONG ROUTE" signal. On a value-WRONG probe whose
+/// numeric answer was produced as a compare WORD (an arithmetic query hijacked to the compare route), contradict the
+/// operator/cue that selected it so training UNLEARNS the bad cue→∘cmp relation and the route stops hijacking. Gated by
+/// the engine's SelfHealMisroutedCues flag (off = no-op). Without it a corpus-contaminated "-"→∘cmp is IMMORTAL and
+/// focused training can never recover the skill (the failure lives where no gradient/curriculum reaches it). See
+/// nova-subtract-stuck-compare-hijack.</summary>
+public sealed class CueSelfHealModule : IProbeOutcomeModule
+{
+    private long _healed;
+    public string Name => "cue-self-heal";
+
+    public void OnGradedProbe(in ProbeOutcome o)
+    {
+        if (!o.ValueCorrect)
+            try { o.Runtime.HealMisroutedCue(o.Probe.Query, o.Probe.Allowed, o.Output); _healed++; } catch { }
+    }
+
+    public IReadOnlyDictionary<string, double> Metrics() => new Dictionary<string, double> { ["healed"] = _healed };
+}
+
 /// <summary>RUNG 2 — function gradient (PLATONIC_BACKPROP.md, dormant unless FunctionGradientEnabled): descend the
 /// softmax-CE function gradient so the anchor retrieves a valid task answer (arithmetic anchors are frozen numbers
 /// → no-op). The engine self-gates when the flag is off.</summary>

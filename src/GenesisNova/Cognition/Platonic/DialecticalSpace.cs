@@ -1235,6 +1235,32 @@ public sealed class DialecticalSpace : IPlatonicSpace
         RecomputeCloud(ea); RecomputeCloud(eb); // the raised contradiction now subtracts the partner's token from the cloud
     }
 
+    // Below this strength a thoroughly-contradicted CUE→anchor routing relation is DROPPED (not just weakened): a
+    // routing cue is BINARY at use (a token either selects a route or not — see ResolveLearnedIntent/ResolveLearnedOp,
+    // which read the TOP relation regardless of absolute strength), so merely lowering strength can never stop a bad
+    // cue from hijacking. Dropping the edge is the only thing that flips routing — the world UNLEARNS the association.
+    private const double CueDropStrength = 0.2;
+
+    /// <summary>
+    /// SELF-HEAL a mis-firing routing CUE (the substrate half of "learn from a wrong route"). A learned cue→anchor
+    /// relation (e.g. an operator symbol "-" wrongly related to the compare anchor "∘cmp" by corpus contamination)
+    /// that drove a WRONG answer is CONTRADICTED here; once it is essentially all-contradiction (strength ≤
+    /// <see cref="CueDropStrength"/>) the edge is DROPPED so the cue stops selecting that route. It re-forms only if
+    /// genuinely re-observed. Gradual (one contradiction per wrong outcome) so a single mis-grade can't nuke a good
+    /// cue; a persistently-wrong cue is unlearned over a few outcomes. Returns true when the edge was dropped. No-op
+    /// if the relation is absent (nothing to unlearn). See <see cref="DisruptAssociation"/> (the orbital-repel sibling).
+    /// </summary>
+    public bool DisruptCueRelation(string cue, string anchor, double perHitContradiction = 0.25)
+    {
+        var a = Normalize(cue); var b = Normalize(anchor);
+        if (!_relations.TryGetValue(Key(a, b), out var rel)) return false;
+        rel.FailureCount++;
+        rel.Synthesis = Clamp01(rel.Synthesis + Math.Max(0.0, perHitContradiction));
+        rel.LastObserved = rel.Synthesis;
+        if (rel.Strength <= CueDropStrength) { DropRelation(rel); return true; }
+        return false;
+    }
+
     public void FunctionGradientStep(string anchor, string target, IReadOnlyList<string> distractors, double rate = 0.05)
     {
         var qn = Normalize(anchor); var tn = Normalize(target);

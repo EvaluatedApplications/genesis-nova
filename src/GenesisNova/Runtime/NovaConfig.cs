@@ -41,7 +41,7 @@ public sealed record NovaConfig(
     public static NovaConfig FromLegacy(GenesisNovaConfig c) => StableDefault with
     {
         Routing = StableDefault.Routing with { EdgeRoutingEnabled = c.EdgeRoutingEnabled },
-        Learning = StableDefault.Learning with { FunctionGradientEnabled = c.FunctionGradientEnabled },
+        Learning = StableDefault.Learning with { FunctionGradientEnabled = c.FunctionGradientEnabled, SelfHealMisroutedCues = c.SelfHealMisroutedCues },
         Controller = StableDefault.Controller with { SelfConditioned = c.LivingSelf },
         Substrate = StableDefault.Substrate with { BatchedCloudGpu = c.BatchedCloudGpu, DecodeFromVoidRecovery = c.DecodeFromVoidRecovery },
         KeepCoreControl = c.KeepCoreControl,
@@ -98,6 +98,7 @@ public sealed record NovaConfig(
         // Learning (task→space mechanisms + edit head)
         inference.FunctionDisruptionEnabled = Learning.FunctionDisruptionEnabled; // Rung 1
         inference.FunctionGradientEnabled = Learning.FunctionGradientEnabled;     // Rung 2
+        inference.SelfHealMisroutedCues = Learning.SelfHealMisroutedCues;         // learn from a wrong route (unlearn a hijacking cue→∘cmp edge)
         trainer.RequirePlatonicForCorrect = Learning.RequirePlatonicForCorrect;
         trainer.SpaceAwareEdit = Learning.SpaceAwareEdit;
         trainer.PerceptionEdit = Learning.PerceptionEdit;
@@ -137,4 +138,5 @@ public sealed record LearningOptions(
     bool RequirePlatonicForCorrect = true,
     bool SpaceAwareEdit = true,
     bool PerceptionEdit = true,
-    int RepelNeighbors = 3);
+    int RepelNeighbors = 3,
+    bool SelfHealMisroutedCues = false); // learn from a WRONG ROUTE — unlearn a cue→route edge that hijacked a numeric example to compare

@@ -20,6 +20,7 @@ public interface ILearningRuntime
     void ReinforceEvidence(IReadOnlyList<PlatonicEvidence> evidence, bool success);
     void DisruptWrongAnswer(string query, string output);
     void TrainRetrievalToward(string query, IReadOnlyList<string> allowedAnswers);
+    void HealMisroutedCue(string query, IReadOnlyList<string> allowedAnswers, string output);
 
     IReadOnlyList<long> OpClassBalance { get; }
 }

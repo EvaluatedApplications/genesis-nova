@@ -62,6 +62,7 @@ public sealed class GenesisModularTrainingOrchestrator
             new CreditAssignmentModule(),
             new DisruptionModule(),       // Rung 1
             new FunctionGradientModule(), // Rung 2
+            new CueSelfHealModule(),      // self-heal a CUE MISROUTE (learn from a wrong route — unlearn a bad cue→route edge)
         };
 
         while (!ct.IsCancellationRequested)

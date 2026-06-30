@@ -249,6 +249,12 @@ public sealed partial class GenesisEvalAppRuntime : ILearningRuntime
     public void TrainRetrievalToward(string query, IReadOnlyList<string> allowedAnswers)
         => WithModelGate(() => { _state.Inference.TrainRetrievalToward(query, allowedAnswers); return 0; });
 
+    /// <summary>SELF-HEAL a CUE MISROUTE (the missing "learn from a wrong route" signal): a value-wrong probe whose
+    /// numeric answer was produced as a compare WORD means an arithmetic query was hijacked to the compare route, so
+    /// contradict the operator/cue that selected it. No-op unless SelfHealMisroutedCues. Model-ops gated.</summary>
+    public void HealMisroutedCue(string query, IReadOnlyList<string> allowedAnswers, string output)
+        => WithModelGate(() => { _state.Inference.HealMisroutedCue(query, allowedAnswers, output); return 0; });
+
     /// <summary>Live op-head class-balance window [abstain, add, sub, mul, div] (decayed EMA counts). A single
     /// dominant entry signals the head COLLAPSING to one operator — the erosion failure mode. Surfaced here because
     /// these counts were exposed on the model but read by NOTHING; they only mean something during training.</summary>

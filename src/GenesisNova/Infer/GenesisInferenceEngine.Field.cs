@@ -287,6 +287,41 @@ public sealed partial class GenesisInferenceEngine
     //    "∘" anchor; resolve at inference, ABSTAIN on competing (framing words spread across intents). Gated by
     //    LearnedCuesOnly (default OFF = the hardcoded lists, byte-identical) until validated, then flipped.
     public bool LearnedCuesOnly { get; set; }
+
+    // SELF-HEAL MISROUTED CUES (gated, default OFF = byte-identical). The missing "learn from a WRONG ROUTE" signal:
+    // a value-wrong probe whose TRUE answer is a NUMBER but whose produced answer is a non-number WORD is an arithmetic
+    // query that got hijacked to the COMPARE route — so the compare cue that fired was misapplied. Without this, a
+    // corpus-contaminated operator symbol ("-"→∘cmp) is IMMORTAL: routing has no trainable parameter, the subtract
+    // curriculum never touches the bad edge (LearnArithmeticCue skips explicit-operator examples, LearnIntentCue no-ops
+    // numeric outputs), and a weakened edge still wins (the resolvers read the TOP relation regardless of strength). So
+    // focused training can never recover the skill. This closes the loop. See nova-subtract-stuck-compare-hijack.
+    public bool SelfHealMisroutedCues { get; set; }
+
+    /// <summary>SELF-HEAL a CUE MISROUTE from a graded-WRONG training probe (gated by <see cref="SelfHealMisroutedCues"/>).
+    /// The example's own STRUCTURE supervises it — no word lists: a NUMERIC true answer produced as a non-number WORD
+    /// over a ≥2-operand input means an arithmetic query was answered by the COMPARE route, so each learned compare-cue
+    /// token in the input was misapplied → contradict its ∘cmp relation (<see cref="DialecticalSpace.DisruptCueRelation"/>
+    /// drops it once thoroughly contradicted). No-op unless the misroute shape holds, so a genuine comparison query
+    /// (numeric input, WORD answer that IS the right outcome) never disrupts anything.</summary>
+    public void HealMisroutedCue(string query, IReadOnlyList<string> allowed, string output)
+    {
+        if (!SelfHealMisroutedCues || _memory is not DialecticalSpace ds) return;
+        if (string.IsNullOrWhiteSpace(query) || allowed is not { Count: > 0 }) return;
+        var inv = CultureInfo.InvariantCulture;
+        // The TRUE answer must be a NUMBER (an arithmetic example) ...
+        if (!double.TryParse((allowed[0] ?? string.Empty).Trim(), NumberStyles.Float, inv, out _)) return;
+        // ... and the PRODUCED answer a non-empty, non-number WORD (the compare outcome greater/less/equal) — a misroute.
+        var outToks = TokenizeField(output);
+        if (outToks.Count == 0 || outToks.Any(t => double.TryParse(t, NumberStyles.Float, inv, out _))) return;
+        // ... over an arithmetic-shaped input (≥2 operands), so we only ever contradict a cue that should NOT have
+        // selected compare — never a genuine 2-number comparison whose answer just happens to be a word.
+        var inToks = SignMerge(TokenizeField(query));
+        if (inToks.Count(t => double.TryParse(t, NumberStyles.Float, inv, out _)) < 2) return;
+        foreach (var t in inToks)
+            if (!IsNumericLike(t) && ResolveLearnedIntent(t) == FieldIntent.Compare)
+                ds.DisruptCueRelation(t, "∘cmp");
+    }
+
     private enum FieldIntent { None, Compare, ToWord, ToDigit, Retrieve, Question }
     private static readonly (string Anchor, FieldIntent Intent)[] IntentAnchors =
         { ("∘cmp", FieldIntent.Compare), ("∘tow", FieldIntent.ToWord), ("∘tod", FieldIntent.ToDigit), ("∘ret", FieldIntent.Retrieve), ("∘qst", FieldIntent.Question) };

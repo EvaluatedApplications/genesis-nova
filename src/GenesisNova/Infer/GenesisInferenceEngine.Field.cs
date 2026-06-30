@@ -1225,7 +1225,8 @@ public sealed partial class GenesisInferenceEngine
                 .OrderByDescending(n => n.Confidence).ThenByDescending(n => n.ObservationCount).ToList();
             if (prel.Count > 0 && (prel.Count == 1 || prel[0].Confidence > prel[1].Confidence + 0.15))
             {
-                PerceiveIntoSelfField(ds, phrase);
+                // CLEAR case (a dominant phrase relation): answer directly, do NOT write the self (M3 — only ambiguous
+                // conclusions accumulate; a known fact is recalled without becoming "mood").
                 return EmitPlatonicResult(prel[0].Concept, "field-relax", Math.Clamp(prel[0].Confidence, 0.0, 1.0),
                     hops: 1, request, evidence: null, out result);
             }
@@ -1246,9 +1247,13 @@ public sealed partial class GenesisInferenceEngine
         bool BadTarget(string s) => string.IsNullOrEmpty(s) || PlatonicSpaceMemory.IsReservedConcept(s)
             || ds.IsOperationToken(s) || s.Equals(subject, StringComparison.Ordinal);
         bool Bad(string s) => BadTarget(s) || IsFiller(ds, s);
-        // Attending to a subject both threads the discrete focus AND folds its meaning into the persistent self —
-        // the mind becomes, a little, what it has just thought about.
-        void Attend() { _focus.Remove(subject); _focus.Add(subject); while (_focus.Count > FocusSize) _focus.RemoveAt(0); PerceiveIntoSelfField(ds, subject); }
+        // Threading the discrete FOCUS (last-N working memory) happens on EVERY relax path. The persistent SELF, by
+        // contrast, accumulates ONLY from what the mind CONCLUDES on the genuinely AMBIGUOUS branch — the axiom (M3):
+        // only the self decays, and it is built from the mind's own conclusions, decaying. A CLEAR case (dominant
+        // relation, arithmetic) threads focus but leaves the self untouched (a known fact is not "mood"). The ambiguous
+        // resolutions below fold their OWN answer via FoldConclusion — the vital loop, closed at inference, not training.
+        void Attend() { _focus.Remove(subject); _focus.Add(subject); while (_focus.Count > FocusSize) _focus.RemoveAt(0); }
+        void FoldConclusion(string answer) { if (!string.IsNullOrEmpty(answer)) PerceiveIntoSelfField(ds, answer); }
         bool Valid(DialecticalSpace.Thought t) => t.Settled && t.Confidence >= ReasonMinConfidence && !Bad(t.Symbol);
 
         // RELATION-FIRST when the mind holds a DOMINANT explicit association — a single strong relation IS the answer,
@@ -1282,6 +1287,7 @@ public sealed partial class GenesisInferenceEngine
             if (navOk && !Bad(navAns) && ds.ContainsConcept(navAns))
             {
                 Attend();
+                FoldConclusion(navAns); // the AMBIGUOUS query resolved (a multi-hop walk) → the mind accumulates its conclusion
                 return EmitPlatonicResult(navAns, "navigator-walk",
                     Math.Clamp(navConf <= 0.0 ? ReasonMinConfidence : navConf, 0.0, 1.0),
                     hops: 2, request, evidence: null, out result);
@@ -1311,6 +1317,7 @@ public sealed partial class GenesisInferenceEngine
         }
         Attend();
         if (!Valid(chosen)) return false;
+        FoldConclusion(chosen.Symbol); // the AMBIGUOUS cloud relaxation settled → the mind becomes what it concluded (M3 vital loop)
         return EmitPlatonicResult(chosen.Symbol, viaSelf ? "field-relax-self" : "field-relax", chosen.Confidence,
             Math.Max(1, chosen.Steps), request, evidence: null, out result);
     }

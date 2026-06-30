@@ -51,11 +51,15 @@ public sealed partial class GenesisEvalAppRuntime
     // Light per-cycle budget knobs — kept small so the navigator step never dominates a gym cycle.
     private const int NavSampleMembers = 8;   // leaf concepts sampled per cycle (each yields up to 3 cued queries)
     private const int NavBcEpochs = 3;        // a few gradient passes — a light step, NOT a full train
-    private const int NavDaggerRounds = 0;    // on-policy DAgger rounds after the BC warm-start (0 = pure BC).
-                                              // TEMP 0: DAgger's successful rollouts fold category HUBS into the shared
-                                              // model _selfField every cycle (the loop's write side), polluting the
-                                              // model's cognition and degrading the function-word foundation. Re-enable
-                                              // once the gym nav training stops writing the SHARED self (see below).
+    private const int NavDaggerRounds = 2;    // on-policy DAgger rounds after the BC warm-start (teaches the walker to
+                                              // RECOVER from its own slips, not just replay a perfect path). RE-ENABLED
+                                              // (M3): gym nav training NO LONGER writes the SHARED model _selfField — the
+                                              // vital-loop write was moved OUT of the training walk and INTO inference
+                                              // resolution (only a genuinely AMBIGUOUS query folds its OWN concluded
+                                              // answer into the self, in GenesisInferenceEngine.TryFieldRelax). So
+                                              // DAgger's successful rollouts can no longer fold category HUBS into the
+                                              // self / degrade the function-word foundation. Prebake stability with DAgger
+                                              // on is proven by FunctionWordConservationTests + the SelfAssess separation.
     private const int NavEvalWalks = 6;       // on-policy probes for the resolve%/abstain% signal
     private const int NavMaxSteps = 8;        // the walk's cognitive light-cone for the probe
     private const int NavK = NavQueryDaggerTrainer.DefaultK;
@@ -145,9 +149,11 @@ public sealed partial class GenesisEvalAppRuntime
             }
         }
 
-        // Cheap on-policy probe + the vital loop: do the freshly-trained queries RESOLVE, and fold every traversed
-        // concept into the engine's persistent self.
-        var (resolvePct, abstainPct) = EvaluateAndFoldSelf(ds, net, queries, device);
+        // Cheap on-policy probe — do the freshly-trained queries RESOLVE under the net's learned halt? This is now a
+        // READ-ONLY signal: it does NOT write the shared engine self (M3). The vital-loop self-write was moved to
+        // INFERENCE resolution (TryFieldRelax folds a genuinely-ambiguous query's OWN concluded answer), so gym training
+        // — including the DAgger rollouts above — can never pollute the self with traversed category hubs.
+        var (resolvePct, abstainPct) = EvaluateNavigatorResolve(ds, net, queries, device);
 
         // Keep the net at REST on CPU between cycles — frees GPU memory for the gym model (overnight-safe) and makes the
         // persister's CPU weight export cheap. The move is ~tens of ms for this thin controller.
@@ -339,9 +345,12 @@ public sealed partial class GenesisEvalAppRuntime
     }
 
     /// <summary>Probe a few of the freshly-trained queries with the on-policy walk (NO answer supplied — relies on the
-    /// net's learned HALT) and fold every traversed concept into the engine's persistent self (the vital loop). Returns
-    /// (resolve%, abstain%): RESOLVE = confident halt on the cued ancestor, ABSTAIN = no confident halt in the budget.</summary>
-    private (double ResolvePct, double AbstainPct) EvaluateAndFoldSelf(
+    /// net's learned HALT) for the resolve%/abstain% signal. READ-ONLY (M3): it does NOT write the engine's shared
+    /// persistent self — folding navigator-TRAINING traversals (category hubs) into the self every cycle was the
+    /// write-side pollution that derailed held-out walks and forced DAgger off. The vital-loop self-write now lives in
+    /// INFERENCE (TryFieldRelax folds the mind's OWN ambiguous conclusion). Returns (resolve%, abstain%): RESOLVE =
+    /// confident halt on the cued ancestor, ABSTAIN = no confident halt in the budget.</summary>
+    private (double ResolvePct, double AbstainPct) EvaluateNavigatorResolve(
         DialecticalSpace ds, NavQueryPolicyNet net, List<NavQueryDaggerTrainer.Query> queries, Device device)
     {
         var evalCount = Math.Min(NavEvalWalks, queries.Count);
@@ -364,7 +373,9 @@ public sealed partial class GenesisEvalAppRuntime
                     if (string.Equals(res.FinalSymbol, q.Ancestor, StringComparison.Ordinal)) resolved++;
                 }
                 else abstained++;
-                foreach (var s in res.Trajectory) _state.Inference.PerceiveSelf(s); // close the loop through the one self
+                // NO self-write here (M3): a navigator-TRAINING traversal must NOT fold its visited concepts (category
+                // hubs) into the SHARED engine self — that was the pollution. The self accumulates only from the mind's
+                // own AMBIGUOUS conclusions at inference time (GenesisInferenceEngine.TryFieldRelax).
             }
             catch { /* a single bad walk must never crash the gym */ }
         }

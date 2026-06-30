@@ -172,9 +172,9 @@ public sealed class NavigatorM2MultiHop
             foreach (var p in heldOut) PlantPerson(ds, p);
             ds.FlushCloudBatch();
 
-            // The gym's per-cycle EvaluateAndFoldSelf folded traversed concepts into the engine's persistent self; that
-            // self is an M3 concern (it conditions the AMBIGUOUS fork). For an isolated M2 reading of the navigator's
-            // COMPOSITION we clear it so the walk is purely kind-conditioned (matches the goal-emergent diagnostic walk).
+            // M3: gym nav training no longer writes the shared engine self (the self is now shaped only by INFERENCE
+            // resolutions). This clear is therefore a no-op belt-and-braces — kept so an isolated M2 reading of the
+            // navigator's COMPOSITION is provably self-free (purely kind-conditioned, matching the diagnostic walk).
             eng.RestoreSelfField(null);
 
             var device = net.parameters().FirstOrDefault()?.device ?? CPU;

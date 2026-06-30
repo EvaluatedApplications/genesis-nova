@@ -82,7 +82,9 @@ public sealed class NavigatorObservationTests
             var ds = Assert.IsType<DialecticalSpace>(runtime.State.Memory);
             PlantTaxonomy(ds);
 
-            // Seed the navigator (and, via evaluate-and-fold, the engine self) with a few light cycles.
+            // Seed the navigator with a few light cycles. M3: gym nav training is READ-ONLY w.r.t. the engine self — it
+            // does NOT fold traversed (category-hub) concepts into the shared _selfField (that was the pollution that
+            // forced DAgger off). The self is shaped only by INFERENCE resolutions, exercised below by explicit priming.
             NavTrainCycleResult last = default;
             for (var c = 0; c < 4; c++) last = runtime.TrainNavigatorCycle(maxMembers: MaxMembers, epochs: 2);
             Assert.True(last.Queries > 0, "training must have sampled cued queries from the live space");
@@ -96,16 +98,23 @@ public sealed class NavigatorObservationTests
             Assert.Equal(last.Queries, diag.LastQueries);
             Assert.True(diag.RunningResolvePct >= 0.0 && diag.RunningResolvePct <= 1.0);
             Assert.True(diag.LastAbstainPct is >= 0.0 and <= 1.0);
-            // The evaluate-and-fold loop folded traversed concepts into the engine self → it is non-empty (unit length),
-            // so the Inspect "self focus" can show what the mind is dwelling on.
             Assert.True(diag.SelfConditions, "self-conditioning is on by default in the living-field mode");
-            Assert.True(diag.SelfMagnitude > 0.0, "training folded traversal into the engine self → non-empty self vector");
-            Assert.NotEmpty(diag.SelfFocus);
-            Assert.All(diag.SelfFocus, f => Assert.False(string.IsNullOrWhiteSpace(f.Concept)));
+            // M3 INVARIANT: gym nav training did NOT write the shared self (no pollution) → the self is still empty.
+            Assert.Equal(0.0, diag.SelfMagnitude);
+            Assert.Empty(diag.SelfFocus);
+
+            // Now PRIME the self the way inference does (the mind dwelling on concepts) so the Inspect "self focus" has
+            // something to show — proving the diagnostics surface the live self once it is non-empty.
+            runtime.State.Inference.PerceiveSelf("dog");
+            runtime.State.Inference.PerceiveSelf("robin");
+            var primed = runtime.GetNavigatorDiagnostics();
+            Assert.True(primed.SelfMagnitude > 0.0, "after priming, the engine self is non-empty (unit length)");
+            Assert.NotEmpty(primed.SelfFocus);
+            Assert.All(primed.SelfFocus, f => Assert.False(string.IsNullOrWhiteSpace(f.Concept)));
             // Cosine similarities are well-formed and ranked descending.
-            Assert.All(diag.SelfFocus, f => Assert.InRange(f.Similarity, -1.0001, 1.0001));
-            for (var i = 1; i < diag.SelfFocus.Count; i++)
-                Assert.True(diag.SelfFocus[i - 1].Similarity >= diag.SelfFocus[i].Similarity - 1e-9, "focus must be ranked");
+            Assert.All(primed.SelfFocus, f => Assert.InRange(f.Similarity, -1.0001, 1.0001));
+            for (var i = 1; i < primed.SelfFocus.Count; i++)
+                Assert.True(primed.SelfFocus[i - 1].Similarity >= primed.SelfFocus[i].Similarity - 1e-9, "focus must be ranked");
 
             // ── WALK HELPER (what `/nav <concept> [cue]` runs) — a planted concept yields a real trajectory ──
             var walk = runtime.WalkNavigator("dog", "genus");

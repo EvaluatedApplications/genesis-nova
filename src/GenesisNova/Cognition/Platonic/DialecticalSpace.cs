@@ -145,7 +145,11 @@ public sealed class DialecticalSpace : IPlatonicSpace
 
     // ─────────────────────────────────────────────────────────────────────────────── Core (counts / config / glue)
     public bool UseInfoNceRepulsion { get; set; }
-    public bool DimensionalContradiction { get; set; } = true; // the new core is per-aspect by construction
+    // INTENTIONALLY IGNORED in this core: the dialectical core is per-aspect BY CONSTRUCTION — RecomputeCloud superposes
+    // neighbour tokens per-dimension (cloud[i] = token(self)[i] + Σ(1−2κ)·token(n)[i]), so shared aspects reinforce and
+    // contradicting ones cancel WITHOUT an explicit per-dim κ gate. This flag drives ONLY the LEGACY PlatonicSpaceMemory's
+    // MessagePassUpdate gate; it is kept here solely to satisfy IPlatonicSpace and is never read in this class.
+    public bool DimensionalContradiction { get; set; } = true;
     // Concept counts EXCLUDE atoms — atoms are reusable sub-lexical components, not user concepts (keeps NodeCount's
     // meaning identical to the legacy store while the atom layer lives underneath).
     public int NodeCount => _concepts.ActiveConceptCount; // O(1), concurrency-safe (read live by /status during training)

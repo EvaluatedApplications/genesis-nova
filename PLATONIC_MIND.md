@@ -127,9 +127,11 @@ Relaxation is the primary retrieval route in inference (`platonic-reason`) with 
 (`platonic-abstain`) when nothing settles. See `Infer/GenesisInferenceEngine` and `DialecticalSpace.Reason`. The
 relaxation signal is validated; the "self-model face" and "law of the whole field" remain aspirational.
 
-> **Design direction — reasoning as navigation (`PLATONIC_NAVIGATOR.md`).** "Reasoning is relaxation" is being
-> re-located, not discarded. Letting the *whole* field settle to equilibrium is global and prone to chaotic
-> hub-dilution; the direction is a **situated walk** — a neural agent stands at a coordinate (the decodable address
+> **Reasoning as navigation (`PLATONIC_NAVIGATOR.md`) — now shipped and default-on in production.** "Reasoning is
+> relaxation" is **re-located**, not discarded, and the relocation has been built: the navigator is trained every gym
+> cycle and wired into the live ambiguous branch of inference by `WithProductionMechanisms()`. Letting the *whole*
+> field settle to equilibrium is global and prone to chaotic hub-dilution; the realised path is a **situated walk** —
+> a neural agent stands at a coordinate (the decodable address
 > space, `PLATONIC_NUCLEUS.md`), senses its neighbourhood in first person, and **steps** toward the answer. Surprise
 > minimisation is kept but applied **per step, locally**: the policy descends a *local* free-energy gradient and may
 > override it, so order comes from navigation rather than from the dynamics reaching equilibrium. Relaxation becomes

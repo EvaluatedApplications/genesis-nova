@@ -24,36 +24,48 @@ That bet is **half-right**, and this document is about which half.
 
 ## 2. The architecture today
 
+In production (`GenesisNovaConfig.WithProductionMechanisms()`, used by the desktop app and RaceBench) the engine runs
+with `ConsciousField = true`, and cognition is driven by the **substrate's own field relaxation** — *not* by a GRU
+classifier deciding routes. The shipped path is:
+
 ```
    SURFACE (text/tokens)
         │
         ▼
-   ┌─────────────┐     recognises roles / routes / ops
-   │  NN (GRU)   │ ──► supervises, directs            ~10% of compute
+   ┌──────────────────────────────────────────────┐
+   │  DialecticalSpace (the platonic substrate)    │   ~90% of compute
+   │  • Elements (atoms: char / word / number)     │
+   │  • Relations (the graph / force-field)        │   GenerateFromField:
+   │  • Clouds (distributional geometry)            │   a substrate route LADDER
+   │  • Homomorphism codec (exact arithmetic)       │   that abstains / falls
+   │  • Relaxation = reasoning (settles surprise)   │   through per step
+   └──────────────────────────────────────────────┘
+        ▲
+        │  thin recogniser (op-cue, role, abstain signals) — NOT a route classifier
+   ┌─────────────┐
+   │  NN (GRU)   │   ~10% of compute
    └─────────────┘
-        │
-        ▼
-   ┌──────────────────────────────────────────┐
-   │  DialecticalSpace (the platonic substrate)│
-   │  • Elements (atoms: char / word / number) │   ~90% of compute
-   │  • Relations (the graph / force-field)    │
-   │  • Clouds (distributional geometry)        │
-   │  • Homomorphism codec (exact arithmetic)   │
-   │  • Relaxation (reasoning = settling surprise)│
-   └──────────────────────────────────────────┘
+   ┄┄┄┄┄┄┄┄┄┄┄┄┄┄ LEGACY / aspirational ┄┄┄┄┄┄┄┄┄┄┄┄┄┄
+   the GRU route/plan/op CLASSIFIER (`GenerateSingle`) — the old "NN directs"
+   path, live only when `ConsciousField = false`; bypassed in production
 ```
 
-**What lives where:**
-- **Substrate (CPU):** identity, relations, geometric clouds, homomorphic arithmetic, Merge-style composition, recall by relaxation, eviction/forgetting.
-- **NN (GPU):** role recognition, op-cue inference, route/abstain decisions — a *general pattern recogniser* that supervises the substrate.
+**The shipped cognition path:** with `ConsciousField` on, `GenesisInferenceEngine.GenerateFromField` runs a substrate
+route ladder that abstains / falls through per step (induction → predicate → arithmetic → number-word → field-tick →
+learned-function → meaning-ticks/analogy/compose → talk → learn → recall → **relaxation (`TryFieldRelax`)** → abstain),
+each answer tagged with a `DecisionPath`. Reasoning is the field **settling its own surprise** (the founding claim of
+`PLATONIC_MIND.md` §3), with honest abstention when nothing settles — and, in the ambiguous branch, a trained
+**navigator walk** (`PLATONIC_NAVIGATOR.md`) before the one-shot relax. The GRU is demoted to a **thin recogniser**
+(op-cue, role, abstain signals), not the director.
 
-> **Live-path note:** the production config (`GenesisNovaConfig.WithProductionMechanisms()`, used by the desktop app
-> and RaceBench) turns on `ConsciousField`, which **bypasses the GRU route/plan/op classifier entirely**. Cognition
-> runs through `GenesisInferenceEngine.GenerateFromField` — a substrate route ladder that abstains/falls through per
-> step (induction → predicate → arithmetic → number-word → field-tick → learned-function → meaning-ticks/analogy/
-> compose → talk → learn → recall → **relaxation (`TryFieldRelax`)** → abstain), each answer tagged with a
-> `DecisionPath`. The "NN recognises routes/ops and directs" box above describes the legacy classifier path (default
-> when `ConsciousField=false`) and the aspirational recogniser role — not the live production cognition path.
+**The legacy path (bypassed in production):** the GRU route/plan/op **classifier** — the "NN recognises routes/ops and
+directs" arrangement — is the `ConsciousField = false` default (`GenerateSingle`). It is the path this document's
+critique (§4, the overfitting) is about, and the aspirational recogniser role §6 describes; it is **not** the live
+production cognition path.
+
+**What lives where:**
+- **Substrate (CPU):** identity, relations, geometric clouds, homomorphic arithmetic, Merge-style composition, recall by relaxation, eviction/forgetting — and, in production, the **route ladder + relaxation that drive cognition**.
+- **NN (GPU):** role recognition, op-cue inference, abstain signals — a *general pattern recogniser* that supervises the substrate. (Using it as a route/plan/op *classifier* is the legacy arrangement, off in production.)
 
 ---
 

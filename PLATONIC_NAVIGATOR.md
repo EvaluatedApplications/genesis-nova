@@ -134,60 +134,77 @@ path. The chaos is attenuated because order is imposed by navigation, not awaite
 ## 5. The action space — the old routes become actions
 
 The route ladder's fixed sequence (op → composer → function → relaxation → retrieval → chain → neural) collapses into
-a **menu of actions** a single policy chooses among, per step:
+a **menu of actions** a single policy chooses among, per step. **The menu is part-built, part north-star** — the
+build-state column says which is live today and which is a deliberate future direction we are keeping in view:
 
-| action | what it does | how it produces a target |
-|---|---|---|
-| **STEP-near** | move to one of the k egocentric neighbours | the lattice neighbours themselves |
-| **FOLLOW-edge** | step along a named relation/▷ from `p_t` (fact recall = one hop) | the edge's endpoint coordinate |
-| **COMPUTE-jump** | apply an operation (e.g. `+`, `category-of`) → a *computed target coordinate* (arithmetic = a target in the void at `141`) | homomorphism / learned functions |
-| **TOWARD-landmark** | move toward a centroid/region | the centroid coordinate |
+| action | what it does | how it produces a target | build-state |
+|---|---|---|---|
+| **STEP/FOLLOW** (unified) | step to one of the K egocentric relational candidates (a named relation/▷ neighbour = fact recall in one hop) | the candidate's face, landed by the lattice | **BUILT** — the live `QueryNavPolicy` scores exactly these K candidates + HALT and emits the chosen candidate's face as the continuous target |
+| **COMPUTE-jump** | apply an operation (e.g. `+`, `category-of`) → a *computed target coordinate* (arithmetic = a target in the void at `141`) | homomorphism / learned functions | **NORTH-STAR (not built)** — the homomorphism-*as-a-walk-step*, a deliberate future direction toward the program-apex (composing math + fact in one walk). Kept in the menu on purpose. |
+| **TOWARD-landmark** | move toward a centroid/region | the centroid coordinate | **NORTH-STAR (not built as a distinct action)** — per-level goal-region centroids DO exist (M4 `EnsureLevelRegions`) and steer the walk as a `cand−goal` feature, but there is no separate "emit a centroid target" move yet |
+| **HALT** | stop; the current coordinate is the answer | — | **BUILT** — a learned halt head; a confident halt emits the landing, budget exhaustion abstains |
 
-Retrieval is "follow an edge." Arithmetic is "compute-jump to the result coordinate." Composition is "step into a
-structure coordinate." There is no privileged ladder — the policy learns *when* each move applies.
+Retrieval is "step to a relational candidate" (BUILT). Arithmetic-as-"compute-jump to the result coordinate" and
+composition-as-"step into a structure coordinate" remain the north-star: the live policy chooses among the K
+relational candidates + HALT, not yet among compute/landmark moves. There is no privileged ladder — within the BUILT
+menu the policy already learns *when* each step applies; widening the menu to COMPUTE-jump is the next frontier, not a
+regression to fix.
 
-### 5.1 One motion primitive: every action rides the lattice (DECIDED)
+### 5.1 One motion primitive: every action rides the lattice (BUILT)
 
 The action types above do **not** each get their own traversal machinery. They all reduce to **one** move:
-**emit/compute a target coordinate, then let the lattice land the step** — the nearest decodable coordinate to that
-target, in O(log N). STEP-near reads lattice neighbours directly; FOLLOW-edge, COMPUTE-jump, and TOWARD-landmark each
-*produce a target coordinate* and the **lattice resolves where the foot actually falls**. This is the
+**emit a target coordinate, then let the lattice land the step** — the nearest decodable coordinate to that target, in
+O(log N). This is built and live: the policy emits a continuous target face (`NavDecision.Target`) and
+`DialecticalSpace.TryLand` resolves **where the foot actually falls** (`NavigatorWalk.Walk`). The BUILT STEP/FOLLOW
+move reads the K relational candidates and emits the chosen candidate's face; the north-star COMPUTE-jump /
+TOWARD-landmark moves (§5) would *produce a target coordinate* the **same** way and land through the **same**
+primitive — that is exactly why widening the menu does not need new traversal machinery. This is the
 "rides-on-the-lattice-for-speed" rule: no per-action O(N) scan, no parallel index — the VP-tree (`PlatonicLattice`)
 is the single, fast motion primitive for the whole walk.
 
-It also settles the step-granularity question: the policy emits a **continuous** target (a direction/coordinate) and
-the **lattice snaps** it to the nearest decodable coordinate — continuous intent, discrete, decodable landing. The
-one requirement this puts on the substrate (§9): the lattice must index/query the **frozen address bands** (stable
-identity), not the drifting orbital tail, so a "land near coordinate X" query is exact and drift-free.
+It also settled the step-granularity question: the policy emits a **continuous** target (a direction/coordinate) and
+the **lattice snaps** it to the nearest decodable coordinate — continuous intent, discrete, decodable landing.
 
-### 5.2 The walk grows the space: navigation as genesis tick (DECIDED)
+### 5.2 The walk grows the space: navigation as genesis tick (BUILT — gated OFF in live walks)
 
-Navigation is **not** read-only. When the walker passes through a **latent** coordinate that proves *useful* — it lies
-on a successful path / has high goal-alignment / the walk halts confidently there — that coordinate is
-**materialised**: committed to the store with an orbital, so the trail the walk blazed becomes durable structure.
-Thinking *creates* structure (the genesis create→select→store tick, `[[nova-nn-directed-generative-tick]]`). The
-existing **relevance-decay eviction** keeps this bounded — useful materialised coordinates are reinforced and kept,
-trails that never pay off decay back to latent. The store therefore converges on *exactly the useful* structure:
-navigation writes, eviction prunes. (A write-policy — *when* a passed-through coordinate earns materialisation — is a
-build detail in §11; default: materialise on a confident successful halt-path, let decay handle the rest.)
+Navigation *can* grow the space, and the write-path is built: `NavigatorWalk` records the face of every passed-through
+coordinate, and on a confident successful halt `MaterialiseOnSuccess` commits each one via
+`DialecticalSpace.Materialise` — the trail the walk blazed becomes durable structure (the genesis create→select→store
+tick, `[[nova-nn-directed-generative-tick]]`), with the existing **relevance-decay eviction** keeping it bounded
+(useful coordinates reinforced and kept, dead trails decaying back to latent).
+
+**In production this is OFF.** Every live walk — the gym training rollouts, the held-out eval, the inference
+disambiguator hook, the `/nav` REPL probe — uses the default `NavWalkOptions(MaterialiseOnSuccess: false)`: the
+navigator currently *reads and answers*, it does not write the store. The genesis-tick growth is realised in code but
+left dormant on purpose, so that thinking-creates-structure stays a deliberate, separately-enabled step rather than an
+always-on side effect of every query.
 
 ---
 
-## 6. The network (thin policy/value over egocentric features)
+## 6. The network (thin policy/value over egocentric features) — BUILT
 
-Keep the NN **thin** — a *recogniser/controller*, never a store (`[[nova-nn-recognizer-space-structural]]`):
+The NN is **thin** — a *recogniser/controller*, never a store (`[[nova-nn-recognizer-space-structural]]`). Built as the
+recurrent `NavQueryPolicyNet` + `QueryNavPolicy` driver, conditioned on a **query-context it has without the answer**:
 
-- **Encoder:** embed `o_t` — neighbour faces + decoded identities + bearings + goal-alignment + relaxation hint —
-  fused with the self `h_t`.
-- **Policy head:** logits over `{the k STEP-near targets, FOLLOW-edge options, COMPUTE-jump ops, TOWARD-landmark,
-  HALT}`; softmax (sample in training, argmax at inference).
-- **Value head:** expected return / "am I getting closer" (for RL and for an abstain signal).
+- **Encoder:** embeds the answer-free per-candidate differential rows `[cand−ref, cand−cur, cand, κ]`
+  (`NavQueryFeatures.Build`) plus the unified `cand−goal` descent feature (M4), fused with the recurrent self `h_t`
+  (seeded from anchor ⊕ cue ⊕ `W_s·self` ⊕ `W_k·kind`, with the cue/kind re-mixed every hop).
+- **Policy head (BUILT):** logits over `{the K relational candidates, HALT}` — softmax (sample in training, argmax at
+  inference). The **COMPUTE-jump / TOWARD-landmark logits are the north-star (§5), not yet heads**: the live action
+  head ranks the K relational candidates and the halt head decides when to stop.
+- **Value head (BUILT):** cost-to-go ("am I getting closer"), **MSE-supervised by the oracle `cost[]`** (not an RL
+  return) — it is the abstain/over-budget signal, not a policy-gradient critic.
 - The NN chooses *which way to step*; the space does all storage/composition/retrieval. It never emits an answer from
-  weights — it emits a *position*, which the substrate decodes.
+  weights — it emits a *position* (a candidate face), which the lattice lands and the substrate decodes.
 
 ---
 
-## 7. Training: the flow-field oracle (reverse Dijkstra), then reinforcement
+## 7. Training: the flow-field oracle (reverse Dijkstra), then on-policy DAgger — BUILT
+
+> **Build-state correction:** training is **BC warm-start + on-policy DAgger** (`NavQueryDaggerTrainer`,
+> `NavDaggerRounds = 2`), with the value head **MSE-supervised by the oracle `cost[]`**. The "Phase 1 — RL fine-tune /
+> beat the oracle" below is **NOT built** — it is kept as a north-star (§7 Phase 1). There is no policy-gradient / TD
+> return anywhere in the navigator.
 
 The space is enormous; a from-scratch random walk never hits the answer. Cold-start by **imitating an oracle** — and
 the right oracle is **not** A\* (one path) and **not** the degraded old routes (a weak teacher). It is a **backward
@@ -208,14 +225,22 @@ graph** with the expert action. So when the learner strays off the optimal path,
 correct next move there — **DAgger for free**, no teacher re-query — and `cost[]` gives a dense distance-to-goal
 reward at every state the learner could occupy.
 
-- **Phase 0 — behavioural cloning on the flow field.** For each training `(query, known-answer)`, compute the
-  oracle field once; train `π_θ` to reproduce `next[node]` at every reachable node (not one path). The dense
-  `cost[]`-gradient supervises the value head.
-- **Phase 1 — RL fine-tune.** Let the walker **beat** the oracle on the real action menu — discover shorter and
-  compositional routes (math + fact in one walk) the per-goal field can't pre-bake — using `cost[]` as the dense
-  reward and the frozen-address distance as a fallback heuristic where no field exists (inference, answer unknown).
-- **Self-supervised surprise:** predict the next coordinate / whether a step reduces goal-surprise — the free-energy
-  framing of `PLATONIC_MIND.md`, now *per step* instead of per global settle.
+- **Phase 0 — behavioural cloning on the flow field (BUILT).** For each training `(query, known-answer)`, compute the
+  oracle field once (`FlowFieldOracle.Compute`, cached per ancestor); train `π_θ` to reproduce `next[node]` at every
+  reachable node (not one path) via masked candidate cross-entropy + halt BCE, while the dense `cost[]` supervises the
+  value head via **MSE** (`NavQueryDaggerTrainer.TrainQuery`).
+- **Phase 0.5 — on-policy DAgger (BUILT).** Roll the *current* net from each `(member, cue)` with the answer hidden
+  (`RolloutQueryTrajectories`, `goalSymbol=null`); the cued flow field still has the correct `next[]` at every strayed
+  node, so the walker is taught to **recover from its own slips** — DAgger for free, no teacher re-query.
+  `NavDaggerRounds = 2` rounds aggregate with the BC set and retrain each cycle.
+- **Phase 1 — RL fine-tune (NORTH-STAR, not built).** Letting the walker **beat** the oracle on the real action menu —
+  discovering shorter and compositional routes (math + fact in one walk) the per-goal field can't pre-bake — using
+  `cost[]` as a dense reward and frozen-address distance as a fallback heuristic where no field exists, remains a
+  future direction. The value head exists as an oracle-supervised cost predictor, not yet as an RL critic. This is the
+  same frontier as the COMPUTE-jump action (§5): both are how the walk would *exceed* the taxonomy oracle.
+- **Self-supervised surprise (NORTH-STAR):** predicting the next coordinate / whether a step reduces goal-surprise —
+  the free-energy framing of `PLATONIC_MIND.md`, *per step* instead of per global settle — is the longer-range
+  direction beyond the supervised cost head.
 
 ---
 
@@ -229,65 +254,90 @@ reward at every state the learner could occupy.
 
 ---
 
-## 9. Substrate wiring (what exists, what the navigator still needs)
+## 9. Substrate wiring (what is built)
 
-**Already built (the seams):**
+**The seams the navigator senses through:**
 - `DialecticalSpace.TryDecodeCoordinate(face, …)` — position → (kind, symbol, confidence), realised or latent.
 - `DialecticalSpace.Neighborhood(atSymbol, k)` — egocentric neighbours + degree (landmark-ness).
-- the decodable frozen address + `FrozenIdentityDistance` (the stable distance for reward shaping).
-- `_selfField` — the self to initialise `h_t` from.
+- the decodable frozen address + `FrozenIdentityDistance` (the stable distance the features ride on).
+- `_selfField` — the self that initialises `h_t` (read live by the disambiguator hook).
 
-**Still needed for the navigator (later build):**
-- the **lattice over the FROZEN ADDRESS** — the single motion primitive (§5.1). The VP-tree must index/query the
-  stable frozen bands `[42,416)`, not the drifting orbital tail, and expose a "nearest decodable coordinate to target
-  `X`" query. (This also fixes the L2-flagged stale slice: the lattice still keys on `WordFaceStart=202` while
-  semantics moved to `416`.)
-- a **land(targetCoord) → coordinate** step: the lattice resolves any emitted/computed target to its nearest
-  decodable landing — the move every action reduces to.
-- a **centroid/landmark accessor** (TOWARD-landmark targets) — degree is a proxy today; a real centroid index is
-  cleaner.
-- **COMPUTE-jump / FOLLOW-edge** as *target producers* (arithmetic + learned-function + relation traversal emit a
-  target coordinate; the lattice lands it), so the homomorphism and recall are first-class moves.
-- a **materialise(coord) write-path** for the genesis-tick growth (§5.2) — commit a useful passed-through latent
-  coordinate to the store; reuse the existing relevance-decay eviction to bound it.
-- a **trajectory-recording teacher** wrapper around the current routes (Phase 0 data).
-- the **policy/value network + the walk loop** (the navigator proper), replacing `GenerateFromField`'s route ladder.
+**Built for the navigator (the spec realised):**
+- `DialecticalSpace.TryLand(target, …)` — the **land(targetCoord) → coordinate** step: resolves any emitted target to
+  its nearest decodable landing. The single motion primitive every action reduces to (§5.1), driven through the
+  lattice.
+- `DialecticalSpace.Materialise(coord)` — the **materialise write-path** for genesis-tick growth (§5.2). Built and
+  callable; **gated OFF in every live walk** (`MaterialiseOnSuccess = false`), so the store is not grown during
+  inference today.
+- the **flow-field oracle teacher** — `FlowFieldOracle.Compute` / `PlatonicFlowField` (backward Dijkstra → `cost[]` +
+  `next[]`), the dense everywhere-defined teacher that replaces a trajectory-recording wrapper around the old routes.
+- the **policy/value network + the walk loop** — `NavQueryPolicyNet` + `QueryNavPolicy` + `NavigatorWalk`, the
+  navigator proper.
+- the **per-level goal-region centroids** — `EnsureLevelRegions` / `NavLevelGoalRegions` derive a landmark face per
+  abstraction level from the live graph's depth (M4); they feed the `cand−goal` descent feature. (This is the BUILT
+  realisation of "landmark-ness" — degree was the proxy; the goal-region centroid is the cleaner signal. A separate
+  TOWARD-landmark *action* remains north-star, §5.)
 
----
-
-## 10. Decisions (settled)
-
-1. **Action granularity — DECIDED.** Hybrid menu (STEP / FOLLOW-edge / COMPUTE-jump / TOWARD-landmark / HALT),
-   **unified through the lattice**: every action emits a target coordinate, the lattice lands the step (§5.1). All
-   moves "ride the lattice for speed."
-2. **Step granularity — DECIDED (follows from 1).** Policy emits a **continuous** target; the **lattice snaps** it to
-   the nearest decodable coordinate. Continuous intent, discrete decodable landing.
-3. **Reward — default taken.** Sparse hit + dense frozen-address-distance shaping. *(Override if you want sparse-only.)*
-4. **Self — default taken.** Reuse + extend `_selfField` as `h_t`. *(Override if you want a fresh recurrent state.)*
-5. **Materialisation on the walk — DECIDED.** The walk **grows the space** (§5.2): useful passed-through latent
-   coordinates are materialised (genesis tick, `[[nova-nn-directed-generative-tick]]`); relevance-decay eviction
-   bounds it. Navigation is **not** read-only.
-6. **How much old routing to keep — default taken.** Keep all routes as the teacher through Phase 1, then retire.
-   *(Override if you want permanent fallbacks.)*
+**North-star seams (not built, kept in view):**
+- **COMPUTE-jump** as a target producer (arithmetic + learned-function emit a computed target coordinate the lattice
+  lands) — the homomorphism-as-a-walk-step. FOLLOW-edge is already a first-class move (the K relational candidates);
+  COMPUTE-jump is the frontier (§5, §7 Phase 1).
 
 ---
 
-## 11. Build order (§10 settled)
+## 10. Decisions (settled — and how they landed in code)
 
-1. **Flow-field oracle** *(done partly — motion seams landed: `TryLand`/`Materialise`; the navigator senses the frozen address via `NavQueryFeatures` / `FrozenIdentityDistance`)*.
-   Port the backward-Dijkstra pattern (`NavMeshFlowField.Compute`, ~30 lines, **not** the navmesh geometry) over the
-   platonic **action-graph**: from a known answer coordinate, fill `cost[node]` (dense reward) + `next[node]` (expert
-   action) over the reachable graph. Compute once per answer, cache. Handle the reverse-graph (relations reversed,
-   lattice steps symmetric, compute-jumps special).
-2. **Action seams** — COMPUTE-jump / FOLLOW-edge / TOWARD-landmark as target-producers (landing via the lattice, §5.1).
-3. **Walk loop + thin policy/value net** — behavioural cloning on the oracle field (`next[]` everywhere; `cost[]`
-   supervises the value head). Phase 0.
-4. **RL fine-tune** — dense `cost[]` reward; let it beat the oracle on the live action menu; frozen-address distance
-   as the inference-time heuristic where no field exists. Phase 1.
-5. **Cut over** — `GenerateFromField` calls the navigator; old ladder demoted to fallback; re-earn the skipped routing
-   tests (`MeaningTick`, `FringeAssociation`) as *navigation* outcomes.
+1. **Action granularity — DECIDED, part-built.** The hybrid menu (STEP / FOLLOW-edge / COMPUTE-jump / TOWARD-landmark /
+   HALT) is **unified through the lattice**: every action emits a target coordinate, the lattice lands the step (§5.1).
+   **Built today:** STEP/FOLLOW (the K relational candidates) + HALT. **North-star:** COMPUTE-jump / TOWARD-landmark
+   (§5). All built moves "ride the lattice for speed."
+2. **Step granularity — DECIDED, BUILT (follows from 1).** Policy emits a **continuous** target face; the **lattice
+   snaps** it (`TryLand`) to the nearest decodable coordinate. Continuous intent, discrete decodable landing.
+3. **Reward / value supervision — LANDED.** The value head is **MSE-supervised by the oracle `cost[]`** (cost-to-go,
+   dense, everywhere-defined), not a sparse RL return. Sparse-hit + frozen-address-distance RL shaping was the
+   alternative; it was **not** built (the supervised cost head replaced it; RL fine-tune is north-star, §7 Phase 1).
+4. **Self — LANDED.** Reuses the engine `_selfField` to seed `h_t` (via `W_s`), threaded across hops; the live
+   disambiguator hook reads it so the walk is self-conditioned.
+5. **Materialisation on the walk — BUILT, OFF in live.** The write-path exists (`MaterialiseOnSuccess` →
+   `DialecticalSpace.Materialise`, genesis tick, `[[nova-nn-directed-generative-tick]]`, bounded by relevance-decay
+   eviction), but every production walk runs with it **disabled** (§5.2): the navigator reads/answers, it does not grow
+   the store. Navigation *can* write; today it does not.
+6. **How much old routing to keep — LANDED differently.** The route ladder was **not** retired. The navigator is wired
+   as a **disambiguator hook** in `TryFieldRelax`'s ambiguous branch (§11); the dominant-relation answer above it and
+   the one-shot `ds.Reason` below it remain, and a non-confident walk **falls through** to them. The old routing is the
+   live fallback, not a teacher scheduled for removal.
 
-> **Reusable from NavPathfinder / EvalApp (the genesis-nova lineage):** the flow-field algorithm (step 1, primary);
-> and as **secondary, later** reuse — the `EvalApp` `AdaptiveTuner` (Bayesian/hill-climb self-tuning) to auto-size the
+---
+
+## 11. Build order (what shipped, in order)
+
+1. **Flow-field oracle — BUILT.** The backward-Dijkstra pattern (`NavMeshFlowField.Compute`, ~30 lines, **not** the
+   navmesh geometry) ported over the platonic **action-graph** as `FlowFieldOracle.Compute` / `PlatonicFlowField`:
+   from a known answer coordinate it fills `cost[node]` (dense everywhere) + `next[node]` (expert action) over the
+   reachable graph, computed once per answer and cached. The reverse-graph is handled (relations reversed, lattice
+   steps symmetric). Motion seams landed alongside it: `TryLand` / `Materialise`; the walk senses the frozen address
+   via `NavQueryFeatures` / `FrozenIdentityDistance`.
+2. **Action seams — PART-BUILT.** FOLLOW-edge is built as the K relational candidates the policy ranks, landed via the
+   lattice (§5.1). COMPUTE-jump / TOWARD-landmark *as distinct actions* are north-star (§5); the goal-region landmark
+   exists as a `cand−goal` feature (M4), not a move.
+3. **Walk loop + thin policy/value net — BUILT.** `NavigatorWalk` + `NavQueryPolicyNet` + `QueryNavPolicy`;
+   behavioural cloning on the oracle field (`next[]` everywhere) then on-policy DAgger (`NavDaggerRounds = 2`), with
+   `cost[]` supervising the value head by MSE (§7). Trained **every gym cycle** by `TrainNavigatorCycle`, with a
+   held-out generalization curve (`RegisterNavigatorHeldOut` / `EvaluateNavigatorHeldOut(PerCue)`).
+4. **RL fine-tune — NORTH-STAR (not built).** Beating the oracle on a widened action menu, with frozen-address
+   distance as the inference-time heuristic where no field exists, remains the Phase-1 frontier (§7). The value head
+   ships as an oracle-cost predictor, not an RL critic.
+5. **Live integration — SHIPPED as a HOOK, not a full cut-over.** Rather than `GenerateFromField` *calling* the
+   navigator wholesale, `WithProductionMechanisms()` sets `NavigatorDisambiguation = true` and
+   `GenesisRuntimeState.WireNavigatorDisambiguator` attaches the trained net to
+   `GenesisInferenceEngine.NavigatorDisambiguator` — a delegate consulted **only in the AMBIGUOUS branch** of
+   `TryFieldRelax`, *between* the dominant-relation answer and the one-shot `ds.Reason`. The hook walks from the
+   subject under the query's learned cue + unified goal-region (self-conditioned), and a **confident, valid, non-self**
+   halt is emitted as `navigator-walk` (folding its conclusion into the self); a non-confident / cold / untrained walk
+   **falls through** to `ds.Reason` (cold-safe, clear cases never regressed). The old ladder is the live fallback, not
+   demoted to a teacher.
+
+> **Reused from NavPathfinder / EvalApp (the genesis-nova lineage):** the flow-field algorithm (step 1). Still
+> available as **later** reuse — the `EvalApp` `AdaptiveTuner` (Bayesian/hill-climb self-tuning) to auto-size the
 > **step budget** / walk hyperparameters (§8), and the `IStep`/`Pipeline` + `WindowBudgetPressure` framework to host
 > the per-hop **tick loop** under a frame/compute budget. Lift the algorithms, not the navmesh domain glue.

@@ -208,12 +208,16 @@ invokes it. `DialecticalSpace` is the default core (`GenesisNovaConfig.UseDialec
    generalizes to unseen operands; no stored numeric facts; numbers never form relation edges.
 2. **[Law M] Meaning is per-aspect κ.** κ is a per-aspect profile, never a single scalar; "cat≈dog on `animal`,
    cat≠dog on `sound`" is representable; related pairs converge on shared aspects and preserve contradicting ones.
-   **NEEDS REVIEW (realization):** in the live core a κ EDGE is a SCALAR (`Relation.Synthesis ∈ [0,1]`, read by
-   `GetContradiction`; `ObserveContradiction` takes one `double`). The per-aspect / differential structure is realized
-   instead in the DISTRIBUTIONAL CLOUD (`RecomputeCloud`: cloud = token(self) + Σ (1−2κ)·token(neighbour)), where each
-   semantic dimension can agree or contradict independently — *not* in a κ vector. The per-dimension `MessagePassUpdate`
-   / `DialecticPreserveFraction` mechanism this row's wording evokes lives only in the LEGACY `PlatonicSpaceMemory`;
-   `DialecticalSpace.DimensionalContradiction` is a vestigial flag (set `true`, never read).
+   **REALIZATION (resolved): the per-aspect PRINCIPLE holds in the live core, but the MECHANISM moved.** A κ EDGE is a
+   SCALAR (`Relation.Synthesis ∈ [0,1]`, read by `GetContradiction`; `ObserveContradiction` takes one `double`) — there
+   is no κ-vector edge. The per-aspect/differential structure is realized instead in the DISTRIBUTIONAL CLOUD
+   (`RecomputeCloud`: `cloud[i] = token(self)[i] + Σ (1−2κ)·token(neighbour)[i]`, summed INDEPENDENTLY per dimension): on
+   each dimension, neighbours whose token signs align reinforce and those that oppose cancel, while the weight-1
+   self-token anchor keeps a concept's distinguishing aspects from collapsing — so "cat≈dog on `animal`, cat≠dog on
+   `sound`" is representable. This is **emergent from token superposition, not an explicit per-dimension contradiction
+   *test*.** The per-dimension `MessagePassUpdate` / `DialecticPreserveFraction` *gate* (a real sign-of-product test)
+   lives only in the LEGACY `PlatonicSpaceMemory`; `DialecticalSpace.DimensionalContradiction` is a vestigial flag (set
+   `true`, never read in the live core). See `nova-distributional-large-face`.
 3. **[Law D] Position emerges, not assigned.** No path writes a semantic position directly; it settles from κ.
 4. **[Laws C/S] Composites reuse components.** A novel composite over existing components adds O(1) storage;
    N texts over a bounded word set grow O(N+\|Atoms\|).

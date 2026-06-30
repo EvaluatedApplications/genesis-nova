@@ -28,8 +28,10 @@ recursively-composable elements**, so a told fact is stored as a structured (non
 revision, and distinct compound keys resolve distinctly. A token's **structural role** (function vs. content) is
 recognized **without labels** from its neighbourhood graph topology, so grammatical structure is learned from
 exposure. A small recurrent neural network acts as a **thin controller** that *selects and composes* substrate
-operations rather than storing knowledge in its weights. The substrate is **conserved** (every element has an exact
-complement) and **monotone** (distinctions are archived, never destroyed). We additionally disclose a **persistent
+operations rather than storing knowledge in its weights. The substrate is **conserved** (an exact
+complement map `¬e = −e`; total signed charge zero by construction) and **monotone** (no distinction is ever unmade:
+live eviction de-materialises an element to stay bounded, but an evicted symbol re-derives its exact identity from
+its deterministic codec coordinate when re-observed). We additionally disclose a **persistent
 self-state** (realized in the substrate's own meaning-space, not as a hidden weight vector) that conditions
 reasoning and is persisted as conserved memory (restored verbatim from a checkpoint).
 
@@ -60,11 +62,14 @@ with the single learned *orbital* tail `[416, D)` carrying the relational cloud.
 `[21, 42)` log) are byte-identical in both layouts. The dual-face principle (frozen, exact identity nucleus +
 free, learned relational cloud) is unchanged; only the internal subdivision of the nucleus differs.
 
-**Key property (restore-after-update):** any learning update may write only to free dimensions; after every update
-the frozen dimensions are restored to their exact values and the complement (§8) is re-enforced. Therefore
-relational learning *cannot* corrupt identity: an element pushed anywhere in its free cloud still decodes to exactly
-itself. (In the current default substrate the identity faces are derived deterministically by a codec and never
-stored, so there is nothing to drift; the restore-after-update property holds by construction.)
+**Key property (restore-after-update):** any learning update may write only to free dimensions; the frozen
+dimensions always carry their exact values. Therefore relational learning *cannot* corrupt identity: an element
+pushed anywhere in its free cloud still decodes to exactly itself. In the **current default substrate** the identity
+faces are not stored at all — they are re-assembled fresh from a deterministic codec on every read (the element
+stores only the learned orbital tail), so there is nothing to drift and nothing to "restore": the property holds by
+construction. The explicit *restore-the-frozen-dims-and-re-enforce-the-complement-after-each-update* step (and the
+stored complement of §8) belonged to the **legacy stored-face memory** (`PlatonicSpaceMemory`), not to the default
+codec core.
 
 ## 3. Exact computation by co-located homomorphic faces
 
@@ -72,8 +77,11 @@ For a numeric value v, the numeric face is two co-located sub-faces:
 
 - **Polynomial** `poly[i] = v · 10^-(i+1)` for i ∈ [0, N). This is **additively homomorphic**:
   `poly(a) + poly(b) = poly(a + b)`.
-- **Logarithmic** `log[i] = ln|v| · 10^-(i+1)` for i ∈ [N, 2N). This is **multiplicatively homomorphic**:
-  `log(a) + log(b) = log(a · b)`.
+- **Logarithmic** `log[N+k] = ln|v| · 10^-(k+1)` for k ∈ [0, N) — the log block sits at offset N but **reuses the
+  same `10^-(k+1)` decay as the polynomial block** (the exponent restarts at the block boundary; it is *not* a
+  continued `10^-(i+1)` across the whole `[0, 2N)` range). This is **multiplicatively homomorphic**:
+  `log(a) + log(b) = log(a · b)`. (Decoding reads the block head — `value ≈ poly[0]·10` for the polynomial face,
+  `value ≈ exp(log[N]·10)` for the logarithmic — confirming the per-block restart.)
 
 Consequently addition/subtraction and multiplication/division are computed by *adding the corresponding faces* and
 decoding, **exactly**, for operands never seen in training, with no per-fact storage. The operation is selected
@@ -84,13 +92,17 @@ sign is carried in the polynomial face.) Decoding is the exact inverse of the en
 
 Composites are **hubs over reused component elements**, forming a ladder:
 
-- **digits → a NUMBER** (numeric face),
+- **digits → a NUMBER** (numeric face) — realized by the §3 homomorphism, *not* by stored digit part-of edges (a
+  number element has no components; its place values are implicit in the encoding),
 - **characters → a WORD** (character face),
 - **words → a SENTENCE/phrase** (relational face).
 
-The atom set (≈100 characters; digit place values) is **bounded**. A composite stores **part-of edges** to its
-components, which are *shared*: one character element is referenced by every word; one word element by every
-sentence. Therefore N observed composites cost **O(N + |atoms|)** storage and a *novel* composite over existing
+The atom set (≈100 characters) is **bounded**. A text composite stores **part-of edges** to its components, which
+are *shared*: in the default core a single word's element references one character element per character (kind
+`Composition`), and a multi-word phrase's element references one word element per word; so one character element is
+referenced by every word, one word element by every sentence. (A configurable *generative-atoms* mode instead
+treats the whole token as its own atom and lazily discovers recurring sub-atoms/morphemes on demand; the default is
+the eager character composition described here.) Therefore N observed composites cost **O(N + |atoms|)** storage and a *novel* composite over existing
 components costs **O(1)**. Growth is recombination, not new storage. The number homomorphism (§3) is the special
 case of this ladder for which composition is an exact algebraic operation.
 
@@ -142,9 +154,15 @@ Whether a token plays a **structural / function role** (determiners, copulas, pr
 closed-class "glue" of a language) or a **content role** (entities, attributes) is recognized **without labels**,
 from the token's position in the relation graph. A function word **bridges otherwise-unrelated concepts**: its
 neighbours do not connect to one another, so the **clustering coefficient** of its neighbourhood is low. A content
-word sits inside a cluster of mutually-related kin, so its neighbourhood clustering is high. Thresholding this graph
-signature relative to the population separates the two classes as an emergent property of how broadly a token
-co-occurs, with **no** hand-written stop-list, part-of-speech tagger, or supervised labels.
+word sits inside a cluster of mutually-related kin, so its neighbourhood clustering is high. The signature is the
+**local clustering coefficient** of the token's neighbourhood (the fraction of neighbour *pairs* that are themselves
+connected). The decision threshold is the **valley of the population's clustering distribution** (an Otsu
+between-class split), so it tracks the bimodal glue/content separation as the graph grows rather than being a fixed
+constant; the signal **self-abstains** (classifies nothing) on a cold or too-small graph. Once a token has read as a
+confident low-clustering outlier on enough independent recomputations its function classification is **conserved**
+(monotone — see §8): later graph growth, which only adds edges, can never unmake it. All of this is an emergent
+property of how broadly a token co-occurs, with **no** hand-written stop-list, part-of-speech tagger, or supervised
+labels.
 
 Because the signal is purely distributional, the mechanism that learns roles from a small curriculum is, in
 principle, the same mechanism by which the system would acquire them from a natural corpus: grammatical structure is
@@ -153,8 +171,15 @@ mark *how* content tokens compose.
 
 ## 8. Conservation and monotonicity
 
-- **Conservation (complement).** Every element e has an exact complement `¬e = −e`, re-enforced after every update,
-  so the substrate's total signed mass is zero. The complement anchors differential meaning.
+- **Conservation (complement).** The substrate defines an exact complement `¬e = −e` as a deterministic negation of
+  an assembled face, so the total signed charge is zero **by construction** (the default core reports
+  `TotalCharge ≡ 0` as an identity, not by summing live elements). In the default codec core this is an *axiom
+  satisfied by construction* rather than an active runtime loop: the negation map exists but is not invoked by the
+  live pipeline, and because identity is codec-derived and never stored there is nothing to "re-enforce" after an
+  update. (A stored, periodically re-imposed complement was a mechanism of the legacy stored-face memory.) The
+  *differential* structure that actually shapes meaning at runtime is the **contradiction-signed superposition** of
+  §5: a contradicted neighbour's token is *subtracted* from a concept's cloud (the `(1 − 2·κ)` weight), so a thing is
+  defined by what it is *and is not*.
 - **Monotonicity (G6) by latent coordinate.** No distinction is ever unmade, but *not* because elements are never
   deleted: live eviction genuinely **de-materialises** an element to keep the active set bounded under churn. G6
   holds because identity is a deterministic, decodable **address** — a pure function of the symbol — so an evicted
@@ -222,9 +247,10 @@ The combination, and each of the following, is disclosed as inventive:
    of its neighbourhood** in the relation graph (a function word bridges unrelated concepts with low clustering,
    content clusters with its kin with high clustering), enabling distributional, supervision-free acquisition of
    grammatical structure.
-7. A **conserved** (exact complement) and **monotone** geometric substrate, in which monotonicity (G6) is realized
-   by a **latent decodable coordinate**: eviction de-materialises an element to stay bounded, yet a re-observed
-   symbol re-derives its exact frozen identity, so no distinction is unmade.
+7. A **conserved** (exact complement map `¬e = −e`; total signed charge zero by construction) and **monotone**
+   geometric substrate, in which monotonicity (G6) is realized by a **latent decodable coordinate**: eviction
+   de-materialises an element to stay bounded, yet a re-observed symbol re-derives its exact frozen identity, so no
+   distinction is unmade.
 8. A **thin recurrent controller** that selects and composes substrate operations (rather than storing knowledge in
    weights), with substrate and controller widths chosen independently via a name-based bridge, falling through a
    ladder of **abstaining** substrate operations.

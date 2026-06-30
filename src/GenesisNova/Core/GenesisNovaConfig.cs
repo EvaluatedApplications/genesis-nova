@@ -84,7 +84,8 @@ public sealed record GenesisNovaConfig(
     // navigator (State.Navigator) to the inference engine as the AMBIGUOUS-BRANCH disambiguator: a query that reaches
     // the no-dominant-relation case is answered by WALKING the platonic space (multi-hop) instead of a single-shot
     // ds.Reason. false (default) ⇒ the hook is null and the ambiguous branch is byte-identical to the one-shot path
-    // (so the fast suite is unaffected). NOT yet in WithProductionMechanisms — flipping it there is the M1 cutover.
+    // (so the fast suite is unaffected). ON in WithProductionMechanisms (the M1 cutover, R&D default-on); the field
+    // default stays false so a bare config / the fast suite is byte-identical to the one-shot path.
     bool NavigatorDisambiguation = false)
 {
     /// <summary>

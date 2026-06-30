@@ -140,8 +140,15 @@ public sealed partial class GenesisEvalAppRuntime
             if (!IsTaxonomyLeaf(ds, c)) continue;
             leaves++;
             var chain = ClimbAncestors(ds, c);
+            // RELATIVE-depth levels (not an absolute index) so UNEVEN-depth chains don't smear the Domain pool. Genus =
+            // immediate parent, Root = the top, Domain = ONE BELOW ROOT (chain[^2]) and ONLY when the chain is deep
+            // enough (>=3) to HAVE a distinct mid-level. A shallow depth-2 leaf (chain = [genus, root]) contributes NO
+            // domain — otherwise its ROOT lands in the domain pool and the centroid smears toward a root (the noisy-graph
+            // failure: domain-region nearest concept came out a root). Length-3 chains give domain = chain[1] = chain[^2],
+            // so the clean uniform-depth taxonomy (#54) is byte-identical.
             if (chain.Count >= 1) genus.Add(chain[0]);
-            if (chain.Count >= 2) { domain.Add(chain[1]); root.Add(chain[^1]); }
+            if (chain.Count >= 2) root.Add(chain[^1]);
+            if (chain.Count >= 3) domain.Add(chain[^2]);
         }
         _navLevelRegions[(int)NavCue.Genus] = Centroid(ds, genus);
         _navLevelRegions[(int)NavCue.Domain] = Centroid(ds, domain);

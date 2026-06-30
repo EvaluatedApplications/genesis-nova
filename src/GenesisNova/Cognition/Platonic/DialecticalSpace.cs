@@ -1408,6 +1408,19 @@ public sealed class DialecticalSpace : IPlatonicSpace
     private const int FnMinDegree = 6;    // need ≥ this many neighbours to read diversity reliably
     private const int FnMinSamples = 8;   // need ≥ this many qualifying concepts to read a 2-class split
     private const double FnCohCeil = 0.80;// absolute guard: a function word's neighbours are GENUINELY diverse
+    // RETENTION threshold (G6 conservation). A word becomes CONSERVED-function once it has been OBSERVED bridging (live
+    // coherence ≤ the Otsu cut, on a warm real distribution) on at least this many INDEPENDENT stats recomputations. Two
+    // is the smallest count that requires CONFIRMATION: a single reading can be a transient during graph churn, but a
+    // distinction seen twice across independent recomputes is real — and two is cheap to reach in a warm/trained space
+    // (stats recompute repeatedly as the graph grows). Once crossed, the classification is RETAINED for good (G6) even
+    // as the live coherence later drifts ABOVE the cut — growth only ADDS edges, it can never UNMAKE the distinction.
+    private const double FnEvidenceRetain = 2.0;
+    // Evidence accrues only on a CONFIDENT bridging reading — a clear low-coherence OUTLIER (coh ≤ mean − σ), not a
+    // borderline word hovering near the body mean. This is what keeps a noisy/immature early graph (where content
+    // clusters haven't formed yet, so content coherence is transiently low) from PERMANENTLY establishing a content
+    // word: a genuine function word is a strong low outlier on essentially every mature recompute and crosses retention
+    // easily, while a content word's occasional near-the-mean dip never qualifies. Conservation without over-fixation.
+    private const double FnEvidenceSigma = 1.0;
 
     // NEIGHBOURHOOD CLUSTERING (the (b) signal, measured on the GRAPH not the clouds): of a concept's neighbours, what
     // fraction of PAIRS are themselves connected? A CONTENT word / category hub's neighbours are RELATED (same cluster →
@@ -1435,6 +1448,7 @@ public sealed class DialecticalSpace : IPlatonicSpace
         if (_fnReady && Math.Abs(count - _fnStamp) < Math.Max(16, count / 16)) return; // amortize the O(N·deg) rebuild
         double sum = 0, sumSq = 0; var n = 0;
         var vals = new List<double>();
+        var samples = new List<(Element E, double Coh)>(); // keep the elements so we can RECORD evidence below
         foreach (var e in _concepts.All)
         {
             if (e.Archived || e.Kind == ElementKind.Atom || FaceCodec.IsNumeric(e.Symbol)) continue;
@@ -1442,12 +1456,28 @@ public sealed class DialecticalSpace : IPlatonicSpace
             var coh = NeighbourCoherence(e.Symbol);
             sum += coh; sumSq += coh * coh; n++;
             vals.Add(coh);
+            samples.Add((e, coh));
         }
         var nn = Math.Max(1, n);
         _fnMean = sum / nn;
         _fnStd = Math.Sqrt(Math.Max(0.0, sumSq / nn - _fnMean * _fnMean));
         _fnOtsu = OtsuValleyThreshold(vals); // the VALLEY between the glue mode and the content mode (tracks the bimodal split as the graph grows)
         _fnStamp = count; _fnReady = n >= FnMinSamples;
+
+        // G6 GENERATE-BY-OBSERVATION → RETAIN. The live coherence reading is now only the EVIDENCE SOURCE (an OBSERVATION
+        // of bridging, G3). On a WARM, real distribution (enough warmth + a found valley), a word that reads as a CONFIDENT
+        // bridge — below the Otsu valley, below the diversity ceiling, AND a clear low OUTLIER (≤ mean − σ) — ACCUMULATES
+        // one unit of conserved FunctionEvidence. Monotonic — only ever increases (G6) — so the distinction, once accrued,
+        // is never re-measured away when the graph's later growth drifts the live coherence above the cut. The σ-outlier
+        // bar is what prevents an immature early graph from PERMANENTLY establishing a content word (whose dips are
+        // near-the-mean, not deep in the glue tail), so conservation never hardens an early misclassification.
+        if (_fnReady && _fnOtsu > 0.0 && count >= FnMinWarm)
+        {
+            var outlierCut = _fnMean - FnEvidenceSigma * _fnStd; // a CONFIDENT low outlier, not a borderline near-body dip
+            foreach (var (e, coh) in samples)
+                if (coh <= _fnOtsu && coh <= FnCohCeil && coh <= outlierCut)
+                    e.FunctionEvidence += 1.0;
+        }
     }
 
     // OTSU'S METHOD over the coherence histogram: the cut that maximizes BETWEEN-class variance (equivalently minimizes
@@ -1496,20 +1526,29 @@ public sealed class DialecticalSpace : IPlatonicSpace
             if (!_assocReady || _assocStd < 1e-6) return false;
             return AssociationStrength(key) <= _assocMean - AssocSigma * _assocStd; // a LOW-association outlier
         }
-        EnsureFunctionStats();
+        EnsureFunctionStats(); // amortized — also ACCRUES the conserved FunctionEvidence below
+        // CONSERVED classification (G6): once a word has accrued enough bridging evidence it is RETAINED as function-like
+        // FOREVER — regardless of how its live coherence later drifts ABOVE the cut as the graph only ADDS edges (a
+        // distinction once made is never unmade). This is the fix for "the prebake gets worse over time": the live reading
+        // is re-measured and DRIFTS, but the world-knowledge it generated is conserved.
+        if (_concepts.TryGet(key, out var ke) && ke.FunctionEvidence >= FnEvidenceRetain) return true;
         if (!_fnReady || _fnOtsu <= 0.0) return false; // no valley found (cold / unimodal / too few) → filter nothing
+        // LIVE evidence path — a currently-bridging word reads function-like immediately (and is accruing toward retention),
+        // so this never regresses behaviour before the conserved threshold is reached; it only ever ADDS a classification.
         var coh = NeighbourCoherence(key);
         return coh <= _fnOtsu && coh <= FnCohCeil; // below the bimodal VALLEY (and genuinely diverse) ⇒ function-like
     }
 
     /// <summary>DIAGNOSTIC: the NEIGHBOUR-COHERENCE of a concept (1=aligned/content, →0=diverse/function) and the active
     /// thresholds — so a curriculum/test can SEE why IsFunctionLike fires. Tuple reused: Centrality=coherence,
-    /// Threshold=the Otsu VALLEY cut (function if coherence ≤ it), Floor=the coherence ceiling, MinWarm=degree.</summary>
-    public (double Centrality, double Mean, double Std, double Threshold, double Floor, int Active, int MinWarm) FunctionStats(string concept)
+    /// Threshold=the Otsu VALLEY cut (function if coherence ≤ it), Floor=the coherence ceiling, MinWarm=degree.
+    /// Evidence=the CONSERVED FunctionEvidence (function-like once it ≥ the retention threshold, regardless of live drift).</summary>
+    public (double Centrality, double Mean, double Std, double Threshold, double Floor, int Active, int MinWarm, double Evidence) FunctionStats(string concept)
     {
         EnsureFunctionStats();
         var key = Normalize(concept);
-        return (NeighbourCoherence(key), _fnMean, _fnStd, _fnOtsu, FnCohCeil, _concepts.ActiveCount, GetRelationDegree(key));
+        var evidence = _concepts.TryGet(key, out var e) ? e.FunctionEvidence : 0.0;
+        return (NeighbourCoherence(key), _fnMean, _fnStd, _fnOtsu, FnCohCeil, _concepts.ActiveCount, GetRelationDegree(key), evidence);
     }
 
     // ── DISTRIBUTIONAL function-word signal (theory #2): PMI from the co-occurrence COUNTS, not graph topology ────────
@@ -1817,7 +1856,7 @@ public sealed class DialecticalSpace : IPlatonicSpace
         // recreate (a Function symbol round-tripped through GetOrCreateConcept would come back the wrong kind).
         var elements = _concepts.All
             .Where(e => !e.Archived && !FaceCodec.IsNumeric(e.Symbol) && e.Kind != ElementKind.Function)
-            .Select(e => new DialecticalElementSnapshot(e.Symbol, (int)e.Kind, (double[])e.SemanticFace.Clone(), e.ObservationCount, e.Archived))
+            .Select(e => new DialecticalElementSnapshot(e.Symbol, (int)e.Kind, (double[])e.SemanticFace.Clone(), e.ObservationCount, e.Archived, e.FunctionEvidence))
             .ToArray();
         var rels = _relations.Values.Select(r => new PlatonicRelationSnapshot(
             r.Left, r.Right, r.Thesis, r.LastObserved, r.Synthesis, r.ObservationCount, r.UseCount, r.SuccessCount, r.FailureCount, r.LastUsedStep)).ToArray();
@@ -1860,6 +1899,10 @@ public sealed class DialecticalSpace : IPlatonicSpace
                     for (var i = 0; i < _semLen && i < el.Orbital.Length && i < e.SemanticFace.Length; i++)
                         e.SemanticFace[i] = el.Orbital[i];
                 e.ObservationCount = el.ObservationCount;
+                // CONSERVED world-knowledge — layout-INDEPENDENT (a scalar count), so restore it UNCONDITIONALLY (unlike
+                // the orbital, which is dropped on a layout mismatch). Max-merge so a re-observed element never LOSES
+                // accrued evidence (G6 monotonic): the reload only ever raises it.
+                e.FunctionEvidence = Math.Max(e.FunctionEvidence, el.FunctionEvidence);
                 if (el.Archived && !e.Archived) _concepts.Archive(el.Symbol); // restore G6 dormancy (keeps ActiveCount correct)
             }
         }

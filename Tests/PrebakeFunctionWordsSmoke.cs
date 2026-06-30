@@ -43,7 +43,7 @@ public sealed class PrebakeFunctionWordsSmoke
             var glue = new[] { "the", "of", "is", "my", "in", "and", "with", "from" };
             var content = curriculum.SampleContent(8).ToArray(); // the ACTUAL trained (procedural) content words
 
-            var (_, mean, std, thresh, floor, active, _) = ds.FunctionStats("the");
+            var (_, mean, std, thresh, floor, active, _, _) = ds.FunctionStats("the");
             _out.WriteLine($"== PREBAKE neighbour-coherence (b) ({seconds}s) ==  Active={active}  mean={mean:F3} std={std:F3}  function-like if coh≤{thresh:F3} (and ≤{floor:F2})");
             foreach (var g in glue) { var s = ds.FunctionStats(g); _out.WriteLine($"  GLUE    {g,-8} coh={s.Centrality,6:F3} deg={s.MinWarm,4}  fn?={ds.IsFunctionLike(g)}"); }
             foreach (var c in content) { var s = ds.FunctionStats(c); _out.WriteLine($"  CONTENT {c,-8} coh={s.Centrality,6:F3} deg={s.MinWarm,4}  fn?={ds.IsFunctionLike(c)}"); }

@@ -68,6 +68,16 @@ public sealed class Element
     /// <summary>How many times this element has participated in an observation (drives plasticity / lifecycle).</summary>
     public long ObservationCount { get; set; }
 
+    /// <summary>CONSERVED function-word knowledge (G3 generate-by-observation → G6 retain). Each time the amortized
+    /// function-word statistics are (re)computed on a warm, real distribution and this word reads as BRIDGING
+    /// (its live neighbour-coherence ≤ the Otsu valley cut, i.e. its neighbours are mutually unrelated — glue), this
+    /// counter is INCREMENTED. It is MONOTONIC — only ever rises — so it records a distinction the world MADE, not a
+    /// property re-measured each call. Once it crosses the retention threshold (<c>FnEvidenceRetain</c>) the word is
+    /// classified function-like FOREVER, regardless of how its live coherence later DRIFTS as the relation graph only
+    /// ADDS edges: G6 says a distinction once made is never unmade, so growth cannot flip it back. Persisted in the
+    /// snapshot (it is world-knowledge, layout-independent like <see cref="ObservationCount"/>) so it survives reload.</summary>
+    public double FunctionEvidence { get; set; }
+
     /// <summary>The observation-step at which this element was last seen — its RECENCY. With <see cref="ObservationCount"/>
     /// it drives relevance-decay: a barely-observed element that has gone stale (not seen for a long window) is DISCHARGED
     /// as noise, while a reinforced or recently-active one is retained. Runtime signal — not persisted (decay restarts per

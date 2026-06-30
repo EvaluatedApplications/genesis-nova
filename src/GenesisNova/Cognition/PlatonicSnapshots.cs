@@ -38,7 +38,11 @@ public sealed record DialecticalElementSnapshot(
     int Kind,
     double[] Orbital,
     long ObservationCount,
-    bool Archived = false);
+    bool Archived = false,
+    // CONSERVED function-word knowledge (G6): how many times this word has been OBSERVED bridging unrelated clusters.
+    // Layout-INDEPENDENT world-knowledge (a scalar count, not an orbital), so it is restored UNCONDITIONALLY on reload —
+    // the function/content distinction is conserved across sessions. Optional → backward-compatible (old checkpoints → 0).
+    double FunctionEvidence = 0.0);
 
 public sealed record PlatonicMemorySnapshot(
     int FaceDimension,

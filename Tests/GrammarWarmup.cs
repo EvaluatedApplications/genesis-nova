@@ -109,6 +109,58 @@ internal static class GrammarWarmup
     public static void WarmRoleHead(GenesisRuntimeState s, int cycles = 60)
         => WarmRoleHead(s.Tokenizer, s.Model, s.Inference, cycles);
 
+    /// <summary>Warm the runtime the way the PRODUCTION (de-hardcoded) path actually needs it. Under
+    /// <see cref="GenesisNovaConfig.WithProductionMechanisms"/> the engine runs with <c>DeHardcodedDispatch</c> →
+    /// <c>LearnedCuesOnly</c>, so the fact parser (copula pivot / interrogative / retrieval-frame) reads the LEARNED
+    /// distributional signals — the function-word centrality (<c>DialecticalSpace.IsFunctionLike</c>) and the ∘qst
+    /// interrogative cue — NOT the hardcoded word-lists a bare engine falls back to. The head-only
+    /// <see cref="WarmRoleHead(GenesisRuntimeState,int)"/> writes NOTHING to the space, so those signals stay COLD and
+    /// every personal-fact assertion <c>field-abstain</c>s (the copula "is" can't be told from content). Production warms
+    /// them with the gym/corpus; this reproduces that with a synthetic corpus exactly as the accepted
+    /// <c>QuestionCueDeHardcodingTest</c> does — content CLUSTERS plus function-word BRIDGES that co-occur with every
+    /// cluster, so glue/possessive/interrogative tokens read function-like and content words don't, then a few
+    /// <c>LearnQuestionCue</c> examples for ∘qst. This is the learned signal, taught by DATA — no hardcoded copula /
+    /// possessive / name routine, and no <c>LearnIntentCue</c> (whose ∘ret hub heuristic mislabels grammar recall
+    /// frames, polluting "my"/"what" and re-breaking the parse).</summary>
     public static void WarmRoleHead(GenesisEvalAppRuntime rt, int cycles = 60)
-        => WarmRoleHead(rt.State, cycles);
+    {
+        WarmLearnedCues(rt.State);
+        WarmRoleHead(rt.State, cycles);
+    }
+
+    /// <summary>Corpus-style warm of the LEARNED function-word + interrogative signals the de-hardcoded path consumes
+    /// (see <see cref="WarmRoleHead(GenesisEvalAppRuntime,int)"/>). Substrate-driven: the signals EMERGE from the
+    /// co-occurrence distribution, nothing is hardcoded at inference.</summary>
+    public static void WarmLearnedCues(GenesisRuntimeState s, int steps = 5000, int seed = 11)
+    {
+        if (s.Memory is not GenesisNova.Cognition.Platonic.DialecticalSpace ds) return;
+        // Content clusters: members co-occur with their own kind (high coherence ⇒ content). Bridges: glue / possessive
+        // / interrogative tokens that co-occur with EVERY cluster (low coherence ⇒ function-like). This is what windowed
+        // corpus text produces; the words live in the DATA, the field stays general (a nonce bridge warms the same way).
+        string[][] clusters =
+        {
+            new[]{"cat","dog","cow","pig","hen","fox","owl","bat","ant","elk"},
+            new[]{"red","blue","green","pink","gray","black","white","brown","gold","teal"},
+            new[]{"bob","sam","joe","amy","tom","kim","dan","liz","ben","eve"},
+            new[]{"name","color","age","city","job","pet","car","book","song","food"},
+            new[]{"rome","paris","tokyo","cairo","lima","oslo","delhi","perth","kyoto","nice"},
+        };
+        string[] bridges = { "what", "who", "where", "when", "which", "is", "are", "was", "the", "a", "an", "of", "to",
+                             "my", "your", "his", "her", "their", "this", "that" };
+        var rng = new Random(seed);
+        for (var step = 0; step < steps; step++)
+        {
+            var cl = clusters[rng.Next(clusters.Length)];
+            var w1 = cl[rng.Next(cl.Length)]; var w2 = cl[rng.Next(cl.Length)];
+            if (w1 != w2) ds.ObserveContradiction(w1, w2, 0.15);                                   // intra-cluster bond
+            var any = clusters[rng.Next(clusters.Length)][rng.Next(10)];
+            ds.ObserveContradiction(bridges[rng.Next(bridges.Length)], any, 0.2);                  // bridge ↔ anything
+        }
+        // Teach the interrogative cue (∘qst): the answer is ABSENT from the input (a question retrieves it) and the
+        // sentence is fronted by a function-like token — that token IS the interrogative. No wh-list (LearnQuestionCue
+        // self-checks the learned function-word signal). A handful of frames generalise to any wh question by position.
+        foreach (var (q, a) in new[] { ("what is my name", "bob"), ("who is my pet", "dog"), ("where is the cat", "fox"),
+                                       ("what is your color", "blue"), ("which is the city", "rome") })
+            s.Inference.LearnQuestionCue(q, a);
+    }
 }

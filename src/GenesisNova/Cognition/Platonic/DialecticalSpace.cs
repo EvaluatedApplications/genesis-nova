@@ -261,6 +261,39 @@ public sealed class DialecticalSpace : IPlatonicSpace
     private static string MergeSymbol(string a, string b, string label)
         => "⟨" + a + "·" + (string.IsNullOrWhiteSpace(label) ? "" : Normalize(label) + "·") + b + "⟩";
 
+    /// <summary>Re-create a MERGE element from its content-addressed ⟨a·label·b⟩ symbol (snapshot reload): rebuild the
+    /// CHILDREN first (recursively — a child may itself be a Merge subtree), then <see cref="Merge"/> them so the parent
+    /// is born with its ▷ Components, exactly as the original assertion built it. Idempotent (content-addressed), so the
+    /// shared sub-expressions of different facts converge. Returns the (normalized) symbol of the rebuilt element; for a
+    /// non-bracket leaf it just ensures the concept exists. Used only by <see cref="ImportSnapshot"/>.</summary>
+    private string ReconstructMerge(string symbol)
+    {
+        if (!symbol.StartsWith("⟨", StringComparison.Ordinal) || !symbol.EndsWith("⟩", StringComparison.Ordinal))
+            return GetOrCreateConcept(symbol).Symbol; // a leaf endpoint — ensure it exists, no structure to rebuild
+        var parts = SplitTopLevelMerge(symbol.Substring(1, symbol.Length - 2));
+        if (parts.Count is not (2 or 3)) return GetOrCreateConcept(symbol).Symbol; // malformed — fall back to a plain token
+        var a = ReconstructMerge(parts[0]);                       // child A built first (with its own components)
+        var b = ReconstructMerge(parts[^1]);                      // child B built first
+        return Merge(a, b, parts.Count == 3 ? parts[1] : "");     // now the parent is born with [aId, bId]
+    }
+
+    /// <summary>Split a Merge body on its TOP-LEVEL "·" separators (tracking ⟨⟩ nesting depth), so a nested child
+    /// ⟨x·np·y⟩ stays one part. Yields [a, b] (no label) or [a, label, b].</summary>
+    private static List<string> SplitTopLevelMerge(string body)
+    {
+        var parts = new List<string>(3);
+        var depth = 0; var start = 0;
+        for (var i = 0; i < body.Length; i++)
+        {
+            var c = body[i];
+            if (c == '⟨') depth++;
+            else if (c == '⟩') depth--;
+            else if (c == '·' && depth == 0) { parts.Add(body.Substring(start, i - start)); start = i + 1; }
+        }
+        parts.Add(body.Substring(start));
+        return parts;
+    }
+
     /// <summary>DIAGNOSTIC: the raw element behind a symbol (for Merge / structure tests). Null if absent or archived.</summary>
     public Element? GetElement(string symbol)
         => _concepts.TryGet(Normalize(symbol), out var e) && !e.Archived ? e : null;
@@ -1779,9 +1812,15 @@ public sealed class DialecticalSpace : IPlatonicSpace
             {
                 var key = Normalize(el.Symbol);
                 if (FaceCodec.IsNumeric(key)) continue;
+                // A MERGE element ⟨a·label·b⟩ (Kind.Relation) is NOT re-derivable by GetOrCreateConcept — that parses the
+                // bracket as a plain token (empty ▷ Components, wrong kind), so a persisted FACT (⟨key·is·value⟩) would
+                // reload component-less and TryRecallFact would fail (recall walks the Components). REBUILD it structurally
+                // from its content-addressed symbol via Merge so the binding (and any nested subtree) is restored exactly.
                 var e = (ElementKind)el.Kind == ElementKind.Atom
                     ? _concepts.GetOrCreate(el.Symbol, ElementKind.Atom, () => new double[_semLen])
-                    : GetOrCreateConcept(el.Symbol);
+                    : el.Symbol.StartsWith("⟨", StringComparison.Ordinal)
+                        ? _concepts.TryGet(ReconstructMerge(el.Symbol), out var me) ? me : GetOrCreateConcept(el.Symbol)
+                        : GetOrCreateConcept(el.Symbol);
                 // Orbital is the ONLY layout-dependent state — copy it ONLY when the checkpoint's layout matches the
                 // current band layout AND the stored width matches this dim's SemanticLength (defensive); else ignore it.
                 if (layoutCompatible && el.Orbital is { Length: > 0 } && el.Orbital.Length == _semLen)

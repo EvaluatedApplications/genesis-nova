@@ -1401,11 +1401,12 @@ public sealed class DialecticalSpace : IPlatonicSpace
     //    consult this only ever run in a trained space, so the distribution exists. In a cold/tiny or low-variance space
     //    the signal SELF-ABSTAINS (returns false → nothing is filtered), so it can never over-filter while bootstrapping.
     private double _fnMean, _fnStd; // distribution of NEIGHBOUR-COHERENCE over sufficiently-connected concepts
+    private double _fnOtsu;         // VALLEY cut between the glue mode and the content mode (Otsu's between-class split)
     private int _fnStamp = -1;
     private bool _fnReady;
     private const int FnMinWarm = 48;     // below this the body's distribution isn't real yet — don't filter anything
     private const int FnMinDegree = 6;    // need ≥ this many neighbours to read diversity reliably
-    private const double FnSigma = 0.75;  // function = a LOW-coherence OUTLIER below the body's mean (scale-adaptive)
+    private const int FnMinSamples = 8;   // need ≥ this many qualifying concepts to read a 2-class split
     private const double FnCohCeil = 0.80;// absolute guard: a function word's neighbours are GENUINELY diverse
 
     // NEIGHBOURHOOD CLUSTERING (the (b) signal, measured on the GRAPH not the clouds): of a concept's neighbours, what
@@ -1433,17 +1434,49 @@ public sealed class DialecticalSpace : IPlatonicSpace
         var count = _concepts.ActiveCount;
         if (_fnReady && Math.Abs(count - _fnStamp) < Math.Max(16, count / 16)) return; // amortize the O(N·deg) rebuild
         double sum = 0, sumSq = 0; var n = 0;
+        var vals = new List<double>();
         foreach (var e in _concepts.All)
         {
             if (e.Archived || e.Kind == ElementKind.Atom || FaceCodec.IsNumeric(e.Symbol)) continue;
             if (GetRelationDegree(e.Symbol) < FnMinDegree) continue; // only words with enough neighbours to judge diversity
             var coh = NeighbourCoherence(e.Symbol);
             sum += coh; sumSq += coh * coh; n++;
+            vals.Add(coh);
         }
         var nn = Math.Max(1, n);
         _fnMean = sum / nn;
         _fnStd = Math.Sqrt(Math.Max(0.0, sumSq / nn - _fnMean * _fnMean));
-        _fnStamp = count; _fnReady = n > 0;
+        _fnOtsu = OtsuValleyThreshold(vals); // the VALLEY between the glue mode and the content mode (tracks the bimodal split as the graph grows)
+        _fnStamp = count; _fnReady = n >= FnMinSamples;
+    }
+
+    // OTSU'S METHOD over the coherence histogram: the cut that maximizes BETWEEN-class variance (equivalently minimizes
+    // within-class variance) — it lands in the natural VALLEY between the low-coherence GLUE mode and the higher-coherence
+    // CONTENT mode. This is the right estimator for a skewed/bimodal-with-tail distribution where a mean−σ cut collapses
+    // INTO the low tail as the graph grows (the tail fattens, the mean sinks, the σ-cut sinks with it → the separation
+    // degrades over time). Otsu instead tracks the valley wherever it sits, so it does NOT drift into the tail at scale.
+    private static double OtsuValleyThreshold(List<double> values)
+    {
+        if (values.Count < FnMinSamples) return 0.0; // too few to read a split → 0 filters nothing (self-abstain)
+        const int Bins = 64;
+        var hist = new int[Bins];
+        foreach (var v in values) hist[(int)(Math.Clamp(v, 0.0, 0.9999999) * Bins)]++;
+        int total = values.Count;
+        double sumAll = 0;
+        for (int i = 0; i < Bins; i++) sumAll += (i + 0.5) / Bins * hist[i];
+        double sumB = 0; int wB = 0; double maxVar = -1; int bestBin = -1;
+        for (int t = 0; t < Bins; t++)
+        {
+            wB += hist[t];
+            if (wB == 0) continue;
+            int wF = total - wB;
+            if (wF == 0) break; // no content class above the cut → stop
+            sumB += (t + 0.5) / Bins * hist[t];
+            double mB = sumB / wB, mF = (sumAll - sumB) / wF;
+            double between = (double)wB * wF * (mB - mF) * (mB - mF); // between-class variance (×total², monotone proxy)
+            if (between > maxVar) { maxVar = between; bestBin = t; }
+        }
+        return bestBin < 0 ? 0.0 : (bestBin + 1.0) / Bins; // upper edge of the chosen bin = the cut: coh ≤ this ⇒ glue/function
     }
 
     /// <summary>Is this concept a FILLER / function word — does it co-occur with MANY MUTUALLY-UNRELATED words (low
@@ -1464,19 +1497,19 @@ public sealed class DialecticalSpace : IPlatonicSpace
             return AssociationStrength(key) <= _assocMean - AssocSigma * _assocStd; // a LOW-association outlier
         }
         EnsureFunctionStats();
-        if (!_fnReady || _fnStd < 1e-6) return false;
+        if (!_fnReady || _fnOtsu <= 0.0) return false; // no valley found (cold / unimodal / too few) → filter nothing
         var coh = NeighbourCoherence(key);
-        return coh <= _fnMean - FnSigma * _fnStd && coh <= FnCohCeil; // a LOW-coherence (diverse-neighbour) outlier
+        return coh <= _fnOtsu && coh <= FnCohCeil; // below the bimodal VALLEY (and genuinely diverse) ⇒ function-like
     }
 
     /// <summary>DIAGNOSTIC: the NEIGHBOUR-COHERENCE of a concept (1=aligned/content, →0=diverse/function) and the active
     /// thresholds — so a curriculum/test can SEE why IsFunctionLike fires. Tuple reused: Centrality=coherence,
-    /// Threshold=the σ-cut (function if coherence ≤ it), Floor=the coherence ceiling, MinWarm=degree of the concept.</summary>
+    /// Threshold=the Otsu VALLEY cut (function if coherence ≤ it), Floor=the coherence ceiling, MinWarm=degree.</summary>
     public (double Centrality, double Mean, double Std, double Threshold, double Floor, int Active, int MinWarm) FunctionStats(string concept)
     {
         EnsureFunctionStats();
         var key = Normalize(concept);
-        return (NeighbourCoherence(key), _fnMean, _fnStd, _fnMean - FnSigma * _fnStd, FnCohCeil, _concepts.ActiveCount, GetRelationDegree(key));
+        return (NeighbourCoherence(key), _fnMean, _fnStd, _fnOtsu, FnCohCeil, _concepts.ActiveCount, GetRelationDegree(key));
     }
 
     // ── DISTRIBUTIONAL function-word signal (theory #2): PMI from the co-occurrence COUNTS, not graph topology ────────

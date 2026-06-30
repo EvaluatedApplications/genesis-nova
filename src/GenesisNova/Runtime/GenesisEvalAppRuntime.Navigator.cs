@@ -160,10 +160,13 @@ public sealed partial class GenesisEvalAppRuntime
         return result;
     }
 
-    /// <summary>Sample leaf concepts that HAVE relational ancestors and turn each into up to three cued queries, deriving
-    /// the cue from the LIVE relation graph's depth (immediate parent = GENUS, 2-hop ancestor = DOMAIN, the top = ROOT).
-    /// The qualifying set is sorted deterministically (leaf-first) and windowed by a rotating offset so a fixed query set
-    /// is trained when the space is small (the whole set every cycle) while a big space gets variety over many cycles.</summary>
+    /// <summary>Sample concepts that HAVE relational ancestors and turn each into up to three cued queries, deriving the
+    /// cue from the LIVE relation graph's depth (immediate parent = GENUS, 2-hop ancestor = DOMAIN, the TOP of the chain
+    /// = ROOT). ROOT is emitted whenever the chain is ≥2 hops — so a GENUS HUB (chain [domain, root]) gets a genus→root
+    /// pair too, not just leaf members (chain ≥3): the sampler is now deep enough that TrainNavigatorCycle ALONE trains
+    /// the full genus→domain→root range (the M1 deepening). The qualifying set is sorted deterministically (leaf-first)
+    /// and windowed by a rotating offset so a fixed query set trains when the space is small (the whole set every cycle)
+    /// while a big space gets variety over many cycles.</summary>
     private List<NavQueryDaggerTrainer.Query> SampleNavigatorQueries(DialecticalSpace ds, int maxMembers)
     {
         var queries = new List<NavQueryDaggerTrainer.Query>();
@@ -190,8 +193,15 @@ public sealed partial class GenesisEvalAppRuntime
             var chain = ClimbAncestors(ds, member);
             if (chain.Count == 0) continue;                                                   // flat below this node
             queries.Add(new NavQueryDaggerTrainer.Query(member, (int)NavCue.Genus, chain[0])); // immediate parent = GENUS
-            if (chain.Count >= 2) queries.Add(new(member, (int)NavCue.Domain, chain[1]));       // 2-hop ancestor = DOMAIN
-            if (chain.Count >= 3) queries.Add(new(member, (int)NavCue.Root, chain[^1]));        // the top reached = ROOT
+            if (chain.Count >= 2)
+            {
+                queries.Add(new(member, (int)NavCue.Domain, chain[1]));                        // 2-hop ancestor = DOMAIN
+                // ROOT = the TOP of the chain, emitted whenever it is ≥2 hops up — so a GENUS HUB (whose own chain is
+                // only [domain, root], length 2) ALSO gets a genus→root pair, not just leaf members (chain ≥3). This is
+                // the sampler DEEPENING (M1): TrainNavigatorCycle alone now trains the full genus→domain→root cue range,
+                // so the genus→root multi-hop ambiguous case no longer needs a focused ground-truth supplement.
+                queries.Add(new(member, (int)NavCue.Root, chain[^1]));                         // the top reached = ROOT
+            }
             added++;
         }
         return queries;

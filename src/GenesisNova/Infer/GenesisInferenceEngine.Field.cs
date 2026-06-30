@@ -384,6 +384,100 @@ public sealed partial class GenesisInferenceEngine
     // the per-token IsQuestionCue across the fact parse so a corpus-warmed (any-language) question marker drives routing.
     private bool QuestionCue(string t) => LearnedCuesOnly ? ResolveLearnedIntent(t) == FieldIntent.Question : IsQuestionCue(t);
 
+    // ── LEARNED NAVIGATOR LEVEL CUE (M1.1) — de-hardcoding DeriveNavCue's English keyword map ("ultimately"→Root …)
+    //    into a LEARNED target-aspect cue, the SAME ∘-anchor mechanism as ∘qst/∘ret. The LEVEL is NOT a word list: it
+    //    is the GRAPH DEPTH of the answer above the query subject (immediate parent = GENUS, 2-hop = DOMAIN, the top =
+    //    ROOT) — exactly the signal the gym's ClimbAncestors derives from the live relation graph. We relate the query's
+    //    discriminative framing marker (the non-numeric, non-subject, non-answer, non-function token: "ultimately"/
+    //    "broadly"/"kind", or a NONCE the English keyword map could never know) to the level anchor; at inference
+    //    DeriveNavCue resolves the query tokens against these anchors (highest-confidence wins, abstain on a tie,
+    //    default GENUS). Like ∘qst it rides the learned signal, not a list, so it generalises across frames/languages.
+    private static readonly (string Anchor, NavCue Cue)[] NavCueAnchors =
+        { ("∘gns", NavCue.Genus), ("∘dom", NavCue.Domain), ("∘rut", NavCue.Root) };
+
+    /// <summary>LEARN a navigator LEVEL cue from one (query, ancestor-answer) example's GRAPH STRUCTURE: climb the
+    /// subject's live ancestor chain; the answer's DEPTH in it names the level (parent = Genus, 2-hop = Domain, the top
+    /// = Root). Relate the discriminative framing marker(s) to the level anchor. No-op unless the answer is genuinely an
+    /// ancestor of the subject in the live relation graph (so an ordinary fact/retrieval frame never trains a spurious
+    /// level cue). Mirrors LearnIntentCue/LearnQuestionCue; training-time only; wired into ObserveLearningSignals.</summary>
+    public void LearnNavLevelCue(string input, string output)
+    {
+        if (_memory is not DialecticalSpace ds || string.IsNullOrWhiteSpace(input) || string.IsNullOrWhiteSpace(output)) return;
+        var outToks = TokenizeField(output);
+        if (outToks.Count != 1) return;
+        var answer = outToks[0];
+        if (answer.Length == 0 || !answer.All(char.IsLetter) || !ds.ContainsConcept(answer)) return; // ancestor = a content concept
+
+        // The subject = the most-discriminative content concept the query is about (what inference anchors the walk on),
+        // derived structurally (PlatonicConceptAnchors), never a parse rule. Skip if it IS the answer.
+        var subject = PlatonicConceptAnchors.ExtractSpecific(ds, input).FirstOrDefault(a => !IsFiller(ds, a));
+        if (string.IsNullOrEmpty(subject) || subject.Equals(answer, StringComparison.Ordinal)) return;
+
+        // The level is the answer's ROLE in the subject's ancestor chain (no taxonomy table): the IMMEDIATE parent =
+        // GENUS, the TOP of the chain = ROOT (whatever its absolute depth — a genus hub's root is 2 hops, a leaf's is
+        // 3), anything strictly between = DOMAIN. A single-ancestor chain is skipped: its one node is both immediate
+        // and ultimate, so genus-vs-root is unknowable from structure (don't train an ambiguous level).
+        var chain = ClimbRelationAncestors(ds, subject);
+        if (chain.Count < 2) return;
+        var idx = chain.IndexOf(answer);
+        if (idx < 0) return;                                                            // answer is not an ancestor → not a level frame
+        var level = idx == 0 ? NavCue.Genus
+                  : idx == chain.Count - 1 ? NavCue.Root
+                  : NavCue.Domain;
+        var anchor = NavCueAnchors.First(a => a.Cue == level).Anchor;
+
+        // Relate the discriminative marker(s): non-numeric letter tokens that are NOT the subject, NOT the answer, and
+        // NOT function-like glue (what/is/a/at/its drop out via the LEARNED function-word centrality). Across many varied
+        // subjects the constant level marker accumulates a strong relation while a leaked subject gets one weak hit — so
+        // the marker dominates at inference (DeriveNavCue takes the highest-confidence resolution across the tokens).
+        foreach (var t in TokenizeField(input))
+            if (!IsNumericLike(t) && t.Length > 0 && t.All(char.IsLetter)
+                && !t.Equals(subject, StringComparison.Ordinal) && !t.Equals(answer, StringComparison.Ordinal)
+                && !ds.IsFunctionLike(t))
+                ds.FineEditFromExample(new[] { t }, new[] { anchor }, isNegativeExample: false);
+    }
+
+    // Climb the LIVE relation graph upward from `start`, each hop to the strictly-more-general (higher relation-degree)
+    // neighbour — categories are relational HUBS, so degree is the substrate's own is-a-parent signal (no taxonomy
+    // table; numbers never form ancestor edges). Returns [parent, grandparent, … top]. Mirrors the gym's ClimbAncestors.
+    private static List<string> ClimbRelationAncestors(DialecticalSpace ds, string start, int maxDepth = 4)
+    {
+        var chain = new List<string>();
+        var visited = new HashSet<string>(StringComparer.Ordinal) { start };
+        var cur = start;
+        var curDeg = ds.GetRelationDegree(start);
+        for (var depth = 0; depth < maxDepth; depth++)
+        {
+            IReadOnlyList<PlatonicNeighbor> nbrs;
+            try { nbrs = ds.GetNeighbors(cur, PlatonicNeighborhoodType.Relational, 16, 0.0); }
+            catch { break; }
+            string? best = null; var bestDeg = curDeg;
+            foreach (var n in nbrs)
+            {
+                if (visited.Contains(n.Concept) || double.TryParse(n.Concept, out _)) continue;
+                var dg = ds.GetRelationDegree(n.Concept);
+                if (dg > bestDeg) { bestDeg = dg; best = n.Concept; }
+            }
+            if (best is null) break;
+            chain.Add(best); visited.Add(best); cur = best; curDeg = bestDeg;
+        }
+        return chain;
+    }
+
+    // Resolve ONE query token to a LEARNED navigator level (or null if unlearned / ambiguous). Highest-confidence level
+    // anchor among the token's relational neighbours; abstain when two levels tie (a glue token shared across levels).
+    // Mirrors ResolveLearnedIntent.
+    private static (NavCue Cue, double Conf)? ResolveLearnedNavCue(DialecticalSpace ds, string token)
+    {
+        var hits = ds.GetNeighbors(token, PlatonicNeighborhoodType.Relational, maxNeighbors: 12, minConfidence: 0.0)
+            .Where(n => NavCueAnchors.Any(a => a.Anchor == n.Concept))
+            .Select(n => (Cue: NavCueAnchors.First(a => a.Anchor == n.Concept).Cue, n.Confidence))
+            .OrderByDescending(x => x.Confidence).ToList();
+        if (hits.Count == 0) return null;
+        if (hits.Any(x => x.Cue != hits[0].Cue && x.Confidence >= hits[0].Confidence - 1e-6)) return null;
+        return (hits[0].Cue, hits[0].Confidence);
+    }
+
     // EXPERIMENT toggle (de-hardcoding #5): when true the engine's number-word ROUTES abstain — no hardcoded
     // NumberWordVocabulary codec — so number↔word must come from what the MODEL learned (its decoder / face geometry).
     // Lets a diagnostic MEASURE the learned number-word capability without the codec shortcut (the evidence for whether
@@ -775,7 +869,14 @@ public sealed partial class GenesisInferenceEngine
     // interrogative floor in BOTH modes because it encodes a UNIVERSAL truth, not a routing decision: a question word is
     // never an ANSWER in any space, warm or cold — so it must never leak out as a subject/answer. (Per-token, so the
     // role head's sequence-level QUERY tag can't replace it here; the learned filler signal augments it once warm.)
-    private bool IsFiller(DialecticalSpace ds, string t) => QuestionCue(t) || ds.IsFunctionLike(t);
+    private bool IsFiller(DialecticalSpace ds, string t) => QuestionCue(t) || ds.IsFunctionLike(t) || IsNavLevelCue(ds, t);
+
+    // A LEARNED navigator level marker ("ultimately"/"broadly"/"kind"/a nonce…) is FRAMING, not content: like a question
+    // word it selects HOW to answer (which abstraction level the walk targets), never WHAT the answer is. The cue learner
+    // reifies the marker as a concept (FineEditFromExample), so without this it would compete as a subject/answer in the
+    // relax path and steal the slot from the real subject. Treating "resolves to a nav-level cue" as filler keeps the
+    // marker out of subject/answer selection while DeriveNavCue still reads it for the level. Like ∘qst, list-free.
+    private bool IsNavLevelCue(DialecticalSpace ds, string t) => ResolveLearnedNavCue(ds, t) is not null;
 
     // #1: a question frame — the universal INTERROGATIVE FLOOR (a structural cross-language constant, not the gym
     // taxonomy). The 4-role NN's QUERY tag is GONE: it overfit and would not generalise (nova-grammar-role-regression).
@@ -1058,24 +1159,22 @@ public sealed partial class GenesisInferenceEngine
     /// confidently resolve, so the caller FALLS THROUGH to the one-shot reason (never regressing the clear cases).</summary>
     public Func<string, NavCue, double[]?, (string Answer, double Confidence, bool Ok)>? NavigatorDisambiguator { get; set; }
 
-    // CUE MAPPING (M1 FIRST CUT — documented limitation). The learned ∘qst cue tells question-vs-not, NOT the target
-    // ABSTRACTION LEVEL (genus / domain / root). Until that cue is itself learned (M1.1), map by a surface keyword:
-    // "kind/type/sort" → GENUS (the immediate kind); "domain/class/group/family/category" → DOMAIN; "ultimately/root/
-    // fundamentally/overall/essentially" → ROOT. Default GENUS. This is keyword-based, English-only, and a STAND-IN for
-    // a learned cue — the honest first cut. A real cutover replaces it with a learned target-aspect cue off the ∘qst seam.
-    private static NavCue DeriveNavCue(IReadOnlyList<string> toks)
+    // CUE MAPPING (M1.1 — LEARNED, replacing the English keyword stand-in). The navigator's target ABSTRACTION LEVEL
+    // (genus / domain / root) is resolved from the query tokens by the LEARNED level cue (∘gns/∘dom/∘rut, taught by
+    // LearnNavLevelCue from the answer's GRAPH DEPTH — no word list, no English keywords). The highest-confidence
+    // learned marker across the tokens wins (so a strongly-taught marker beats a weakly-leaked subject regardless of
+    // position); an unlearned / ambiguous query defaults to GENUS (the immediate kind). Because it rides the learned
+    // signal, a nonce/foreign level marker generalises where the old "ultimately"→Root keyword switch could not.
+    private NavCue DeriveNavCue(IReadOnlyList<string> toks)
     {
+        if (_memory is not DialecticalSpace ds) return NavCue.Genus;
+        (NavCue Cue, double Conf)? best = null;
         foreach (var t in toks)
-            switch (t)
-            {
-                case "ultimately": case "root": case "fundamentally": case "overall": case "essentially":
-                    return NavCue.Root;
-                case "domain": case "class": case "group": case "family": case "category": case "broadly":
-                    return NavCue.Domain;
-                case "kind": case "type": case "sort":
-                    return NavCue.Genus;
-            }
-        return NavCue.Genus; // default + unknown → the immediate kind (documented first-cut fallback)
+        {
+            var r = ResolveLearnedNavCue(ds, t);
+            if (r is { } hit && (best is null || hit.Conf > best.Value.Conf)) best = hit;
+        }
+        return best?.Cue ?? NavCue.Genus; // default / unlearned → the immediate kind
     }
 
     // ── RELAX: recall what the mind HOLDS about the subject. RELATION-FIRST (follow the explicit association — robust

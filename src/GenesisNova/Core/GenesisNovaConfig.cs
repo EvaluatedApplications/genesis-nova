@@ -117,5 +117,8 @@ public sealed record GenesisNovaConfig(
         MeaningOps = true,            // generative compose/analogy in the large face — GATED by the LEARNED director
                                       // (attached in ApplyTo with a conservative prior → defaults to retrieval, opens
                                       // only as it learns; no free-form misfire).
+        NavigatorDisambiguation = true, // M1 CUTOVER — the trained navigator owns the AMBIGUOUS branch of TryFieldRelax
+                                      // (multi-hop walk), gated to a CONFIDENT halt: an untrained/cold walk does not
+                                      // confidently resolve → falls through to the one-shot reason (cold-safe, proven).
     };
 }

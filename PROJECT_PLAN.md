@@ -26,9 +26,9 @@ easy ones it already nails. Heuristics own the dominant/clear branch; the walk o
 | Address-space *substrate* (faces, orbital, identity) | ✅ LIVE | the model's faces |
 | Function-word G6 conservation | ✅ LIVE | committed, proven |
 | Persistence (model + nav + self) | ✅ LIVE | round-trip proven |
-| **Navigator — reasoning as a walk** | ✅ **LIVE (ambiguous branch)** | M1: wired into `TryFieldRelax` as the ambiguous-branch disambiguator (`DecisionPath="navigator-walk"`), gated by `NavigatorDisambiguation`. Live `PredictAsync` head-to-head: 6/6 (100%) vs one-shot 0/6 on a 2-hop ambiguous subset; clear case byte-identical. See `Tests/NavigatorInferenceM1.cs`. |
+| **Navigator — reasoning as a walk** | ✅ **LIVE (ambiguous branch, ON in prod)** | M1 DONE: `TryFieldRelax` ambiguous-branch disambiguator (`DecisionPath="navigator-walk"`), `NavigatorDisambiguation` now ON in `WithProductionMechanisms`. LEARNED level cue (`∘gns/∘dom/∘rut`). Live `PredictAsync`, gym-trained-only navigator: **100% (18/18) vs one-shot 0%** on a natural-phrasing 2-hop ambiguous subset (incl. a nonce marker), clear case byte-identical, cold-safe. See `Tests/NavigatorM1LearnedCue.cs`. |
 | Decode-from-the-void stack | 🟡 BUILT-NOT-WIRED | only the navigator touches it |
-| `query → (anchor, cue)` from real text | ❌ NOT-DONE | stand-in / explicit `/nav` |
+| `query → (anchor, cue)` from real text | ✅ LIVE | learned `∘gns/∘dom/∘rut` cue (`LearnNavLevelCue`); anchor via `ExtractSpecific` |
 | Self-loop write side | 🟡 partial | gym-write reverted (pollution); inference fold not wired |
 | Multi-hop / composition (lookahead) | ❌ NOT-DONE | geometry is 1-hop; ceiling ~64–78% |
 | Overnight run that *improves real reasoning* | ❌ unproven | infra wired; no number-word feed; DAgger off |
@@ -44,15 +44,23 @@ the old way — **the navigator is a trained passenger, not the driver.**
   **DONE =** on a real query set in the live `PredictAsync` runtime over the gym-trained space, the navigator route
   **improves accuracy on the ambiguous subset vs the old ladder** (toward ~99%), with honest abstention. Not a unit
   test on synthetic data.
-  - M1.1 `query → (anchor, cue)` from the learned `∘qst` machinery (no stand-in enum). ❌ **STILL NOT-DONE** — the cue
-    is a keyword stand-in (`DeriveNavCue`: "ultimately"→Root etc., English-only); the anchor IS real (`ExtractSpecific`).
+  - M1.1 `query → (anchor, cue)` from a LEARNED cue (no stand-in enum). ✅ **LIVE** — the level cue (genus/domain/root)
+    is now a LEARNED `∘gns`/`∘dom`/`∘rut` resolver (`GenesisInferenceEngine.LearnNavLevelCue`/`ResolveLearnedNavCue`,
+    mirroring `∘qst`): the level comes from the answer's GRAPH DEPTH above the subject (no word list), and `DeriveNavCue`
+    resolves it from the query tokens (highest-confidence wins, abstain on tie, default Genus). A reified marker is
+    filtered as filler (`IsNavLevelCue` in `IsFiller`) so it can't steal the subject slot. Generalises to a NONCE marker
+    ("zarni") the English keyword switch could never know. The anchor was already real (`ExtractSpecific`).
   - M1.2 navigator route in `GenerateFromField`, gated to the ambiguous branch first. ✅ LIVE (`TryFieldRelax`, after the
     dominant-relation check, before the one-shot `ds.Reason`; falls through on a non-confident/invalid landing).
   - M1.3 abstain wiring (no settle → fall through to one-shot, then `field-abstain`). ✅ LIVE (non-resolve falls through).
-  - M1.4 a live eval harness: ambiguous query set, old-ladder vs navigator accuracy. ✅ LIVE (`Tests/NavigatorInferenceM1.cs`).
-  - **REMAINING for cutover:** learned cue (M1.1); flip `NavigatorDisambiguation` on in `WithProductionMechanisms`; the
-    gym `TrainNavigatorCycle` degree-climb only emits ROOT pairs for leaf members (chain ≥3), not genus hubs — so genus→root
-    needs the focused ground-truth feed the demo adds (or a deeper sampler); self-conditioning of the walk (M3).
+  - M1.4 a live eval harness: ambiguous query set, old-ladder vs navigator accuracy. ✅ LIVE (`Tests/NavigatorInferenceM1.cs`
+    + the M1 close-out `Tests/NavigatorM1LearnedCue.cs` — learned cue, gym-trained-only navigator).
+  - **CUTOVER DONE:** `NavigatorDisambiguation = true` in `WithProductionMechanisms` (R&D default-on); the gym sampler is
+    DEEPENED (`SampleNavigatorQueries` emits a genus→root pair for genus HUBS too, chain ≥2, not just leaf members) so
+    `TrainNavigatorCycle` ALONE trains the full cue range; a COLD navigator falls through safely (proven, 0 mis-emits);
+    fast suite 251/0/47. **REMAINING:** the gym CURRICULUM doesn't yet emit level-cue text frames (the learner is wired
+    into `ObserveLearningSignals` but only fires on a "what kind/broadly/ultimately is X→ancestor" frame), so an overnight
+    run does not yet self-teach the cue without a warmup (M4); self-conditioning of the walk (M3).
 - **M2 — Multi-hop via composition / lookahead.** **DONE =** held-out multi-hop climbs clearly above the 1-hop ceiling
   *through the live route*.
 - **M3 — Self-loop placed right.** Inference folds the *resolution* (not gym drills); re-enable DAgger safely.
@@ -69,3 +77,14 @@ the old way — **the navigator is a trained passenger, not the driver.**
   is on (default off → fast suite byte-identical, 251/0/46). LIVE `PredictAsync` head-to-head over `WithProductionMechanisms`
   at 1024/2048: navigator **100% (6/6)** vs one-shot **0% (6/6)** on a 2-hop ambiguous subset (`navigator-walk` on all 6),
   clear case `dog` byte-identical on/off. M1.1 (learned cue) still a keyword stand-in; cutover flag not yet flipped.
+- 2026-06-30 — **M1.1 + CUTOVER LANDED (M1 DONE-LIVE).** Replaced the English keyword `DeriveNavCue` with a LEARNED level
+  cue (`∘gns/∘dom/∘rut`, `LearnNavLevelCue` derives the level from the answer's graph depth — no word list; resolves
+  highest-confidence, abstain on tie, default Genus). Reified markers filtered as filler (`IsNavLevelCue`→`IsFiller`) so
+  they can't steal the subject slot — that was the one bug (markers like "ultimately"/"zarni" were being picked as the
+  query subject). Flipped `NavigatorDisambiguation = true` in `WithProductionMechanisms`; deepened `SampleNavigatorQueries`
+  so genus hubs get genus→root pairs (chain ≥2). LIVE demo (`Tests/NavigatorM1LearnedCue.cs`, `WithProductionMechanisms`,
+  nav ON by default, policy trained by `TrainNavigatorCycle` ALONE): **navigator 100% (18/18) vs one-shot 0%** on the
+  natural-phrasing ambiguous subset (incl. a NONCE marker "zarni" 6/6 — the keyword map could never resolve it), all via
+  `navigator-walk`; COLD navigator 0 mis-emits (falls through, cutover-safe); clear case `dog` byte-identical. Fast suite
+  **251/0/47** — no regression with the cutover ON. Remaining for a true overnight payoff: gym CURRICULUM level-cue frames
+  (M4) + walk self-conditioning (M3).

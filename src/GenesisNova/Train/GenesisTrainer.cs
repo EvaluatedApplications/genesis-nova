@@ -1398,6 +1398,10 @@ public sealed class GenesisTrainer
         // LEARN the INTERROGATIVE cue (de-hardcoding the IsQuestionCue wh-list): a wh-question retrieves its answer
         // (absent from the input) and is fronted by a function-like token → relate that token to ∘qst. No-op otherwise.
         _inferencePolicy.LearnQuestionCue(example.Input, example.Output);
+        // LEARN the NAVIGATOR LEVEL cue (M1.1): a "what kind/broadly/ultimately is X" frame whose answer is an ANCESTOR
+        // of X in the live relation graph relates the framing marker to the level anchor (∘gns/∘dom/∘rut). The level
+        // comes from the answer's graph DEPTH above X, not a word list. No-op for any non-ancestor frame.
+        _inferencePolicy.LearnNavLevelCue(example.Input, example.Output);
         if (allowTransformDiscovery)
             UpdateTransformDiscovery(example);
 

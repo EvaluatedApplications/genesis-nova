@@ -19,22 +19,22 @@ colours, not in the neural layer's weights.
 
 ## What the self is
 
-The self is **`GenesisInferenceEngine._selfField`** (`src/GenesisNova/Infer/GenesisInferenceEngine.Field.cs:1078`):
+The self is **`GenesisInferenceEngine._selfField`** (`src/GenesisNova/Infer/GenesisInferenceEngine.Field.cs:1424`):
 a single vector in the meaning-space the field reasons in. As the mind reaches a **conclusion**, that conclusion's
 **cloud** (its distributional meaning) is folded into the self as a **decaying, normalized running-average**
-(`PerceiveIntoSelfField`, `:1131`; the update is at `:1136-1138`):
+(`PerceiveIntoSelfField`, `:1477`; the update is at `:1482-1484`):
 
 ```
 selfField ← decay · selfField + (1 − decay) · concluded_cloud     →   normalize
 ```
 
-(`SelfDecay = 0.82` at `:1079`.) The self is built from what the mind **concludes at inference, not from training
+(`SelfDecay = 0.82` at `:1425`.) The self is built from what the mind **concludes at inference, not from training
 drills** (M3): on a genuinely **ambiguous** query, `TryFieldRelax` folds its own resolved answer back into the self
-(`FoldConclusion`, `:1280`, called at `:1318` and `:1348`); the mind also folds what it is **told** (`TryFieldLearn`,
-`:830`) and what it **says** (the persona builds in the self, `:760`/`:776`). A **clear** case — a dominant known
+(`FoldConclusion`, `:1644`, called at `:1682` and `:1712`); the mind also folds what it is **told** (`TryFieldLearn`,
+`:1153`) and what it **says** (the persona builds in the self, `:995`/`:1011`). A **clear** case — a dominant known
 relation or exact arithmetic — threads the working-memory `_focus` but **leaves the self untouched** (a known fact is
 not "mood"). The gym's navigator evaluation is **read-only** with respect to the self (`EvaluateNavigatorResolve`,
-`GenesisEvalAppRuntime.Navigator.cs:648`), so the vital loop is closed at inference, not training.
+`GenesisEvalAppRuntime.Navigator.cs:655`), so the vital loop is closed at inference, not training.
 
 So the self is a **recency-weighted centroid of what this mind has concluded**: not a stored snapshot but
 a drifting accumulation, shaped by what the mind learns, says, and settles. It is empty before the first perception
@@ -46,10 +46,10 @@ having concluded different things, carry different selves.
 
 When the field relaxes a query, it first answers any **dominant known fact** directly. The self never overrides a
 clear association. Only when relaxation is **genuinely ambiguous** does the self enter, passed in as context to the
-relaxation (`Field.cs:1332-1336`, gated by `SelfConditionsCognition` at `:1084`):
+relaxation (`Field.cs:1696-1701`, gated by `SelfConditionsCognition` at `:1430`):
 
 ```
-ds.Reason(new[] { subject }, selfContext: _selfField, selfWeight: SelfReasonWeight)   // SelfReasonWeight = 0.6, :1080
+ds.Reason(new[] { subject }, selfContext: _selfField, selfWeight: SelfReasonWeight)   // SelfReasonWeight = 0.6, :1698
 ```
 
 and it is taken only when that context makes a basin *more* certain. The self **tilts an ambiguous relaxation toward

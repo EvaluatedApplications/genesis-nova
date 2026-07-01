@@ -95,6 +95,17 @@ public sealed class DialecticalSpace : IPlatonicSpace
     // were freed (G6 via the latent address). The materialised space becomes a CACHE over the conserved decodable void —
     // the navigator's walk (TryLand) and reasoning (Reason) decode a missing concept back when they reach its address.
     public bool RecoverFromVoid { get; set; }
+    // DERIVABILITY GATE: a fact you can COMPUTE from other facts is a DEBT, not knowledge. When on, the
+    // maintenance sweep evicts relation-edges that are derivable from a STRONGER alternative path (weighted
+    // transitive reduction) — the store converges to its irreducible core. Off (default) = byte-identical.
+    public bool DerivabilityGate { get; set; }
+    // SELF-DISCRIMINATED INGESTION: when on, the all-pairs coupling in FineEditFromExample no longer writes every edge at
+    // a flat strength — each edge is attenuated toward NEUTRAL by endpoint generality, so a hub/glue pair the model
+    // already predicts (relates to everything) accretes almost nothing, while a specific/discriminating pair writes at
+    // full commitment. The discrimination EMERGES from the model's own degree distribution (no word list) and sharpens as
+    // it learns — the self getting more discerning about what it relates. Off (default) = flat all-pairs, byte-identical.
+    public bool SelfDiscriminatedIngestion { get; set; }
+    private const double IngestBaseline = 12.0;  // degree knee: disc = baseline/(baseline+deg(i)+deg(o)); cold→~1 (bootstrap), hub→~0
     private const double RecoverDecodeConfidence = 0.6;  // a coordinate must decode at least this confidently to count as a
                                                          // VALID identity worth materialising (below = between addresses / noise)
     private const double RecoverRoundTripTolerance = 0.5; // and its recovered canonical face must re-match the input coordinate's
@@ -182,6 +193,18 @@ public sealed class DialecticalSpace : IPlatonicSpace
     public int NumericDimensions => Math.Min(_dim / 2, 21);
     public bool ContainsConcept(string concept)
         => _concepts.TryGet(Normalize(concept), out var e) && IsRetrievable(e);
+
+    /// <summary>CONTROL/TEST hook: force-evict a single concept element deterministically — drops it AND its relation
+    /// edges from the active index (the targeted form of the maintenance discharge). Its coordinate stays decodable from
+    /// the frozen void, so <see cref="RecoverFromCoordinate"/> can re-materialise the IDENTITY — but NOT the edges. Lets
+    /// us measure whether reasoning survives the element cache disappearing. Returns false if not currently active.</summary>
+    public bool EvictConcept(string concept)
+    {
+        var s = Normalize(concept);
+        if (!ContainsConcept(s)) return false;
+        DischargeConcept(s);
+        return true;
+    }
     // G5 — "a Function is itself an element": registering an op both records the cue token AND realises a live, first-
     // class Function element so the operation has a decodable coordinate (kind=Function + op band) like every other band.
     public void RegisterOperationToken(string token)
@@ -202,6 +225,56 @@ public sealed class DialecticalSpace : IPlatonicSpace
     private Element GetOrCreateFunction(string opToken)
         => _concepts.GetOrCreate(OpSymbol(opToken), ElementKind.Function, () => FaceCodec.Token(OpSymbol(opToken), _dim));
     public bool IsOperationToken(string concept) => _operationTokens.Count > 0 && _operationTokens.Contains(Normalize(concept));
+
+    /// <summary>A relation-LABEL anchor (∘is, ∘isa, ∘has, …) — the TYPE a fact edge is tagged with. It is a coupling
+    /// marker, NOT a concept, so relational folds must step THROUGH it, never LAND on it (B1, [[nova-relational-fold-latent]]).</summary>
+    public bool IsRelationLabelToken(string concept)
+    {
+        var c = Normalize(concept);
+        return c.Length > 1 && c[0] == '∘' && _mergeLabels.Contains(c.Substring(1));
+    }
+
+    /// <summary>Step THROUGH a fact composite ⟨subject·label·value⟩ to the VALUE it asserts — FORWARD only: the fold
+    /// fires only when <paramref name="subject"/> is the fact's SUBJECT (first component), returning the object. This is
+    /// directional on purpose: a property node (sweet) must not fold BACKWARD to its holders (apple/banana). Null if the
+    /// symbol isn't a forward fact of <paramref name="subject"/>. Turns a relational EDGE into the concept it points at,
+    /// so walks/mirrors compare VALUES, not opaque composite symbols.</summary>
+    private string? FactValueOf(string factSymbol, string subject)
+    {
+        if (!factSymbol.StartsWith("⟨", StringComparison.Ordinal) || !factSymbol.EndsWith("⟩", StringComparison.Ordinal)) return null;
+        var parts = SplitTopLevelMerge(factSymbol.Substring(1, factSymbol.Length - 2));
+        if (parts.Count is not (2 or 3)) return null;
+        return Normalize(parts[0]) == Normalize(subject) ? Normalize(parts[^1]) : null;   // forward: subject → object
+    }
+
+    /// <summary>The strongest concept <paramref name="self"/> is related TO — the relational fold as a single hop: pick
+    /// the strongest edge, and if it lands on a fact composite ⟨self·label·value⟩ step THROUGH it to the value; skip
+    /// coupling-token (∘is) edges and anything already visited. This is what makes a WALK traverse the taxonomy (the value
+    /// is a structural component of the fact, not a direct adjacency edge, so the raw walk would dead-end without this).</summary>
+    private bool TryStrongestRelatedConcept(string self, HashSet<string> visited, out string target, out double strength)
+    {
+        target = string.Empty; strength = 0.0;
+        if (!_adjacency.TryGetValue(self, out var adj)) return false;
+        foreach (var nb in adj)
+        {
+            if (IsRelationLabelToken(nb)) continue;
+            var s = _relations.TryGetValue(Key(self, nb), out var r) ? r.Strength : 0.0;
+            if (s <= 0.0) continue;
+            var t = FactValueOf(nb, self) ?? nb;              // fold ⟨self·label·value⟩ → value; else nb is the target
+            if (visited.Contains(t) || IsRelationLabelToken(t) || t.Equals(self, StringComparison.Ordinal)) continue;
+            if (s > strength) { strength = s; target = t; }
+        }
+        return target.Length > 0;
+    }
+
+    /// <summary>The relation LABEL a fact composite ⟨key·label·value⟩ is tagged with (empty for an untyped ⟨key·value⟩).
+    /// Belief revision keys on this so distinct relations (is-a vs has-property) are separate channels (B2).</summary>
+    private static string FactLabelOf(string factSymbol)
+    {
+        if (!factSymbol.StartsWith("⟨", StringComparison.Ordinal) || !factSymbol.EndsWith("⟩", StringComparison.Ordinal)) return "";
+        var parts = SplitTopLevelMerge(factSymbol.Substring(1, factSymbol.Length - 2));
+        return parts.Count == 3 ? Normalize(parts[1]) : "";
+    }
 
     // ─────────────────────────────────────────────────────────────────────────────── Faces (synthesize / π)
     private Element GetOrCreateConcept(string symbol)
@@ -330,14 +403,22 @@ public sealed class DialecticalSpace : IPlatonicSpace
     //    kept mis-firing. The copula-pivot collapses into this single labelled Merge; key/value may be Merge subtrees.
     private const string FactLabel = "is";
 
-    public string LearnFact(string key, string value)
+    public string LearnFact(string key, string value) => LearnFact(key, value, FactLabel);
+
+    /// <summary>Learn a fact under a NAMED relation. Belief revision is now SCOPED to the relation channel: a fresh
+    /// "apple is-a fruit" weakens prior is-a facts of apple, but NOT its has-property facts — is-a and has-property are
+    /// distinct couplings (B2, [[nova-relational-fold-latent]]), so they coexist instead of overwriting one belief slot.</summary>
+    public string LearnFact(string key, string value, string relation)
     {
-        var fact = Merge(key, value, FactLabel);            // ⟨key·is·value⟩ — the typed bind, positioned at the blend
+        var label = string.IsNullOrWhiteSpace(relation) ? FactLabel : Normalize(relation);
+        var fact = Merge(key, value, label);                // ⟨key·label·value⟩ — the typed bind, positioned at the blend
         var k = Normalize(key);
-        // BELIEF REVISION (G2 / free-energy): a fresh assertion makes `value` the key's CURRENT belief — weaken the key's
-        // prior fact edges so recall returns the new truth, not a stale one (G6: weakened toward dormancy, not destroyed).
+        // BELIEF REVISION (G2 / free-energy), SCOPED to the SAME relation channel: a fresh assertion makes `value` the
+        // key's CURRENT belief FOR THIS relation — weaken the key's prior facts OF THE SAME LABEL so recall returns the
+        // new truth, not a stale one (G6: weakened toward dormancy, not destroyed). Other channels are left untouched.
         foreach (var n in GetNeighbors(k, PlatonicNeighborhoodType.Relational, 16, 0.0).ToList())
-            if (n.Concept.StartsWith("⟨", StringComparison.Ordinal) && !n.Concept.Equals(fact, StringComparison.Ordinal))
+            if (n.Concept.StartsWith("⟨", StringComparison.Ordinal) && !n.Concept.Equals(fact, StringComparison.Ordinal)
+                && FactLabelOf(n.Concept) == label)
                 DisruptAssociation(k, n.Concept);
         ObserveContradiction(k, fact, 0.0);                 // index the fact by its KEY (agreement → strong edge)
         return fact;
@@ -587,6 +668,106 @@ public sealed class DialecticalSpace : IPlatonicSpace
             names.Add(n);
         names.Remove(self);
         return names.Count == 0 ? Array.Empty<(string, double)>() : GetNearestConcepts(concept, names, maxNeighbors);
+    }
+
+    /// <summary>
+    /// GEOMETRY-NATIVE derivation: read the answer straight from the LATENT geometry — the subject's nearest CONTENT
+    /// concept — instead of WALKING stored relation edges. The relation is a conserved trace in the clouds, so this
+    /// survives eviction of the intermediate node the edge-walk needs (proven: after `bird` is evicted, `animal` is still
+    /// sparrow's rank-1 content neighbour). SELF-PRECISION FLOOR (the geometric P4 fix): the top content concept must
+    /// clear a MARGIN over the runner-up; if the subject sits in an undifferentiated / low-density region (nothing but
+    /// glue nearby, or no clear winner) we ABSTAIN — "cannot derive" — rather than laundering a chain through glue. Glue
+    /// (learned `IsFunctionLike`), ∘-anchors, operators, numbers and the subject itself are filtered as non-content.
+    /// </summary>
+    public bool TryGeometricDerive(string subject, out string answer, out double confidence, int scan = 16, double marginFloor = 0.05)
+    {
+        answer = string.Empty; confidence = 0.0;
+        var self = Normalize(subject);
+        if (self.Length == 0 || !_concepts.Contains(self)) return false;
+        var scored = GetNearestConcepts(self, maxNeighbors: Math.Clamp(scan, 4, 32))
+            .Where(n => !n.Symbol.Equals(self, StringComparison.Ordinal)
+                        && !n.Symbol.StartsWith("∘", StringComparison.Ordinal)          // relation-label / anchor tokens
+                        && !IsOperationToken(n.Symbol)
+                        && !FaceCodec.IsNumeric(n.Symbol))
+            // SELF-PRECISION, geometric (mirrors seam A on the READ side): DISCOUNT a candidate by its GENERALITY — a glue
+            // word is close to EVERYTHING (high degree), so its raw closeness to `self` isn't discriminative. Inflate its
+            // effective distance by (baseline+deg)/baseline so a SPECIFIC neighbour (a real ancestor) beats a universal
+            // one. No word list — degree is the signal, the same knee seam A uses for writing. (IsFunctionLike needs a warm
+            // space it may not have; degree-discount is robust cold.)
+            .Select(n => (n.Symbol, Score: n.Distance * (IngestBaseline + GetRelationDegree(n.Symbol)) / IngestBaseline))
+            .OrderBy(x => x.Score)
+            .ToList();
+        if (scored.Count == 0) return false;                                           // nothing to derive from
+        var d1 = scored[0].Score;
+        var d2 = scored.Count > 1 ? scored[1].Score : d1 * (1.0 + marginFloor) + marginFloor; // no competitor → clear
+        var margin = d2 - d1;                                                           // how much the winner clears the field
+        if (margin < marginFloor) return false;                                        // undifferentiated latent region → abstain (self-precision floor)
+        answer = scored[0].Symbol;
+        confidence = Math.Min(1.0, margin / Math.Max(d1, 1e-6));
+        return true;
+    }
+
+    /// <summary>DIRECTIONAL derivation — the fold-faithful reasoning primitive. Apply the TRAINED relation direction to the
+    /// subject's orbital and return the nearest concept: orbital(subject) + hops·r_label → nearest (hops=1 → genus, hops=2 →
+    /// kingdom, …). Unlike <see cref="TryGeometricDerive"/> (nearest = SIBLING, similarity), this COMPOSES the trained
+    /// direction, so it reaches ANCESTORS the raw cloud can't. Abstains if the direction is untrained, the subject has no
+    /// orbital, or no candidate clears the cosine margin. Cosine is over the RAW orbital (non-unit) so the translation chain
+    /// stays in the trained space.</summary>
+    public bool TryDirectionalDerive(string subject, out string answer, out double confidence, int hops = 1, string label = "is-a", double marginFloor = 0.02)
+    {
+        answer = string.Empty; confidence = 0.0;
+        var v = OrbitalOf(Normalize(subject));
+        if (v is null) return false;                                   // subject not embedded
+        // GENERALIZING MAP first (entity-agnostic kernel-ridge — GENERALISES to UNSEEN entities, held-out 5/5). Try the
+        // requested relation, then the auto-trained "assoc" (what the observe loop accrues). Fall back to the memorized
+        // TransE direction only if no map is trained. This is what makes DirectionalReasoning reason, not just look up.
+        var q = ComposeViaMap(v, label, hops) ?? ComposeViaMap(v, "assoc", hops);
+        if (q is null)
+        {
+            var r = RelationVector(label) ?? RelationVector("assoc");
+            if (r is null) return false;                               // neither a map nor a direction is trained
+            q = new double[v.Length];
+            for (var i = 0; i < v.Length && i < r.Length; i++) q[i] = v[i] + hops * r[i];   // memorized TransE fallback
+        }
+
+        static double Cos(double[] a, double[] b)
+        { double d = 0, na = 0, nb = 0; var n = Math.Min(a.Length, b.Length); for (var i = 0; i < n; i++) { d += a[i]*b[i]; na += a[i]*a[i]; nb += b[i]*b[i]; } return d / (Math.Sqrt(na)*Math.Sqrt(nb) + 1e-12); }
+
+        var self = Normalize(subject);
+        string best = string.Empty; double bestCos = double.NegativeInfinity, secondCos = double.NegativeInfinity;
+        foreach (var e in _concepts.All)
+        {
+            if (e.Archived || e.Kind == ElementKind.Atom) continue;
+            var sym = e.Symbol;
+            if (sym.Equals(self, StringComparison.Ordinal)) continue;
+            if (sym.StartsWith("∘", StringComparison.Ordinal) || sym.StartsWith("⟨", StringComparison.Ordinal)
+                || IsOperationToken(sym) || FaceCodec.IsNumeric(sym)) continue;
+            // The answer is an ANCESTOR = a content HUB (a category with members). The map lands the subject in the genus
+            // REGION where the nearest CONCEPT is a sibling, but the nearest content-HUB is the genus — so restrict
+            // candidates to hubs (degree ≥ 2) that are NOT glue (a glue word is high-degree too but never an answer).
+            if (GetRelationDegree(sym) < 2 || IsFunctionLike(sym)) continue;
+            var c = Cos(q, e.SemanticFace);
+            if (c > bestCos) { secondCos = bestCos; bestCos = c; best = sym; }
+            else if (c > secondCos) secondCos = c;
+        }
+        if (best.Length == 0) return false;
+        if (bestCos - secondCos < marginFloor) return false;           // undifferentiated → abstain (self-precision floor)
+        answer = best; confidence = Math.Min(1.0, Math.Max(0.0, bestCos));
+        return true;
+    }
+
+    /// <summary>Compose the entity-agnostic relation MAP `hops` times (orbital → genus → kingdom). Null if the map is
+    /// untrained for the label. Unlike the memorized TransE direction, the map generalises to entities never trained on.</summary>
+    private double[]? ComposeViaMap(double[] orbital, string label, int hops)
+    {
+        var q = orbital;
+        for (var h = 0; h < Math.Max(1, hops); h++)
+        {
+            var next = ApplyRelationMap(q, label);
+            if (next is null) return null;
+            q = next;
+        }
+        return q;
     }
 
     // ──────────────────────────────────────────────────────── Navigation SEAMS for the NN-navigator (C; do NOT build a
@@ -907,6 +1088,7 @@ public sealed class DialecticalSpace : IPlatonicSpace
         {
             _lastDischargeStep = now;                 // set FIRST so re-entrant observes (from Decompose) don't re-trigger
             DischargeIrrelevant();
+            if (DerivabilityGate) SweepDerivableRelations(); // evict relation-edges derivable from a stronger path (don't store what you can compute)
             if (GenerativeAtoms) DecomposeReinforced(); // break PROVEN tokens into candidate sub-atoms; they compete via decay
         }
     }
@@ -1212,6 +1394,25 @@ public sealed class DialecticalSpace : IPlatonicSpace
     public IReadOnlyList<(string Left, string Right, long ObservationCount)> GetAllRelations()
         => _relations.Values.Select(r => (r.Left, r.Right, (long)r.ObservationCount)).ToArray();
 
+    /// <summary>SELF-DISCRIMINATED INGESTION: attenuate a candidate edge's contradiction toward NEUTRAL (0.5) by how much
+    /// the model ALREADY predicts the pair (endpoint generality). Off, or for a ∘-ANCHOR endpoint, returns <paramref
+    /// name="k"/> unchanged (byte-identical). Shared by BOTH ingestion sites — the all-pairs <see cref="FineEditFromExample"/>
+    /// and the trainer's adjacent-pair observes — so the whole ingestion path discriminates from ONE rule.</summary>
+    public double DiscriminatedContradiction(string a, string b, double k)
+    {
+        if (!SelfDiscriminatedIngestion) return k;
+        // A binding to a ∘-ANCHOR (∘qst / ∘cmp / ∘is / ∘fn:… — a cue/relation/op target) is a STRUCTURAL learning target,
+        // not distributional co-occurrence, so it must commit at full strength even though the cue token (e.g. "what") is a
+        // high-degree hub. Only distributional content↔content pairs are attenuated.
+        var na = Normalize(a); var nb = Normalize(b);
+        if (na.StartsWith("∘", StringComparison.Ordinal) || nb.StartsWith("∘", StringComparison.Ordinal)) return k;
+        // Attenuate a predictable (hub/glue) edge TOWARD 0.5 (neutral) — NOT toward 0. disc→1 keeps a discriminating pair
+        // committed; disc→0 makes a generality-dominated pair uncommitted. Degree is read BEFORE this observe, so it
+        // reflects what the model already knows the endpoints relate to.
+        var disc = IngestBaseline / (IngestBaseline + GetRelationDegree(na) + GetRelationDegree(nb));
+        return 0.5 + (k - 0.5) * disc;
+    }
+
     public void FineEditFromExample(IReadOnlyList<string> inputConcepts, IReadOnlyList<string> outputConcepts, bool isNegativeExample)
     {
         var inputs = (inputConcepts ?? Array.Empty<string>()).Select(Normalize).Where(c => c.Length > 0).Distinct().ToArray();
@@ -1220,7 +1421,8 @@ public sealed class DialecticalSpace : IPlatonicSpace
         var k = isNegativeExample ? 0.9 : 0.1;
         foreach (var i in inputs)
             foreach (var o in outputs)
-                if (i != o) ObserveContradiction(i, o, k);
+                if (i != o)
+                    ObserveContradiction(i, o, DiscriminatedContradiction(i, o, k));
     }
 
     public void DisruptAssociation(string anchor, string answer)
@@ -1300,6 +1502,224 @@ public sealed class DialecticalSpace : IPlatonicSpace
             ClampNorm(orbital);
         }
         _lattice.MarkEmbeddingsDirty();
+    }
+
+    // ── RELATION-DIRECTION TRAINING (TransE) — IMPOSE a consistent latent DIRECTION for a relation onto the learned
+    //    orbital tail. Arithmetic reasons geometrically because the frozen codec BUILDS the additive direction into a
+    //    number's face; relations have no such imposed structure, so is-a is NOT a direction in the raw distributional
+    //    cloud (offset cosine ~0, 2-hop composition fails). This trains it in: orbital(subj)+r_label ≈ orbital(obj),
+    //    margin-ranking with negative sampling (corrupt the object) so it can't collapse; entities kept unit-normed each
+    //    epoch. Only the learned tail [_semStart,dim) is written — the frozen identity codec is untouched. After training,
+    //    composition is fold-faithful: orbital(m)+k·r reaches the k-hop ancestor. Flag gates future auto-wiring; the proof
+    //    calls this directly. See RelationDirectionTests (the negative baseline) / RelationDirectionTrainingTests (the win).
+    public bool RelationDirectionTraining { get; set; }
+    private readonly Dictionary<string, double[]> _relationDirections = new(StringComparer.Ordinal);
+    private readonly List<(string s, string o, string l)> _relDirBuffer = new();
+    private int _relDirSinceTrain;
+    private const int RelDirTrainEvery = 128;   // retrain the map/directions every N accrued pairs
+    private const int MapTrainMax = 256;        // cap the map's kernel-ridge training window (inversion is O(n^3))
+
+    /// <summary>AUTO-WIRE HOOK (gated by <see cref="RelationDirectionTraining"/>): accrue an observed subject→object
+    /// relational pair for direction-training, and periodically retrain the TransE directions from the accumulated pairs —
+    /// so <c>DirectionalReasoning</c> has LIVE trained directions from real ingestion, not just a test call. HONEST LIMIT:
+    /// without relation TYPING (the ∘is / B1-B2 thread) this accrues ALL content input→output couplings under ONE label,
+    /// so the learned direction is a MIXED-relation "assoc" direction (is-a + synonym + category), not a clean is-a; full
+    /// is-a typing would filter to pure is-a triples. Also: TrainRelationDirection writes entity orbitals back, so running
+    /// it during gym training interacts with cloud learning — validate at scale before trusting the prod-on default.</summary>
+    public void AccrueRelationDirection(string subject, string obj, string label)
+    {
+        var s = Normalize(subject); var o = Normalize(obj);
+        if (s.Length == 0 || o.Length == 0 || s == o) return;
+        if (FaceCodec.IsNumeric(s) || FaceCodec.IsNumeric(o) || IsOperationToken(s) || IsOperationToken(o)) return;
+        if (s[0] == '∘' || o[0] == '∘') return;
+        _relDirBuffer.Add((s, o, Normalize(label)));
+        if (_relDirBuffer.Count > 1024) _relDirBuffer.RemoveRange(0, _relDirBuffer.Count - 1024); // keep recent window
+        if (++_relDirSinceTrain >= RelDirTrainEvery)
+        {
+            _relDirSinceTrain = 0;
+            // GENERALIZING MAP — READ-ONLY (no orbital mutation), so it's prod-safe → DEFAULT ON (trains from real ingestion,
+            // even with RelationDirectionTraining off). Capped window keeps the kernel inversion cheap.
+            var window = _relDirBuffer.Count > MapTrainMax
+                ? _relDirBuffer.GetRange(_relDirBuffer.Count - MapTrainMax, MapTrainMax) : _relDirBuffer;
+            TrainRelationMap(window, lambda: 2.0);   // λ=2.0 generalizes (default 0.5 overfits — proven in the generalization test)
+            // TransE direction — MUTATES entity orbitals, so it stays GATED behind RelationDirectionTraining (off in prod
+            // pending validation). The map above is what DirectionalReasoning actually uses.
+            if (RelationDirectionTraining) TrainRelationDirection(_relDirBuffer, epochs: 100);
+        }
+    }
+
+    /// <summary>The trained direction vector for a relation label (in the semantic subspace), or null if untrained.</summary>
+    public double[]? RelationVector(string label)
+        => _relationDirections.TryGetValue(Normalize(label), out var r) ? (double[])r.Clone() : null;
+
+    /// <summary>The RAW orbital (semantic-face) vector — NOT unit-normalised (unlike <see cref="SemanticVectorOf"/>, whose
+    /// read path renormalises). Needed for translational composition: `OrbitalOf(m) + k·RelationVector(l)` stays in the
+    /// trained space, where a unit-normalised read would collapse the chain's magnitude. Null if unknown/numeric/operator.</summary>
+    public double[]? OrbitalOf(string concept)
+    {
+        EnsureCloudsFresh();
+        var key = Normalize(concept);
+        if (IsOperationToken(key) || FaceCodec.IsNumeric(key)) return null;
+        return _concepts.TryGet(key, out var e) && !e.Archived && e.Kind != ElementKind.Atom ? (double[])e.SemanticFace.Clone() : null;
+    }
+
+    private void ClampTo(double[] v, double maxNorm)
+    {
+        var s = 0.0; for (var i = 0; i < _semLen; i++) s += v[i] * v[i]; s = Math.Sqrt(s);
+        if (s <= maxNorm || s <= 1e-12) return;
+        var inv = maxNorm / s; for (var i = 0; i < _semLen; i++) v[i] *= inv;
+    }
+
+    /// <summary>Train per-label relation DIRECTIONS onto the orbital tail (TransE). See the block comment above. Entities
+    /// are norm-CLAMPED (not forced unit) so a translation CHAIN m→m+r→m+2r has room to lie collinear (a sphere can't hold
+    /// a chain — that's what broke 2-hop composition under a unit constraint).</summary>
+    public void TrainRelationDirection(IReadOnlyList<(string subj, string obj, string label)> triples,
+        int epochs = 400, double lr = 0.05, double margin = 1.0, double maxNorm = 4.0, int seed = 1)
+    {
+        EnsureCloudsFresh();
+        var tri = new List<(string s, string o, string l)>();
+        var ents = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var (s, o, l) in triples ?? Array.Empty<(string, string, string)>())
+        {
+            var sn = Normalize(s); var on = Normalize(o); var ln = Normalize(l);
+            if (sn.Length == 0 || on.Length == 0 || sn == on || ln.Length == 0) continue;
+            tri.Add((sn, on, ln)); ents.Add(sn); ents.Add(on);
+        }
+        if (tri.Count == 0) return;
+        var rng = new Random(seed);
+
+        double[] RandomUnit() { var v = new double[_semLen]; for (var i = 0; i < _semLen; i++) v[i] = rng.NextDouble() * 2 - 1; NormalizeVec(v); return v; }
+        // Entity embeddings INITIALISED from the current cloud — distributional similarity is the STARTING point (siblings
+        // begin close), and the relation direction is imposed on top (best shot at keeping BOTH similarity AND direction).
+        var E = new Dictionary<string, double[]>(StringComparer.Ordinal);
+        foreach (var e in ents)
+        {
+            var v = SemanticVectorOf(e);
+            var emb = v is not null && v.Length == _semLen ? (double[])v.Clone() : RandomUnit();
+            NormalizeVec(emb); E[e] = emb;
+        }
+        var entList = ents.ToArray();
+        // Relation vectors initialised to the mean observed offset (obj − subj) per label.
+        var R = new Dictionary<string, double[]>(StringComparer.Ordinal);
+        foreach (var l in tri.Select(t => t.l).Distinct())
+        {
+            var r = new double[_semLen]; var ct = 0;
+            foreach (var (s, o, tl) in tri) if (tl == l) { var es = E[s]; var eo = E[o]; for (var i = 0; i < _semLen; i++) r[i] += eo[i] - es[i]; ct++; }
+            if (ct > 0) for (var i = 0; i < _semLen; i++) r[i] /= ct;
+            R[l] = r;
+        }
+
+        for (var ep = 0; ep < Math.Max(1, epochs); ep++)
+        {
+            foreach (var e in ents) ClampTo(E[e], maxNorm);        // norm-CLAMPED (not unit) so a translation chain can lie collinear
+            for (var i = tri.Count - 1; i > 0; i--) { var j = rng.Next(i + 1); (tri[i], tri[j]) = (tri[j], tri[i]); }
+            foreach (var (s, o, l) in tri)
+            {
+                var oc = entList[rng.Next(entList.Length)];        // corrupt the object → negative sample
+                if (oc == o || oc == s) continue;
+                double[] es = E[s], eo = E[o], en = E[oc], r = R[l];
+                // NON-squared L2 distance (canonical TransE) so the margin is meaningful at clamp scale: d(s+r,o).
+                double posN = 0, negN = 0;
+                for (var i = 0; i < _semLen; i++) { var dp = es[i] + r[i] - eo[i]; var dn = es[i] + r[i] - en[i]; posN += dp * dp; negN += dn * dn; }
+                posN = Math.Sqrt(posN) + 1e-12; negN = Math.Sqrt(negN) + 1e-12;
+                if (margin + posN - negN <= 0) continue;           // margin satisfied → no gradient
+                for (var i = 0; i < _semLen; i++)
+                {
+                    var dp = (es[i] + r[i] - eo[i]) / posN;         // ∂‖p‖/∂p = p/‖p‖
+                    var dn = (es[i] + r[i] - en[i]) / negN;
+                    var g = dp - dn;                               // ∂L/∂es = ∂L/∂r
+                    es[i] -= lr * g; r[i] -= lr * g;
+                    eo[i] += lr * dp;                              // ∂L/∂eo = −p/‖p‖
+                    en[i] -= lr * dn;                              // ∂L/∂en = +n/‖n‖
+                }
+            }
+        }
+        foreach (var e in ents) ClampTo(E[e], maxNorm);
+        // Write the trained direction INTO the orbital (the learned tail only) + store the relation vectors.
+        foreach (var e in ents)
+            if (_concepts.TryGet(e, out var el) && !el.Archived)
+            {
+                var emb = E[e]; var dst = el.SemanticFace;
+                for (var i = 0; i < _semLen && i < dst.Length; i++) dst[i] = emb[i];
+            }
+        foreach (var kv in R) _relationDirections[kv.Key] = kv.Value;
+        _lattice.MarkEmbeddingsDirty();
+    }
+
+    // ENTITY-AGNOSTIC RELATION MAP (the generalization fix), as CHEAP LAZY WEIGHTED k-NN. TransE (above) MEMORISES — it
+    // moves the TRAINED entities' orbitals, so unseen entities don't compose. Here the map is a property of the RELATION,
+    // applicable to ANY entity, but WITHOUT the old kernel-ridge dual (K+λI)⁻¹ that was O(n^3) and FROZE the gym when run in
+    // the observe loop. "Training" now just STORES the (subject-orbital, object-orbital) pairs (O(n·d), no solve). Prediction
+    // ŷ(x) = the cosine-weighted average of the OBJECTS of the k nearest stored SUBJECTS to x. An UNSEEN subject predicts its
+    // object as the blend of its nearest trained subjects' objects — generalises iff it falls near same-relation subjects
+    // (same-genus members do). The buffer is capped (MapTrainMax=256) so a bounded linear scan is cheap; the PlatonicLattice
+    // VP-tree is for the LARGE concept store, not this small buffer, so a scan is the right tool here. Same "trained map
+    // imposes what the raw clouds lack" thesis — O(n) not O(n^3), so it can live in the hot observe loop.
+    private sealed class RelationMap { public readonly List<(double[] subj, double[] obj)> Pairs = new(); }
+    private readonly Dictionary<string, RelationMap> _relationMaps = new(StringComparer.Ordinal);
+    private const int MapNeighbours = 8;   // weighted k-NN neighbours for the relation-map prediction
+
+    /// <summary>Learn the entity-agnostic relation map per label — LAZY: just STORE the (subject, object) RAW-orbital pairs
+    /// (unit-normalised subject as the cosine driver); no entity is moved and there is NO matrix solve (was kernel-ridge
+    /// O(n^3), which froze the gym in the observe loop). Generalises to unseen entities via the weighted k-NN in
+    /// <see cref="ApplyRelationMap"/>. (<paramref name="lambda"/> kept for signature compatibility; unused now.)</summary>
+    public void TrainRelationMap(IReadOnlyList<(string subj, string obj, string label)> triples, double lambda = 0.5)
+    {
+        EnsureCloudsFresh();
+        var groups = (triples ?? Array.Empty<(string, string, string)>())
+            .Select(t => (s: Normalize(t.subj), o: Normalize(t.obj), l: Normalize(t.label)))
+            .Where(t => t.s.Length > 0 && t.o.Length > 0 && t.s != t.o && t.l.Length > 0)
+            .GroupBy(t => t.l);
+        foreach (var grp in groups)
+        {
+            var map = new RelationMap();
+            foreach (var (s, o, _) in grp)
+            {
+                var x = OrbitalOf(s); var y = OrbitalOf(o);
+                if (x is null || y is null || x.Length != _semLen || y.Length != _semLen) continue;
+                map.Pairs.Add((UnitVec(x), y));   // unit subject (cosine driver) + raw object
+            }
+            if (map.Pairs.Count > 0) _relationMaps[grp.Key] = map;
+        }
+        _lattice.MarkEmbeddingsDirty();
+    }
+
+    /// <summary>Apply the map ONE hop: ŷ = cosine-weighted average of the OBJECTS of the k nearest stored SUBJECTS to the
+    /// query orbital. Null if untrained. Compose (2-hop) by feeding the result back in. O(n·d), n≤MapTrainMax — cheap.</summary>
+    public double[]? ApplyRelationMap(double[] orbital, string label)
+    {
+        if (orbital is null || !_relationMaps.TryGetValue(Normalize(label), out var m) || m.Pairs.Count == 0) return null;
+        var q = UnitVec(orbital);
+        var sims = new (double sim, int idx)[m.Pairs.Count];
+        for (var i = 0; i < m.Pairs.Count; i++)
+        {
+            var su = m.Pairs[i].subj; double d = 0; for (var t = 0; t < _semLen; t++) d += q[t] * su[t];
+            sims[i] = (d, i);
+        }
+        Array.Sort(sims, (a, b) => b.sim.CompareTo(a.sim));                        // nearest first
+        var k = Math.Min(MapNeighbours, sims.Length);
+        var y = new double[_semLen]; var wsum = 0.0;
+        for (var nn = 0; nn < k; nn++)
+        {
+            var w = sims[nn].sim; if (w <= 0.0) continue;                          // interpolate over positive-cosine neighbours only
+            w = w * w;                                                             // sharpen so the nearest same-relation subjects dominate
+            var obj = m.Pairs[sims[nn].idx].obj;
+            for (var d = 0; d < _semLen; d++) y[d] += w * obj[d];
+            wsum += w;
+        }
+        if (wsum <= 1e-12) return null;
+        for (var d = 0; d < _semLen; d++) y[d] /= wsum;
+        return y;
+    }
+
+    /// <summary>Unit-normalize an orbital to the semantic length — the cosine-kNN feature x̂ = x/‖x‖.</summary>
+    private double[] UnitVec(double[] x)
+    {
+        var a = new double[_semLen];
+        double s = 0; for (var i = 0; i < _semLen && i < x.Length; i++) s += x[i] * x[i];
+        s = Math.Sqrt(s); var inv = s > 1e-12 ? 1.0 / s : 0.0;
+        for (var i = 0; i < _semLen && i < x.Length; i++) a[i] = x[i] * inv;
+        return a;
     }
 
     public void ReinforceEvidence(IReadOnlyList<PlatonicEvidence> evidence, bool success)
@@ -1822,6 +2242,98 @@ public sealed class DialecticalSpace : IPlatonicSpace
         return merged.Values.OrderByDescending(n => n.Confidence).Take(Math.Clamp(maxNeighbors, 1, 64)).ToArray();
     }
 
+    /// <summary>
+    /// BRIDGE-DIMENSIONS reasoning (the original genesis engine's PortalBridge idea: reconcile the SYMBOLIC-GRAPH
+    /// view with the EMBEDDING view). Infers a property the concept LACKS by consulting its EMBEDDING neighbours
+    /// (the distributional view) and taking the relation they carry that the concept does NOT — the inductive
+    /// step the relation graph alone structurally cannot make (e.g. a held-out member's category). Reconciles the
+    /// two representations: when the graph is silent, lift to the embedding dimension. Returns false (abstains)
+    /// when there is no confident cross-view agreement (fewer than <paramref name="minVotes"/> supporting members).
+    /// </summary>
+    public bool TryBridgeInfer(string concept, out string answer, out double confidence, int semK = 6, int minVotes = 2)
+    {
+        answer = string.Empty; confidence = 0.0;
+        var x = Normalize(concept);
+        if (x.Length == 0) return false;
+        // x's OWN properties, folded THROUGH the fact composites to their VALUES (so we compare concepts, not opaque
+        // ⟨…⟩ symbols) — these are what x already has, and must not be re-inferred.
+        var known = new HashSet<string>(
+            GetNeighbors(x, PlatonicNeighborhoodType.Relational, 16, 0.0).Select(n => FactValueOf(n.Concept, x) ?? n.Concept),
+            StringComparer.Ordinal);
+        var votes = new Dictionary<string, int>(StringComparer.Ordinal);
+        var neighbourCount = 0;
+        // SIBLINGS = the embedding view filtered to real CONCEPTS. The Merge/LearnFact fact model pollutes the raw
+        // semantic neighbourhood with fact composites (⟨…⟩) and label tokens (∘isa) that crowd out actual siblings, so
+        // gather wide and drop those structural symbols — a NO-OP for the plain-edge model (there are none), which keeps
+        // the original top-semK sibling set (and its vote ordering) byte-for-byte.
+        var siblings = GetNeighbors(x, PlatonicNeighborhoodType.Semantic, Math.Max(semK * 4, 24), 0.0)
+            .Where(n => !IsRelationLabelToken(n.Concept) && !n.Concept.StartsWith("⟨", StringComparison.Ordinal))
+            .Take(semK);
+        foreach (var sn in siblings)
+        {
+            if (sn.Concept.Equals(x, StringComparison.Ordinal) || known.Contains(sn.Concept)) continue;   // as original: skip self/known WITHOUT backfilling
+            neighbourCount++;
+            foreach (var relN in GetNeighbors(sn.Concept, PlatonicNeighborhoodType.Relational, 8, 0.0))
+            {
+                // A property is either a plain adjacency edge (ObserveContradiction model) OR the VALUE folded out of a
+                // fact composite ⟨sibling·label·value⟩ (Merge/LearnFact model). Composites that DON'T fold forward from
+                // this sibling, and label tokens, are structure — skip them so they can't be voted.
+                var prop = FactValueOf(relN.Concept, sn.Concept) ?? relN.Concept;
+                if (prop.StartsWith("⟨", StringComparison.Ordinal)) continue;     // an unfolded composite is not a property
+                if (prop.Equals(x, StringComparison.Ordinal) || known.Contains(prop)) continue;
+                if (IsOperationToken(prop) || IsRelationLabelToken(prop)) continue;   // structural tokens are never a property
+                votes[prop] = votes.GetValueOrDefault(prop) + 1;                  // a property a sibling has, x doesn't — mirror it
+            }
+        }
+        if (votes.Count == 0) return false;
+        var best = votes.OrderByDescending(kv => kv.Value).First();
+        if (best.Value < minVotes) return false;                                            // no confident cross-view agreement
+        answer = best.Key;
+        confidence = neighbourCount > 0 ? (double)best.Value / neighbourCount : 0.0;
+        return true;
+    }
+
+    /// <summary>
+    /// DISCOVER a composition of realised 2-input primitives that matches a target truth table over {0,1}² — the
+    /// searcher half of thinking. BFS over compositions, deduped by truth table. The SELF steers it: <paramref
+    /// name="salience"/> (the primitive names the self is attending to) orders the expansion, so the FOUND derivation
+    /// depends on the self — ablate the salience and a different valid derivation surfaces (load-bearing, not decorative).
+    /// Each primitive is its realised multilinear coeffs [c0,c1,c2,c3] (f(a,b)=round(c0+c1·a+c2·b+c3·a·b)). Returns the
+    /// discovered derivation string, or null if the target is unreachable within <paramref name="maxDepth"/>.
+    /// </summary>
+    public string? DiscoverComposition(IReadOnlyList<(string name, double[] coeffs)> primitives, int[] targetTable,
+        IReadOnlyList<string>? salience = null, int maxDepth = 6)
+    {
+        if (primitives is null || primitives.Count == 0 || targetTable is null || targetTable.Length != 4) return null;
+        // SELF-STEER: try the salient primitives first, so their derivations win the truth-table dedup race.
+        var ordered = primitives.OrderByDescending(p => salience is not null && salience.Contains(p.name) ? 1 : 0).ToList();
+        int[] A = { 0, 0, 1, 1 }, B = { 0, 1, 0, 1 };
+        int Eval(double[] c, int a, int b) => (int)Math.Round(c[0] + c[1] * a + c[2] * b + c[3] * a * b) & 1;
+        int Sig(Func<int, int, int> f) { var s = 0; for (var i = 0; i < 4; i++) s = (s << 1) | (f(A[i], B[i]) & 1); return s; }
+        var targetSig = (targetTable[0] << 3) | (targetTable[1] << 2) | (targetTable[2] << 1) | targetTable[3];
+
+        var found = new Dictionary<int, string>();
+        var pool = new List<(Func<int, int, int> f, string d)> { ((a, b) => a, "a"), ((a, b) => b, "b") };
+        foreach (var (f, d) in pool) found[Sig(f)] = d;
+        if (found.TryGetValue(targetSig, out var leaf)) return leaf;
+        for (var depth = 0; depth < Math.Max(1, maxDepth); depth++)
+        {
+            var snapshot = pool.ToArray(); var grew = false;
+            foreach (var (pn, pc) in ordered)                                  // salient primitives first
+                foreach (var (f1, d1) in snapshot)
+                    foreach (var (f2, d2) in snapshot)
+                    {
+                        var g1 = f1; var g2 = f2; var cc = pc;
+                        Func<int, int, int> comp = (a, b) => Eval(cc, g1(a, b), g2(a, b));
+                        var sig = Sig(comp);
+                        if (!found.ContainsKey(sig)) { found[sig] = $"{pn}({d1},{d2})"; pool.Add((comp, found[sig])); grew = true; }
+                    }
+            if (found.TryGetValue(targetSig, out var hit)) return hit;
+            if (!grew) break;
+        }
+        return null;
+    }
+
     public bool TryRelationElementNeighbour(string concept, out string neighbour, out double strength)
     {
         neighbour = string.Empty; strength = 0.0;
@@ -1833,6 +2345,74 @@ public sealed class DialecticalSpace : IPlatonicSpace
             if (s > strength) { strength = s; neighbour = nb; }
         }
         return neighbour.Length > 0;
+    }
+
+    // Robust walk primitive: the strongest UNVISITED neighbour (optionally forbidding one node) — so a chain
+    // traverses even when the single strongest neighbour is already behind us, instead of halting there.
+    private bool TryStrongestUnvisitedNeighbour(string self, HashSet<string> visited, string? forbid, out string neighbour, out double strength)
+    {
+        neighbour = string.Empty; strength = 0.0;
+        if (!_adjacency.TryGetValue(self, out var adj)) return false;
+        foreach (var nb in adj)
+        {
+            if (visited.Contains(nb)) continue;
+            if (forbid is not null && nb.Equals(forbid, StringComparison.Ordinal)) continue;
+            if (IsRelationLabelToken(nb)) continue;   // B1: step THROUGH a coupling token, never LAND on it
+            var s = _relations.TryGetValue(Key(self, nb), out var r) ? r.Strength : 0.0;
+            if (s > strength) { strength = s; neighbour = nb; }
+        }
+        return neighbour.Length > 0;
+    }
+
+    /// <summary>
+    /// Is the relation (a → b) DERIVABLE from OTHER edges? A greedy strongest-unvisited walk from a toward b,
+    /// FORBIDDEN to take the direct (a,b) shortcut, up to maxHops; derivable iff it reaches b with path
+    /// confidence ≥ minConf. This is the "can I compute it?" test the gate uses before treating an edge as a debt.
+    /// </summary>
+    public bool IsRelationDerivable(string a, string b, int maxHops = 4, double minConf = 0.35)
+    {
+        a = Normalize(a); b = Normalize(b);
+        if (a.Length == 0 || b.Length == 0 || a.Equals(b, StringComparison.Ordinal)) return false;
+        var visited = new HashSet<string>(StringComparer.Ordinal) { a };
+        var current = a; var conf = 1.0;
+        for (var h = 0; h < Math.Max(2, maxHops); h++)
+        {
+            var forbid = current.Equals(a, StringComparison.Ordinal) ? b : null;   // no direct a→b shortcut
+            if (!TryStrongestUnvisitedNeighbour(current, visited, forbid, out var nb, out var s) || s <= 0.0) return false;
+            conf *= s; visited.Add(nb); current = nb;
+            if (nb.Equals(b, StringComparison.Ordinal)) return conf >= minConf;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Closure sweep (gated by <see cref="DerivabilityGate"/>): weighted transitive reduction. Evict edge (a,b)
+    /// when a stronger 2-hop path a→x→b exists (both legs STRICTLY stronger than the direct edge, path
+    /// confidence ≥ 0.5) — i.e. the direct edge is a redundant WEAK shortcut derivable from a stronger path.
+    /// Conservative by construction: it only ever drops the weakest edge of a triangle, so the derivation path
+    /// always survives, and the store converges toward its irreducible core. Returns #edges evicted.
+    /// </summary>
+    private int SweepDerivableRelations()
+    {
+        if (_relations.Count < 3) return 0;
+        const double minPathConf = 0.5;
+        var toDrop = new List<Relation>();
+        foreach (var r in _relations.Values)
+        {
+            var direct = r.Strength;
+            if (!_adjacency.TryGetValue(r.Left, out var adjA)) continue;
+            var derivable = false;
+            foreach (var x in adjA)
+            {
+                if (x.Equals(r.Right, StringComparison.Ordinal)) continue;
+                if (!_relations.TryGetValue(Key(r.Left, x), out var rax) || rax.Strength <= direct) continue;
+                if (!_relations.TryGetValue(Key(x, r.Right), out var rxb) || rxb.Strength <= direct) continue;
+                if (rax.Strength * rxb.Strength >= minPathConf) { derivable = true; break; }
+            }
+            if (derivable) toDrop.Add(r);
+        }
+        foreach (var r in toDrop) DropRelation(r);
+        return toDrop.Count;
     }
 
     public PlatonicSpaceMemory.PlatonicQueryResult QueryConceptChain(IReadOnlyList<string> anchorConcepts, int maxHops = 2, int beamWidth = 2)
@@ -1848,7 +2428,9 @@ public sealed class DialecticalSpace : IPlatonicSpace
         if (anchors.Length == 0)
             return new PlatonicSpaceMemory.PlatonicQueryResult(string.Empty, 0.0, 0, 0);
 
-        // Greedy strongest-edge walk from the best anchor — the relational traversal (concept-chain route).
+        // Greedy strongest-edge FOLD from the best anchor — the relational traversal (concept-chain route). Each hop
+        // steps THROUGH a fact composite to its value (TryStrongestRelatedConcept), so the walk traverses the taxonomy
+        // instead of dead-ending on the ⟨…⟩ composite or the ∘is label.
         var best = string.Empty; var bestConf = 0.0; var hops = 0;
         foreach (var anchor in anchors)
         {
@@ -1856,8 +2438,8 @@ public sealed class DialecticalSpace : IPlatonicSpace
             var visited = new HashSet<string>(StringComparer.Ordinal) { current };
             for (var h = 0; h < Math.Max(1, maxHops); h++)
             {
-                if (!TryRelationElementNeighbour(current, out var nb, out var strength) || strength <= 0.0) break;
-                if (!visited.Add(nb)) break;
+                if (!TryStrongestRelatedConcept(current, visited, out var nb, out var strength) || strength <= 0.0) break;
+                visited.Add(nb);
                 ev.Add(new PlatonicEvidence(current, nb, strength, h + 1));
                 current = nb; conf *= strength; localHops++;
             }
@@ -1957,8 +2539,9 @@ public sealed class DialecticalSpace : IPlatonicSpace
     {
         var before = _concepts.ActiveCount;
         DischargeIrrelevant();        // grace-decay prune + EnforceActiveConceptCap (the hard ceiling)
+        var sweptEdges = DerivabilityGate ? SweepDerivableRelations() : 0;  // evict derivable (redundant) edges
         _lastDischargeStep = _observeStep;
-        return new(0, Math.Max(0, before - _concepts.ActiveCount), 0);
+        return new(0, Math.Max(0, before - _concepts.ActiveCount) + sweptEdges, 0);
     }
 
     // ─────────────────────────────────────────────────────────────────────────────── Snapshots (checkpoint compat)

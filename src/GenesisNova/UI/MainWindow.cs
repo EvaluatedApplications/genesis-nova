@@ -45,6 +45,8 @@ public class MainWindow : Form
     private volatile bool _inspectReading;
     private string[]? _inspectGlue, _inspectContent; // probe words pulled from the LIVE foundation vocabulary (so the table shows trained words)
     private bool _replTraceEnabled;
+    private string _lastReplPrompt = string.Empty; // the last user message — the cue a ">reply" teach or an emoji reaction targets
+    private string _pendingTeachCue = string.Empty; // set when the model ABSTAINED and asked "what should I say?" — your NEXT plain message becomes the taught reply for it
     private PlatonicActivationView? _latestActivation;
     private int _activeTrainingOperations;
     private readonly SemaphoreSlim _replCommandGate = new(1, 1);
@@ -204,34 +206,44 @@ public class MainWindow : Form
 
         // CURRICULA — FLAT + standardized. Every trainable task is a PEER checkbox: no tiers, no nesting, no groups.
         // Read TOP-TO-BOTTOM = the order to train — PREREQUISITE (prebake) → FUNDAMENTALS → GYM skills → applied.
-        // Only the PREBAKE is auto-checked: it's the prerequisite that warms the learned function-word signal the
-        // Merge parse / fact memory / retrieval all read (see [[nova-merge-substrate-plan]]). Tick more as each is ready.
-        flow.Controls.Add(new Label { Text = "Curricula — run top → bottom (only the prebake is checked; train it first):", AutoSize = true, Margin = new Padding(0, 18, 0, 4), Font = new Font("Segoe UI", 10, FontStyle.Bold) });
+        // DEFAULT = REASONING-FOCUSED: only the navigator REASONING trainers (nav-reasoning grows an is-a taxonomy +
+        // level cues, and Train-Navigator trains the walk) start checked. Everything we already hit ~100% on (single-op
+        // arithmetic rides the exact homomorphism) and the retrieval/foundation tasks that don't advance reasoning
+        // (Synonym, Category, Number-word, Prebake, Corpus/token-prediction) start UNCHECKED — tick them deliberately if
+        // you want them. Goal: spend the training budget on the UNSOLVED thing (relational reasoning), not the solved ones.
+        flow.Controls.Add(new Label { Text = "Curricula — run top → bottom (default: only the navigator REASONING trainers are checked):", AutoSize = true, Margin = new Padding(0, 18, 0, 4), Font = new Font("Segoe UI", 10, FontStyle.Bold) });
 
-        // Uniform peer checkbox — same indent for every task. The `startChecked` ones are the PRODUCTION hot path that runs
-        // by default (run order is set by BootstrapRank below, NOT by this flag): the prebake prerequisite + nav-reasoning
-        // (so the navigator trains on a taxonomy and its HELD-OUT curve populates without the user ticking it). Corpus
-        // prediction (masked-cloze base-model objective) is OPT-IN — its production learn path is unexercised, so the user
-        // enables it deliberately and watches its first run, rather than mixing an untested objective into cycle 1.
+        // Uniform peer checkbox — same indent for every task. The `startChecked` ones are the default hot path (run order
+        // is set by BootstrapRank below, NOT by this flag). Prebake now starts UNCHECKED: it warms the learned function-word
+        // signal the Merge parse / fact memory / retrieval read, but that also builds from nav-reasoning + self-discriminated
+        // ingestion over time; tick it if cold retrieval matters. Corpus prediction (masked-cloze) stays OPT-IN.
         static CheckBox Cur(string name, string text, bool startChecked = false) =>
             new() { Name = name, Text = text, Checked = startChecked, AutoSize = true, Margin = new Padding(20, 1, 0, 1) };
 
-        flow.Controls.Add(Cur("CurPrebakeLanguage", "Prebake — warm function-word recognition from BOTH a real text corpus (Wikipedia) + synthetic L1", startChecked: true));
+        flow.Controls.Add(Cur("CurPrebakeLanguage", "Prebake — warm function-word recognition from BOTH a real text corpus (Wikipedia) + synthetic L1", startChecked: false));
         flow.Controls.Add(Cur("CurCorpusPrediction", "Corpus prediction (masked cloze) — self-supervised: predict a held-out CONTENT word from context; corpus BUILDS knowledge into the substrate", startChecked: false));
         flow.Controls.Add(Cur("CurOpCues", "Op-cue words — sum / difference / product / quotient → operator"));
         flow.Controls.Add(Cur("CurNumberWords", "Number words — digit ↔ word lexicon"));
-        flow.Controls.Add(Cur("CurNavReasoning", "Nav-reasoning — grow an is-a taxonomy + level cues; trains the navigator's walk (HELD-OUT curve in [nav-heldout])", startChecked: true));
+        flow.Controls.Add(Cur("CurNavReasoning", "Navigator DATA — grow the is-a taxonomy + level cues the walker learns from (HELD-OUT curve in [nav-heldout])", startChecked: true));
         foreach (var skill in Enum.GetValues<GenesisNova.Train.GymSkill>())
+        {
+            // NumberWord is covered by the dedicated, more-comprehensive NumberWordCurriculum (CurNumberWords above):
+            // clean BOTH-direction frames, scales to 999,999, and it FIXES the gym skill's cruft defect (the "quick one,"
+            // lead-in injects the word "one", breaking word→digit). Skip the redundant gym-skill checkbox — keep the better one.
+            if (skill == GenesisNova.Train.GymSkill.NumberWord) continue;
             flow.Controls.Add(Cur("GymSkill_" + skill, "Gym — " + GymSkillLabel(skill)));
+        }
         flow.Controls.Add(Cur("CurMemCode", "Memory + Code index"));
         flow.Controls.Add(Cur("CurCreators", "Creators — skill ladder"));
         flow.Controls.Add(Cur("CurPersonality", "Personality — rude chatbot (seeded reply chunks)"));
+        flow.Controls.Add(Cur("CurConversationReplay", "Conversation replay — replay your REPL chat (positively-reacted, ≥2-word replies) as gym training"));
 
         flow.Controls.Add(new Label { Text = "Scheduler:", AutoSize = true, Margin = new Padding(0, 10, 0, 0), ForeColor = Color.DimGray });
         flow.Controls.Add(new CheckBox { Name = "CurFocused", Text = "Focused + rehearsal (unticked = all tasks every cycle)", Checked = true, AutoSize = true, Margin = new Padding(20, 0, 0, 0) });
         // The platonic NAVIGATOR (query-conditioned walker) trains a LIGHT step each gym cycle on the live space, so it
         // accumulates overnight alongside the model. Default ON so an unattended run trains it; untick to leave it frozen.
-        flow.Controls.Add(new CheckBox { Name = "CurTrainNavigator", Text = "Train Navigator — the platonic walker learns the live space each cycle (accumulates overnight)", Checked = true, AutoSize = true, Margin = new Padding(20, 0, 0, 0) });
+        // This is the POLICY (the walker net); CurNavReasoning above is the DATA it learns from — complementary, not a dup.
+        flow.Controls.Add(new CheckBox { Name = "CurTrainNavigator", Text = "Navigator POLICY — the walker net learns the live space each cycle (accumulates overnight)", Checked = true, AutoSize = true, Margin = new Padding(20, 0, 0, 0) });
         flow.Controls.Add(new Label { Text = "Memory index file (MEMORY.md):", AutoSize = true, Margin = new Padding(0, 8, 0, 2) });
         flow.Controls.Add(new TextBox { Name = "MemPath", Width = 270, Text = DefaultMemoryIndexPath() });
         flow.Controls.Add(new Label { Text = "Code root directory:", AutoSize = true, Margin = new Padding(0, 6, 0, 2) });
@@ -360,6 +372,23 @@ public class MainWindow : Form
         var executeBtn = new Button { Text = "Send", Width = 100, Height = 32 };
         executeBtn.Click += (s, e) => ExecuteReplCommand();
         buttonPanel.Controls.Add(executeBtn);
+
+        // REACTION PALETTE — click to grade the LAST response (the emoji feedback = inline learning). The reward drives
+        // ReinforceSelf + reinforce/disrupt on the last (context, response) and is logged to the model-folder conversation.
+        // Type ">your reply" in the input to TEACH the reply to your last message (so a blank model learns to speak).
+        buttonPanel.Controls.Add(new Label { Text = "React:", AutoSize = true, Margin = new Padding(10, 8, 2, 0) });
+        foreach (var (glyph, reward) in new (string, double)[] { ("❤", 1.5), ("👍", 1.0), ("😐", 0.0), ("😕", -0.5), ("👎", -1.0) })
+        {
+            var rw = reward;
+            var glyphText = glyph;
+            var reactBtn = new Button { Text = glyph, Width = 44, Height = 32, Margin = new Padding(2, 0, 0, 0) };
+            reactBtn.Click += (s, e) => Task.Run(() =>
+            {
+                try { _runtime.ReactToLast(rw); AppendToRepl($"[reacted {glyphText} {rw:+0.0;-0.0;0}]\n> ", Color.Gold); }
+                catch (Exception ex) { AppendToRepl($"[react error: {ex.Message}]\n> ", Color.Red); }
+            });
+            buttonPanel.Controls.Add(reactBtn);
+        }
 
         layout.Controls.Add(buttonPanel, 0, 2);
         _replVisualizerSplit.Panel1.Controls.Add(layout);
@@ -509,6 +538,35 @@ public class MainWindow : Form
             return $"Unknown command: {trimmed}";
         }
 
+        // ">your reply" — TEACH the model to reply THIS to your LAST message (the feedback-training teach verb). Ask it
+        // again afterward and it speaks the taught reply (via field-respond). This is how you make a blank model talk.
+        if (trimmed.StartsWith(">", StringComparison.Ordinal))
+        {
+            var reply = trimmed[1..].Trim();
+            if (reply.Length == 0)
+                return "Usage: >your reply here   (teach the model to reply THIS to your last message)";
+            if (_lastReplPrompt.Length == 0)
+                return "Ask something first, then use >reply to teach the reply to it.";
+            if (!ConversationReplayCurriculum.IsNaturalLanguageResponse(reply))
+                return "That reply is too short to speak — give a full phrase (2+ words).";
+            await Task.Run(() => _runtime.TeachReply(_lastReplPrompt, reply));
+            return $"taught: \"{_lastReplPrompt}\" → \"{reply}\"   (ask it again to hear it)";
+        }
+
+        // The model asked "what should I say?" last turn (it had nothing) — so THIS message is the reply to learn for that
+        // cue. Teach it inline, no ">" needed: its own not-knowing solicited the lesson, and you just gave it. Bootstrap.
+        if (_pendingTeachCue.Length > 0)
+        {
+            // Don't accept a reply I can't SPEAK: a taught reply must be natural language (>= the minimum word count).
+            // Too short → keep the pending cue set and ASK AGAIN, so your next message is still taken as the reply.
+            if (!ConversationReplayCurriculum.IsNaturalLanguageResponse(trimmed))
+                return "…that's too short to say back — give me a full phrase (2+ words). What should I say?";
+            var cue = _pendingTeachCue; _pendingTeachCue = string.Empty;
+            await Task.Run(() => _runtime.TeachReply(cue, trimmed));
+            _lastReplPrompt = cue;
+            return $"got it — I'll say \"{trimmed}\" when you say \"{cue}\".  (ask again to hear it)";
+        }
+
         var modelInput = trimmed;
         try
         {
@@ -529,8 +587,23 @@ public class MainWindow : Form
                 await Task.Delay(120);
             }
             var output = predict.Result?.Output?.Trim();
-            if (string.IsNullOrWhiteSpace(output))
-                output = "(no response)";
+            var decisionPath = predict.Result?.DecisionPath ?? string.Empty;
+            var abstained = string.IsNullOrWhiteSpace(output) || decisionPath == "field-abstain";
+
+            // Remember this turn as the reaction/teach target + append it to the durable conversation log (model folder).
+            _lastReplPrompt = trimmed;
+
+            // ABSTAIN → ASK, never go silent: when it has nothing to say, it SOLICITS the lesson ("what should I say?"),
+            // and your next plain message becomes the taught reply for THIS prompt (self-organizing bootstrap — the
+            // model's own not-knowing generates the training data, exactly at the gap).
+            if (abstained)
+            {
+                _pendingTeachCue = trimmed;
+                try { _runtime.RecordConversationTurn(trimmed, "…what should I say?", decisionPath); } catch { }
+                return "…what should I say?";
+            }
+
+            try { _runtime.RecordConversationTurn(trimmed, output, decisionPath); } catch { }
 
             if (predict.Result is not null)
                 UpdateVisualizer(trimmed, predict.Result);
@@ -549,10 +622,11 @@ public class MainWindow : Form
     private string GetReplHelp()
     {
         return @"Available commands:
-  <plain text>               - Query model directly (no context)
-  /reset                     - No-op (context disabled)
-  /wrong                     - No-op (context disabled)
-  /context                   - Shows context disabled status
+  <plain text>               - Talk to the model. If it has nothing to say it asks
+                               ""…what should I say?"" — your NEXT message teaches the reply.
+  >your reply here           - Teach the model to say THIS to your last message (must be 2+ words)
+  (reaction buttons ❤ 👍 😐 😕 👎 grade the last reply — the feedback reinforces the self)
+  (every turn + reaction logs to conversation.jsonl in the model folder; replayable in the gym)
   /stats                     - Show model stats
   /trace [on|off]            - Toggle stage-by-stage inference trace
   /nav <concept> [cue]       - Walk the platonic navigator from <concept> (cue=genus|domain|root, default genus)
@@ -1565,6 +1639,19 @@ public class MainWindow : Form
             children.Add(new NavReasoningCurriculum(_runtime, trainPerCycle: _gymTrainPerCycle));
             AppendOutput("[train] nav-reasoning: is-a taxonomy + learned level cues; navigator HELD-OUT curve in [nav-heldout] (ensure 'Train Navigator' is ticked)");
         }
+        if (GetControl<CheckBox>("CurConversationReplay")?.Checked ?? false)
+        {
+            // Replay the REPL chat as gym training: positively-reacted, >=2-word (speakable) cue→reply pairs from the
+            // model-folder conversation.jsonl. Empty/missing log → 0 pairs → skip cleanly (never add an empty curriculum).
+            // Guarded: loading the log (state-dir resolve / IO / parse) must NEVER crash gym-start — degrade to "no data".
+            try
+            {
+                var replay = new ConversationReplayCurriculum(_runtime.ConversationLog);
+                if (replay.PairCount > 0) { children.Add(replay); AppendOutput($"[train] conversation-replay: {replay.PairCount} positively-reacted reply pairs from your REPL chat"); }
+                else AppendOutput("[train] conversation-replay: no positively-reacted (>=2-word) turns yet — talk + react in the REPL first");
+            }
+            catch (Exception ex) { AppendOutput($"[train] conversation-replay: skipped (no usable log yet: {ex.Message})"); }
+        }
         var personalityOn = GetControl<CheckBox>("CurPersonality")?.Checked ?? false;
         PersonalityCurriculum? persona = null;
         if (personalityOn)
@@ -2270,9 +2357,13 @@ public class MainWindow : Form
             ("Creators",        "CurCreators",        "Creators — skill ladder"),
             ("MemCode",         "CurMemCode",         "Memory + Code index"),
             ("Personality",     "CurPersonality",     "Personality — rude chatbot (seeded reply chunks)"),
+            ("ConversationReplay","CurConversationReplay","Conversation replay — REPL chat (positively-reacted, >=2-word) as gym training"),
         };
         foreach (var skill in Enum.GetValues<GenesisNova.Train.GymSkill>())
+        {
+            if (skill == GenesisNova.Train.GymSkill.NumberWord) continue; // superseded by NumberWordCurriculum (CurNumberWords)
             list.Add(("Gym" + skill, "GymSkill_" + skill, "Gym — " + GymSkillLabel(skill)));
+        }
         return list;
     }
 

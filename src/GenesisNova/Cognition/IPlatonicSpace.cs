@@ -75,6 +75,8 @@ public interface IPlatonicSpace
     bool GenerativeAtoms { get => false; set { } } // token-as-atom + decompose/recognise (default off; only DialecticalSpace implements)
     bool BatchedCloudGpu { get => false; set { } } // deferred batched-GPU cloud recompute (default off; only DialecticalSpace implements)
     bool RecoverFromVoid { get => false; set { } }  // decode-from-the-void recovery: re-materialise an evicted/latent concept from its coordinate (default off; only DialecticalSpace implements)
+    bool DerivabilityGate { get => false; set { } }  // evict relation-edges derivable from a stronger path (transitive reduction) so the store keeps only the irreducible core (default off; only DialecticalSpace implements)
+    bool SelfDiscriminatedIngestion { get => false; set { } }  // attenuate all-pairs edge formation by endpoint generality — a hub/glue pair the model already predicts writes weakly (default off; only DialecticalSpace implements)
     int NodeCount { get; }
     int RelationCount { get; }
     int ArchivedNodeCount { get; }

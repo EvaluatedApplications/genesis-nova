@@ -2,13 +2,14 @@
 
 *Status as of 2026-06-30. Empirical, not aspirational — every claim below is backed by a measurement from this codebase.*
 
-> **Update (Phase 1 started):** the "statistics on the GPU" rebalance is no longer purely proposed. The cloud
+> **Update (Phase 1 landed):** the "statistics on the GPU" rebalance is no longer purely proposed. The cloud
 > recompute — the substrate's hottest scalar loop — now has a batched GPU path (`Cognition/Platonic/GpuCloudBatcher.cs`,
 > driven by `DialecticalSpace.BatchedCloudGpu`). It defers + dedups dirty clouds and recomputes them in one
-> `index_select`/`index_add_` op on CUDA (Cloud = A·T), validated cosine-identical to the scalar definition. It is
-> **gated `default-off`** (`GenesisNovaConfig.BatchedCloudGpu = false`, NOT yet in `WithProductionMechanisms`) and not
-> yet wired into the gym loop, so the live default path below is still the scalar CPU loop. Sections 5–7 describe that
-> default; the GPU rows in §6 are now partly built rather than hypothetical.
+> `index_select`/`index_add_` op on CUDA (Cloud = A·T), validated cosine-identical to the scalar definition, and is
+> **fully wired** (defer + flush on every read via `EnsureCloudsFresh`). The field **default is still `false`**
+> (`GenesisNovaConfig.BatchedCloudGpu = false`, byte-identical scalar path), but `WithProductionMechanisms` now turns it
+> **ON**, so the shipped app/RaceBench path uses the GPU cloud recompute. Sections 5–7 still describe the *scalar CPU*
+> default; in production the cloud row of §6 is built and live, while kNN and relaxation remain scalar CPU.
 
 ---
 
@@ -51,11 +52,12 @@ classifier deciding routes. The shipped path is:
 ```
 
 **The shipped cognition path:** with `ConsciousField` on, `GenesisInferenceEngine.GenerateFromField` runs a substrate
-route ladder that abstains / falls through per step (induction → predicate → arithmetic → number-word → field-tick →
-learned-function → meaning-ticks/analogy/compose → talk → learn → recall → **relaxation (`TryFieldRelax`)** → abstain),
-each answer tagged with a `DecisionPath`. Reasoning is the field **settling its own surprise** (the founding claim of
-`PLATONIC_MIND.md` §3), with honest abstention when nothing settles — and, in the ambiguous branch, a trained
-**navigator walk** (`PLATONIC_NAVIGATOR.md`) before the one-shot relax. The GRU is demoted to a **thin recogniser**
+route ladder that abstains / falls through per step (induction → function-induction (gates) → predicate → arithmetic
+→ number-word → field-tick → learned-function → meaning-tick/analogy/compose → talk → learn → recall → bridge →
+directional-derive → geometric-derive → **relaxation (`TryFieldRelax`)** → talk-generalize → chunk-traversal →
+relational-fold → abstain), each answer tagged with a `DecisionPath`. Reasoning is the field **settling its own
+surprise** (the founding claim of `PLATONIC_MIND.md` §3), with honest abstention when nothing settles — and, in the
+ambiguous branch of `TryFieldRelax`, a trained **navigator walk** (`PLATONIC_NAVIGATOR.md`) before the one-shot relax. The GRU is demoted to a **thin recogniser**
 (op-cue, role, abstain signals), not the director.
 
 **The legacy path (bypassed in production):** the GRU route/plan/op **classifier** — the "NN recognises routes/ops and
@@ -125,7 +127,7 @@ Move the **hard, doesn't-structure-well, distributional** work off the CPU graph
 
 | Today (CPU substrate, overfit) | Proposed (GPU/NN, batched) |
 |---|---|
-| `RecomputeCloud` per observation | **Clouds as sparse matvec** — periodic batched recompute on GPU — **BUILT** (`GpuCloudBatcher`, gated `BatchedCloudGpu`, default-off, gym-wiring pending) |
+| `RecomputeCloud` per observation | **Clouds as sparse matvec** — periodic batched recompute on GPU — **BUILT + LIVE IN PRODUCTION** (`GpuCloudBatcher`, gated `BatchedCloudGpu`, field-default-off but ON in `WithProductionMechanisms`, fully wired via `EnsureCloudsFresh`) |
 | kNN nearest-concept scan | **kNN as matmul** over the embedding matrix |
 | Function-likeness via graph thresholds | **Distributional semantics as a learned GPU embedding / factorization** — the NN *learns* the soft function/content gradient instead of us thresholding a graph |
 | Field relaxation, one step at a time | **Relaxation as attention** — batched, parallel settling |
@@ -143,7 +145,7 @@ An LLM is, crudely, **one giant distributional engine** — everything (syntax, 
 
 Our differentiated bet: **a hybrid that is exact where structure exists and fluent where it doesn't.**
 
-**Phase 1 — Rebalance (now, in progress).** Fix the 90/10 split. Move clouds/kNN/relaxation/distributional-semantics to batched GPU. Saturate the tensor engine. This alone unblocks scale — the substrate stops being the bottleneck. *Status:* the cloud-recompute piece is built (`GpuCloudBatcher`, defer+dedup+`index_add_` on CUDA, validated cosine-identical), but gated `default-off` and not yet wired into the gym/production loop; kNN and relaxation are still scalar CPU.
+**Phase 1 — Rebalance (now, in progress).** Fix the 90/10 split. Move clouds/kNN/relaxation/distributional-semantics to batched GPU. Saturate the tensor engine. This alone unblocks scale — the substrate stops being the bottleneck. *Status:* the cloud-recompute piece is built and **live in production** (`GpuCloudBatcher`, defer+dedup+`index_add_` on CUDA, validated cosine-identical, fully wired, ON in `WithProductionMechanisms` though field-default-off); kNN and relaxation are still scalar CPU.
 
 **Phase 2 — Let the NN own the statistics.** Stop hand-tuning graph metrics for distributional properties (function words, soft routing, ambiguity). The NN learns them from data on the GPU. The substrate keeps only exact structure. (The PMI failure is the mandate for this.)
 

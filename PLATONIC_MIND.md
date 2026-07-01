@@ -123,8 +123,10 @@ behaviours:
 - a **known** query relaxes quickly to a definite attractor (recall);
 - an **unknown** query **never settles** (stays high free-energy); the field *abstains* instead of inventing.
 
-Relaxation is the primary retrieval route in inference (`platonic-reason`) with honest abstention
-(`platonic-abstain`) when nothing settles. See `Infer/GenesisInferenceEngine` and `DialecticalSpace.Reason`. The
+Relaxation is the primary retrieval route in inference (`field-relax`, via `TryFieldRelax`) with honest abstention
+(`field-abstain`) when nothing settles — this is the conscious-field path (`ConsciousField`, on in
+`WithProductionMechanisms`), which supersedes the legacy route ladder (`platonic-reason`/`platonic-abstain`). See
+`Infer/GenesisInferenceEngine.Field.cs` and `DialecticalSpace.Reason`. The
 relaxation signal is validated; the "self-model face" and "law of the whole field" remain aspirational.
 
 > **Reasoning as navigation (`PLATONIC_NAVIGATOR.md`) — now shipped and default-on in production.** "Reasoning is

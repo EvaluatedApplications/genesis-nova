@@ -31,6 +31,11 @@ public sealed partial class GenesisEvalAppRuntime : ILearningRuntime
     // rebuilds the inference engine (TalkEnabled defaults off), so it must be RE-APPLIED after every Replace, else an
     // autosave mid-gym silently switches the persona off on the next predict. See SetConversationalMode / Replace.
     private bool _conversationalMode;
+    // REPL feedback-training (talk → react → learn inline). The last (context, response) is the target of a reaction; the
+    // conversation is appended to a durable JSONL log in the model folder so the chat becomes replayable training data.
+    private string _lastContext = string.Empty;
+    private string _lastResponse = string.Empty;
+    private ConversationLog? _conversationLog;
     // Count of checkpoint RELOADS (state-Replace). A reload mid-training is the "weird on restart" hazard; surfaced so
     // diagnostics/tests can assert the gym's OWN autosave does NOT trigger a self-reload on the next predict.
     private int _reloadCount;
@@ -231,6 +236,63 @@ public sealed partial class GenesisEvalAppRuntime : ILearningRuntime
             }
             return 0;
         });
+
+    /// <summary>The durable conversation log in the MODEL folder (next to the checkpoint) — the REPL chat as training data.</summary>
+    public ConversationLog ConversationLog =>
+        _conversationLog ??= new ConversationLog(GenesisNova.Persistence.GenesisLocalStateStore.ResolveStateDirectory(_runtimeConfig));
+
+    /// <summary>TEACH a reply to a cue, INLINE — takes effect on the NEXT matching query (no gym cycle). Seeds the same
+    /// cue→reply CHUNK relation <c>TryFieldRespondDirect</c> retrieves, turns the talk route on, and leans the SELF toward
+    /// the reply (the mind becomes what it is taught to say). NOTE: a reply must be a PHRASE (multi-word) to be spoken —
+    /// the talk route only utters multi-word chunks, never a stray single word. This is the "make a blank model speak" verb.</summary>
+    public void TeachReply(string cue, string reply)
+        => WithModelGate(() =>
+        {
+            cue = (cue ?? string.Empty).Trim();
+            reply = (reply ?? string.Empty).Trim();
+            if (cue.Length == 0 || reply.Length == 0) return 0;
+            // ALL RESPONSES NATURAL LANGUAGE: the talk route only utters MULTI-WORD chunks, so a single-word reply is
+            // unspeakable — don't seed a teach the model can never produce. Same ≥2-word rule the example creators enforce.
+            if (!GenesisNova.Train.ConversationReplayCurriculum.IsNaturalLanguageResponse(reply)) return 0;
+            _conversationalMode = true;
+            _state.Inference.TalkEnabled = true;                                   // the talk route must be on to speak it
+            for (var i = 0; i < 8; i++)
+                _state.Memory.FineEditFromExample(new[] { cue }, new[] { reply }, isNegativeExample: false); // cue→reply chunk
+            _state.Inference.PerceiveSelf(reply);                                  // self leans toward the taught voice (inits self if blank)
+            return 0;
+        });
+
+    /// <summary>REACT to the last (context, response) with a reward — the emoji feedback. +ve reinforces the self toward the
+    /// response and strengthens the cue→response edge; -ve disrupts the wrong answer and pushes the self away. Records the
+    /// reaction onto the last turn in the conversation log. No-op if nothing has been said yet.</summary>
+    public void ReactToLast(double reward, DateTime? at = null)
+        => WithModelGate(() =>
+        {
+            if (_lastContext.Length == 0 || _lastResponse.Length == 0) return 0;
+            if (reward > 0)
+            {
+                _state.Inference.ReinforceSelf(_lastResponse, reward);
+                _state.Memory.FineEditFromExample(new[] { _lastContext }, new[] { _lastResponse }, isNegativeExample: false);
+                _state.Inference.TrainRetrievalToward(_lastContext, new[] { _lastResponse });
+            }
+            else if (reward < 0)
+            {
+                _state.Inference.DisruptWrongAnswer(_lastContext, _lastResponse);
+                _state.Inference.ReinforceSelf(_lastResponse, reward);            // push the self AWAY from the bad answer
+            }
+            ConversationLog.AppendReactionToLast(reward, at ?? DateTime.UtcNow);
+            return 0;
+        });
+
+    /// <summary>Record a REPL turn: remember it as the reaction target and append it to the durable conversation log.
+    /// Called by the REPL after a user query resolves (NOT by gym probes — the log stays a record of real conversation).
+    /// Returns the turn's seq.</summary>
+    public int RecordConversationTurn(string user, string response, string decisionPath, DateTime? at = null)
+    {
+        _lastContext = (user ?? string.Empty).Trim();
+        _lastResponse = (response ?? string.Empty).Trim();
+        return ConversationLog.AppendTurn(_lastContext, _lastResponse, decisionPath ?? string.Empty, at ?? DateTime.UtcNow);
+    }
 
     /// <summary>CREDIT ASSIGNMENT on edges: reward the relation edges an answer USED when it was graded CORRECT,
     /// penalise them when WRONG (strengthen / weaken / — via the utility-based pruner — detach). Lets the gym's

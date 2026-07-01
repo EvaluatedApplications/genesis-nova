@@ -1668,7 +1668,12 @@ public sealed class GenesisTrainer
             {
                 if (IsNumericConcept(concepts[i]) && IsNumericConcept(concepts[i + 1]))
                     continue; // number↔number lives in the faces, not the relation graph
-                _platonicSpace.ObserveContradiction(concepts[i], concepts[i + 1], contradiction);
+                // Self-discriminated ingestion applies to THIS site too (the adjacent-pair path), via the shared helper:
+                // off / ∘-anchor → contradiction unchanged (byte-identical), else attenuated by endpoint generality.
+                var kAdj = _platonicSpace is GenesisNova.Cognition.Platonic.DialecticalSpace dds
+                    ? dds.DiscriminatedContradiction(concepts[i], concepts[i + 1], contradiction)
+                    : contradiction;
+                _platonicSpace.ObserveContradiction(concepts[i], concepts[i + 1], kAdj);
             }
             _platonicSpace.FineEditFromExample(concepts, concepts, isNegative);
             return;
@@ -1749,7 +1754,16 @@ public sealed class GenesisTrainer
         }
 
         foreach (var (cue, output) in couplings)
+        {
             _platonicSpace.ObserveContradiction(cue, output, contradiction);
+            // AUTO-TRAIN the relation-MAP from real ingestion — DEFAULT ON (cheap): AccrueRelationDirection now stores pairs
+            // and predicts via lazy weighted k-NN (O(n·d), NO matrix solve), so it no longer freezes the gym (the old
+            // kernel-ridge O(n^3) did). This gives DirectionalReasoning live, generalizing directions from real ingestion.
+            // The orbital-MUTATING TransE stays gated behind RelationDirectionTraining INSIDE AccrueRelationDirection.
+            // HONEST: without is-a TYPING this accrues MIXED-relation "assoc" couplings (is-a+synonym+category), not clean is-a.
+            if (!isNegative && _platonicSpace is GenesisNova.Cognition.Platonic.DialecticalSpace ddir)
+                ddir.AccrueRelationDirection(cue, output, "assoc");
+        }
 
         _platonicSpace.FineEditFromExample(inputConcepts, outputConcepts, isNegative);
     }

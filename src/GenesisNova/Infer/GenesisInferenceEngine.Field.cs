@@ -36,6 +36,7 @@ public sealed partial class GenesisInferenceEngine
         var toks = TokenizeField(request.Input);
 
         if (TryFieldInduction(toks, request, out var r) ||
+            TryFieldFunctionInduction(toks, request, out r) ||   // 2-input multilinear: realise any gate from its examples
             TryFieldPredicate(toks, request, out r) ||
             TryFieldArithmetic(toks, request, out r) ||
             TryFieldNumberWord(toks, request, out r) ||
@@ -47,9 +48,25 @@ public sealed partial class GenesisInferenceEngine
             (TalkEnabled && TryFieldRespondDirect(request, out r)) ||  // a known persona cue SPEAKS before grammar tries to learn it
             TryFieldLearn(toks, request, out r) ||
             TryFieldRecall(toks, request, out r) ||
+            // The bridge runs BEFORE relax: its gate (exclude the subject's KNOWN relations, require ≥2 embedding
+            // neighbours to agree on a property the subject LACKS) IS a held-out detector — for a known member it finds
+            // nothing new and abstains, so relax still retrieves; for a held-out member relax would otherwise land on a
+            // bare SIBLING (grape→cherry) one hop short of the category, so the mirror-fold must get first refusal.
+            (BridgeReasoning && TryFieldBridge(toks, request, out r)) ||  // held-out member → category via the embedding mirror-fold
+            // TRAINED-DIRECTION derivation gets first refusal among the reasoning rungs: it COMPOSES the trained relation
+            // direction (orbital(subject)+r → genus), the fold-faithful primitive that reaches ancestors the nearest/relax
+            // routes can't. Self-gated (abstains without a trained direction or a clear margin), so it can't misfire.
+            (DirectionalReasoning && TryFieldDirectionalDerive(toks, request, out r)) ||
+            // Latent-native derivation runs BEFORE relax: TryGeometricDerive is self-precision gated (generality-discounted
+            // nearest + margin floor → ABSTAINS in a glue/low-density region), so it can't misfire — it only answers when the
+            // geometry gives a clear content concept, otherwise falls through. Placed here so relax can't launder glue ('is')
+            // ahead of it; it reads the answer from the conserved latent trace, surviving element eviction the edge-walk can't.
+            (GeometricReasoning && TryFieldGeometricDerive(toks, request, out r)) ||
             TryFieldRelax(toks, request, out r) ||
-            (TalkEnabled && TryFieldRespondGeneralize(request, out r)))
-            return r;
+            (TalkEnabled && TryFieldRespondGeneralize(request, out r)) ||
+            (TalkEnabled && ChunkTraversalSpeech && TryFieldChunkTraversal(request, out r)) ||  // COMPOSE a reply by repeated-query chunk traversal
+            (RelationalFold && TryFieldChainFold(toks, request, out r)))  // a genuine ≥2-hop fact-edge chain (apple→fruit→food)
+            return SpeakAnswer(request, r);   // in talk mode, SPEAK the raw answer as a value-carrying phrase (else byte-identical)
 
         return FieldAbstain(); // high free-energy, no basin — speak nothing
     }
@@ -104,6 +121,62 @@ public sealed partial class GenesisInferenceEngine
         return pts.All(p => Math.Abs(slope * p.X + intercept - p.Y) < 1e-6);
     }
 
+    // ── 2-INPUT INDUCTION: the 1-input affine rule, lifted one dimension. A 2-input function's examples ("nand 1 1 is 0"
+    //    …) are fit by the MULTILINEAR form  f(a,b) = c0 + c1·a + c2·b + c3·(a·b)  — the unique composition of the
+    //    substrate's OWN +/× that can express ANY 2-input map over {0,1}. So NAND (1−a·b), AND (a·b), OR (a+b−a·b),
+    //    XOR (a+b−2a·b) all fall out of the SAME fit — the space REALISES the gate from evidence, no gate is coded.
+    //    The rule comes from the faces (as in TryFieldInduction), just with the cross term a·b; verify-on-all rejects a
+    //    non-multilinear mapping so it can't fire on noise. ────────────────────────────────────────────────────────────
+    private bool TryFieldFunctionInduction(IReadOnlyList<string> toks, GenerationRequest request, out GenerationResult result)
+    {
+        result = default!;
+        if (toks.Count < 5 || !toks.Contains("is")) return false;
+        var demos = new Dictionary<(double, double), double>();
+        string? name = null;
+        var lastDemoEnd = 0;
+        for (var j = 3; j < toks.Count; j++)
+        {
+            if (toks[j] != "is") continue;
+            if (!double.TryParse(toks[j - 2], NumberStyles.Float, CultureInfo.InvariantCulture, out var a)) continue;
+            if (!double.TryParse(toks[j - 1], NumberStyles.Float, CultureInfo.InvariantCulture, out var b)) continue;
+            if (j + 1 < toks.Count && double.TryParse(toks[j + 1], NumberStyles.Float, CultureInfo.InvariantCulture, out var o))
+            { demos[(a, b)] = o; name ??= toks[j - 3]; lastDemoEnd = j + 2; }   // NAME = the token before the two operands
+        }
+        if (name is null || demos.Count < 4) return false;
+        // Fit the multilinear coefficients from the four corners, then VERIFY every demo lies on the fit.
+        if (!demos.TryGetValue((0, 0), out var f00) || !demos.TryGetValue((0, 1), out var f01)
+            || !demos.TryGetValue((1, 0), out var f10) || !demos.TryGetValue((1, 1), out var f11)) return false;
+        double c0 = f00, c1 = f10 - f00, c2 = f01 - f00, c3 = f11 - f10 - f01 + f00;
+        foreach (var kv in demos)
+            if (Math.Abs(c0 + c1 * kv.Key.Item1 + c2 * kv.Key.Item2 + c3 * kv.Key.Item1 * kv.Key.Item2 - kv.Value) > 1e-6)
+                return false;   // not multilinear → not this rule (abstain, don't invent)
+
+        // THE QUERY is a PREFIX expression of the realised function: "NAME v v" where each v is a number OR another
+        // "NAME v v" — so "nand nand 1 1 nand 1 1" = AND(1,1), derived by CHAINING the one learned gate. Evaluate it
+        // recursively through the fitted composition. Flat "NAME v v" is the depth-0 case; nesting is THINKING.
+        var finalIs = toks.Count - 1;
+        while (finalIs >= 0 && toks[finalIs] != "is") finalIs--;
+        if (finalIs <= lastDemoEnd) return false;
+        var pos = lastDemoEnd;
+        var v = EvalCompose(toks, ref pos, finalIs, name!, c0, c1, c2, c3);
+        if (v is null || pos != finalIs) return false;   // the whole query must be a valid composition of the gate
+        return EmitField(FieldFormat(v.Value), "field-induce-2d", request, out result);
+    }
+
+    // Recursively evaluate a prefix composition of ONE realised 2-input function (the fitted multilinear). A value is a
+    // number, or NAME applied to two sub-values. This is the compositional cascade: apply the gate to results of the gate.
+    private static double? EvalCompose(IReadOnlyList<string> toks, ref int pos, int end, string name,
+        double c0, double c1, double c2, double c3)
+    {
+        if (pos >= end) return null;
+        if (double.TryParse(toks[pos], NumberStyles.Float, CultureInfo.InvariantCulture, out var num)) { pos++; return num; }
+        if (!toks[pos].Equals(name, StringComparison.OrdinalIgnoreCase)) return null;
+        pos++;
+        var a = EvalCompose(toks, ref pos, end, name, c0, c1, c2, c3); if (a is null) return null;
+        var b = EvalCompose(toks, ref pos, end, name, c0, c1, c2, c3); if (b is null) return null;
+        return c0 + c1 * a.Value + c2 * b.Value + c3 * a.Value * b.Value;
+    }
+
     // ── PREDICATE: two numeric operands + a comparison cue → compare-by-sign (greater/less/equal). ────────────────
     private bool TryFieldPredicate(IReadOnlyList<string> toks, GenerationRequest request, out GenerationResult result)
     {
@@ -143,7 +216,7 @@ public sealed partial class GenesisInferenceEngine
         foreach (var t in merged)
         {
             if (double.TryParse(t, NumberStyles.Float, CultureInfo.InvariantCulture, out var v)) operands.Add(v);
-            else if (TryOpToken(t, out var op)) infixOps.Add(op);
+            else if (ResolveInfixOp(t, out var op)) infixOps.Add(op);   // universal SYMBOL hardcoded, WORD learned (LearnedCuesOnly)
         }
         if (operands.Count < 2) return false;
 
@@ -185,7 +258,7 @@ public sealed partial class GenesisInferenceEngine
     private static List<string> TokenizeField(string? input)
     {
         var prepped = input ?? string.Empty;
-        foreach (var sym in new[] { "+", "-", "*", "/", ">", "<", "=" })
+        foreach (var sym in new[] { "+", "-", "*", "/", ">", "<", "=", "×", "÷" })   // universal math symbols incl. Unicode ×/÷ (compact "12×3")
             prepped = prepped.Replace(sym, $" {sym} ");
         // NON-SPACED SCRIPTS (#6): isolate each caseless letter (Unicode OtherLetter — CJK/kana/Hangul) so a CJK frame
         // segments into its morpheme tokens here too, matching the model tokenizer (else the field parse sees one token).
@@ -248,7 +321,7 @@ public sealed partial class GenesisInferenceEngine
         var merged = SignMerge(TokenizeField(input)); // sign-merged so "added to -7" reads operand -7, not +7
         // Skip examples with an EXPLICIT operator token ("sub 3 -2" tokenises as 3, -, 2 — the op is ambiguous between
         // a cue-fold and an infix expression, and learning from it taught the wrong op). Learn only clean cue examples.
-        if (merged.Any(t => TryOpToken(t, out _))) return;
+        if (merged.Any(ExplicitInfixOp)) return;   // under de-hardcoding, only SYMBOLS are "explicit" → worded ops stay learnable/healable
         var nums = merged.Where(t => double.TryParse(t, ns, inv, out _)).Select(t => double.Parse(t, ns, inv)).ToList();
         if (nums.Count != 2 || !double.TryParse(output.Trim(), ns, inv, out var answer)) return;
 
@@ -369,7 +442,7 @@ public sealed partial class GenesisInferenceEngine
         // EXPLICIT infix operator ("3 - 1", "plus") → the op came from the hardcoded TryOpToken path (EvalPrecedence),
         // not a learned cue. A hardcoded mapping cannot be "misselected by learning" and there is no cue→∘op edge to
         // disrupt — out of scope (mirrors LearnArithmeticCue, which likewise skips explicit-operator examples).
-        if (merged.Any(t => TryOpToken(t, out _))) return;
+        if (merged.Any(ExplicitInfixOp)) return;   // under de-hardcoding, only SYMBOLS are "explicit" → worded ops stay learnable/healable
         var nums = merged.Where(t => double.TryParse(t, ns, inv, out _)).Select(t => double.Parse(t, ns, inv)).ToList();
         if (nums.Count != 2) return;                                          // the clean binary cue-fold case
         if (!double.TryParse(allowed[0].Trim(), ns, inv, out var truth)) return; // a non-number truth ⇒ not an op misselect
@@ -939,6 +1012,113 @@ public sealed partial class GenesisInferenceEngine
         return EmitField(voice, "field-respond-self", request, out result);
     }
 
+    // ── CHUNK-TRAVERSAL SPEECH ([[nova-talk-by-chunk]] sequencing — the "next level"). Genuine GENERATIVE talk: an
+    //    utterance is COMPOSED by a REPEATED-QUERY cascade (the user's recollection), NOT a template. Each hop RE-QUERIES
+    //    the substrate with the ACCUMULATED context (ds.Reason — the corpus-cloze predictor, which EXCLUDES the context
+    //    anchors, so it returns a CONTINUATION not an echo), appends the predicted chunk, and re-queries with the grown
+    //    utterance — autoregressive, self-directed. Order lives in LEARNED substrate edges (built from observed
+    //    utterances), never a code-literal carrier. NOTE: this is NOT TryFieldTick (that cascade is numeric-transform
+    //    only — it manufactures intermediate VALUES via the transform accumulator, can't re-query over text); this is the
+    //    same repeated-query IDEA carried over chunk-space via the general Reason predictor.
+    public bool ChunkTraversalSpeech { get; set; }
+
+    /// <summary>Learn the SEQUENCE structure of an utterance so <see cref="ComposeByTraversal"/> can re-query it: relate
+    /// each chunk to the NEXT one as substrate edges (the same context→target coupling the corpus-cloze objective uses),
+    /// reinforced over a few passes. The ORDER is learned edges, not code.</summary>
+    public void ObserveUtteranceSequence(string utterance, int passes = 6)
+    {
+        if (_memory is not DialecticalSpace ds) return;
+        var toks = (utterance ?? string.Empty).Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        if (toks.Length < 2) return;
+        for (var p = 0; p < passes; p++)
+            for (var i = 1; i < toks.Length; i++)
+                ds.FineEditFromExample(new[] { toks[i - 1] }, new[] { toks[i] }, isNegativeExample: false); // chunk → next-chunk edge
+        ds.FlushCloudBatch();
+    }
+
+    /// <summary>COMPOSE an utterance by autoregressive repeated queries over the learned chunk edges. Start from the cue,
+    /// predict the next chunk from the whole accumulated context (self-directed), append, re-query — until nothing
+    /// settles above <paramref name="minConfidence"/> (a LEARNED stop — the substrate has no confident continuation), a
+    /// repeat, or the cap. Returns the composed chunk sequence (the cue's continuation), or empty if nothing composes.</summary>
+    public string ComposeByTraversal(string cue, int maxChunks = 12, double minConfidence = 0.30)
+    {
+        if (_memory is not DialecticalSpace ds) return string.Empty;
+        var context = (cue ?? string.Empty).Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).ToList();
+        if (context.Count == 0) return string.Empty;
+        var said = new List<string>();
+        for (var step = 0; step < maxChunks; step++)
+        {
+            var t = _selfField is not null
+                ? ds.Reason(context, selfContext: _selfField, selfWeight: SelfReasonWeight)
+                : ds.Reason(context);
+            if (string.IsNullOrEmpty(t.Symbol) || t.Confidence < minConfidence) break;   // no confident next → learned stop
+            if (context.Contains(t.Symbol, StringComparer.OrdinalIgnoreCase)) break;      // would loop → stop
+            said.Add(t.Symbol);
+            context.Add(t.Symbol);   // grow the context so the NEXT query conditions on the whole utterance so far
+        }
+        return string.Join(" ", said);
+    }
+
+    /// <summary>COMPOSE an utterance that CARRIES a specific value (a computed answer or a retrieved concept): seed the
+    /// walk with the value as the START node (after an optional cue) and walk OUTWARD over the LEARNED chunk transitions,
+    /// so the value is a NODE on the composed path with learned chunks around it — NOT a template/frame. Returns the
+    /// utterance CONTAINING the value, or empty if the value has no learned continuation (e.g. a bare numeric token, which
+    /// never forms substrate edges by the numbers-never-edge rule — carry its number-WORD form instead). No code-literal
+    /// carrier: every word other than the value is a learned prediction, exactly like <see cref="ComposeByTraversal"/>.</summary>
+    public string ComposeWithValue(string value, string cue = "", int maxChunks = 12, double minConfidence = 0.30)
+    {
+        if (_memory is not DialecticalSpace ds || string.IsNullOrWhiteSpace(value)) return string.Empty;
+        var context = new List<string>();
+        context.AddRange((cue ?? string.Empty).Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+        context.Add(value.Trim());                       // the VALUE is the start node the walk carries into the utterance
+        var said = new List<string> { value.Trim() };
+        for (var step = 0; step < maxChunks; step++)
+        {
+            var t = _selfField is not null
+                ? ds.Reason(context, selfContext: _selfField, selfWeight: SelfReasonWeight)
+                : ds.Reason(context);
+            if (string.IsNullOrEmpty(t.Symbol) || t.Confidence < minConfidence) break;   // no confident continuation → learned stop
+            if (context.Contains(t.Symbol, StringComparer.OrdinalIgnoreCase)) break;      // would loop → stop
+            said.Add(t.Symbol);
+            context.Add(t.Symbol);
+        }
+        return said.Count >= 2 ? string.Join(" ", said) : string.Empty;   // value + >=1 learned chunk, else it couldn't compose
+    }
+
+    // EMIT-TIME SPEAK: a route produced a RAW answer value ("19", "fruit"); SPEAK it as a composed phrase that CARRIES the
+    // value as a walked node (ComposeWithValue — the value is a path node, every other word a learned prediction, NO
+    // template). Deliberately NOT hidden behind an off-by-default flag: the honest fallbacks self-scope it — an answer that
+    // is already a phrase, or a value with NO learned chunk transitions around it, returns the raw answer BYTE-IDENTICAL.
+    // So a space never taught to speak is unchanged, yet the moment it IS taught, answers speak — and any regression
+    // surfaces in the suite instead of hiding. A bare NUMBER can't carry (numbers-never-edge) → spoken in its number-WORD
+    // form. DecisionPath "field-speak".
+    private GenerationResult SpeakAnswer(GenerationRequest request, GenerationResult raw)
+    {
+        // Scope = CONVERSATION only (TalkEnabled). Concrete reason, not a safety flag: run ungated, 9 gym/reasoning tests
+        // broke — a TAUGHT space gives content answers learned continuations, so a bare "fruit"/category becomes a phrase
+        // and exact-value consumers (grader + reasoning assertions) fail. Speaking an answer is a TALK behavior; the gym /
+        // reasoning paths must report the bare value. TalkEnabled cleanly separates the two → non-talk byte-identical.
+        if (!TalkEnabled || _memory is not DialecticalSpace) return raw;
+        var answer = (raw.Output ?? string.Empty).Trim();
+        if (answer.Length == 0 || answer.IndexOf(' ') >= 0) return raw;   // nothing to say / already a phrase → leave it
+        var value = answer;                                              // a bare number never forms edges → speak its WORD form
+        if (IsNumericLike(answer) && long.TryParse(answer, NumberStyles.Integer, CultureInfo.InvariantCulture, out var n))
+            value = NumberWords is { } lex && lex.TryToWords(n, out var lw) ? lw : NumberWordVocabulary.ToWords(n);
+        var composed = ComposeWithValue(value);                          // value as the walked node; learned chunks around it
+        if (string.IsNullOrEmpty(composed)) return raw;                  // no learned continuation → raw answer, honest
+        return EmitField(composed, "field-speak", request, out var spoken) ? spoken : raw;
+    }
+
+    // Gated ladder route: when whole-chunk retrieval found nothing, COMPOSE a reply by traversal. Fires only under
+    // TalkEnabled + ChunkTraversalSpeech (default off ⇒ byte-identical). DecisionPath "field-traverse".
+    private bool TryFieldChunkTraversal(GenerationRequest request, out GenerationResult result)
+    {
+        result = default!;
+        var composed = ComposeByTraversal(request.Input ?? string.Empty);
+        if (composed.IndexOf(' ') < 0) return false;   // require a genuine multi-chunk utterance (>=2 chunks)
+        return EmitField(composed, "field-traverse", request, out result);
+    }
+
     // The persona's working memory of what it just said — so it ROTATES through its repertoire instead of looping —
     // and the GROWING set of every reply it has actually spoken (its earned repertoire). Generalisation draws ONLY
     // from this set, so it can never blurt out a CUE chunk ("good morning") that merely sits near the self; it says
@@ -1304,6 +1484,24 @@ public sealed partial class GenesisInferenceEngine
         n = Math.Sqrt(n); if (n > 1e-9) for (var i = 0; i < _selfField.Length; i++) _selfField[i] /= n;
     }
 
+    /// <summary>OUTCOME-REINFORCE the self (the neglected-backprop fix). Passive accumulation (PerceiveIntoSelfField)
+    /// folds every attended/concluded concept EQUALLY — a correct conclusion and a wrong one shape the self the same, so
+    /// the self drifts but never LEARNS. This closes the loop: at the grade stage, pull the self TOWARD a concept that
+    /// helped (reward &gt; 0) and PUSH it AWAY from one that misled (reward &lt; 0), then renormalize. Gated so default-off is
+    /// byte-identical; no-op before the first perception (the self is born from living, not from a reward).</summary>
+    public bool SelfReinforcement { get; set; }
+    private const double SelfReinforceRate = 0.2;   // signed blend magnitude of an outcome into the self
+
+    public void ReinforceSelf(string concept, double reward)
+    {
+        if (!SelfReinforcement || _selfField is null || _memory is not DialecticalSpace ds) return;
+        var v = ds.SemanticVectorOf(concept);
+        if (v is null || v.Length != _selfField.Length) return;
+        for (var i = 0; i < _selfField.Length; i++) _selfField[i] += reward * v[i];   // +toward / −away
+        var n = 0.0; for (var i = 0; i < _selfField.Length; i++) n += _selfField[i] * _selfField[i];
+        n = Math.Sqrt(n); if (n > 1e-9) for (var i = 0; i < _selfField.Length; i++) _selfField[i] /= n;
+    }
+
     /// <summary>PUBLIC WRITE into the SAME persistent self the field reasons from (<see cref="_selfField"/>) — so an
     /// external loop (e.g. the query-conditioned navigator) can feed the existing self the concepts a walk traversed,
     /// closing the vital loop THROUGH this one self. A thin pass-through to <see cref="PerceiveIntoSelfField"/>: no new
@@ -1560,12 +1758,135 @@ public sealed partial class GenesisInferenceEngine
         return acc;
     }
 
+    // SPEAK THE ANSWER (gated by SpeakAnswers, default off = byte-identical). A bare answer ("4"/"fruit") from any
+    // non-talk route is wrapped in a LEARNED carrier phrase so the model responds in natural language ("it is 4"). The
+    // carrier phrasing is LEARNED FROM DATA (LearnAnswerCarrier, fed by a curriculum) — NOT a hardcoded "the answer is X"
+    // template (that would re-introduce the hardcoding we removed from arithmetic). Grading is presence-based, so the
+    // value still resolves inside the phrase. First increment: one global carrier; context-varied carriers are next.
+    public bool SpeakAnswers { get; set; }
+    private string _answerCarrier = string.Empty;
+
+    /// <summary>LEARN the answer carrier from an example reply that wraps a value ("it is 4" for value "4" ⇒ carrier
+    /// "it is"). The phrasing comes from DATA, never a code literal — so "speak the answer" stays learned, not hardcoded.</summary>
+    public void LearnAnswerCarrier(string reply, string answerValue)
+    {
+        var r = (reply ?? string.Empty).Trim();
+        var v = (answerValue ?? string.Empty).Trim();
+        if (r.Length == 0 || v.Length == 0) return;
+        var idx = r.LastIndexOf(v, StringComparison.OrdinalIgnoreCase);
+        if (idx <= 0) return;                                   // value must appear WITH a prefix before it
+        var prefix = r.Substring(0, idx).Trim();
+        if (prefix.Length > 0) _answerCarrier = prefix;         // last-wins (a modal vote over examples is the next increment)
+    }
+
+    // Wrap a BARE answer in the learned carrier ("4" → "it is 4"). Untouched when off, when no carrier is learned, when
+    // the answer is already multi-word (retrieval chunk / talk reply), or on the talk route (field-respond*).
+    private string SpeakAnswer(string answer, string path)
+    {
+        if (!SpeakAnswers || _answerCarrier.Length == 0) return answer;
+        if (string.IsNullOrEmpty(answer) || answer.Contains(' ') || path.StartsWith("field-respond", StringComparison.Ordinal)) return answer;
+        return _answerCarrier + " " + answer;
+    }
+
     private bool EmitField(string answer, string path, GenerationRequest request, out GenerationResult result)
     {
+        answer = SpeakAnswer(answer, path);
         if (EmitPlatonicResult(answer, path, 1.0, hops: 1, request, evidence: null, out result))
         {
             RecordRouteDecision(1, 1, true, true, true, 1, result.DecisionPath, 1.0);
             return true;
+        }
+        return false;
+    }
+
+    // BRIDGE-DIMENSIONS reasoning (gated by BridgeReasoning): the LAST rung before abstaining. When the graph and
+    // every other route are silent, lift to the EMBEDDING view — infer a property the subject lacks from the
+    // relations its embedding-neighbours carry (DialecticalSpace.TryBridgeInfer). Only ever turns an abstain into
+    // an answer, so it can't regress a route that already resolves. DecisionPath "field-bridge".
+    public bool BridgeReasoning { get; set; }
+
+    // RELATIONAL FOLD (gated by RelationalFold): a multi-hop chain over fact edges — apple→fruit→food — stepping THROUGH
+    // each ⟨…⟩ fact composite to its value. A derivation the single-hop recall/relax can't make. Fires only AFTER relax
+    // abstains, so it's additive (turns an abstain into an answer, never regresses a resolving route). DecisionPath
+    // "field-chain-fold". The subject is the SAME question-frame key recall/relax parse, so it rides the gym's own shapes.
+    public bool RelationalFold { get; set; }
+
+    private bool TryFieldChainFold(IReadOnlyList<string> toks, GenerationRequest request, out GenerationResult result)
+    {
+        result = default!;
+        if (_memory is not DialecticalSpace ds) return false;
+        if (RoleParse(toks, ds, out var key, out _) != FrameKind.Question || key is null) return false;
+        var chain = ds.QueryConceptChain(new[] { key }, maxHops: 3, beamWidth: 2);
+        // ≥2 hops: a genuine multi-hop DERIVATION (relax already returns any 1-hop parent, and the bridge already ran) —
+        // this rung only earns its place when it composes a chain neither could, so a single attribute hop can't hijack it.
+        if (chain.Hops < 2 || chain.Confidence < 0.34 || string.IsNullOrEmpty(chain.Text)) return false;
+        if (string.Equals(chain.Text, key, StringComparison.OrdinalIgnoreCase)) return false;   // never echo the subject
+        return EmitField(chain.Text, "field-chain-fold", request, out result);
+    }
+
+    // TRAINED-DIRECTION derivation (gated by DirectionalReasoning): COMPOSE the trained relation direction —
+    // orbital(subject)+r_isa → the genus — the fold-faithful primitive (TransE-trained is-a direction) that reaches
+    // ANCESTORS the raw-cloud nearest/relax routes can't. Self-gated: abstains without a trained direction or a clear
+    // margin. Subject via ExtractSpecific (same routing fix as the geometric rung). DecisionPath "field-directional".
+    public bool DirectionalReasoning { get; set; }
+
+    private bool TryFieldDirectionalDerive(IReadOnlyList<string> toks, GenerationRequest request, out GenerationResult result)
+    {
+        result = default!;
+        if (_memory is not DialecticalSpace ds) return false;
+        var subject = PlatonicConceptAnchors.ExtractSpecific(ds, request.Input ?? string.Empty)
+            .FirstOrDefault(a => !IsFiller(ds, a));
+        if (subject is null) return false;
+        if (!ds.TryDirectionalDerive(subject, out var answer, out var conf)) return false;   // abstains without a trained direction / clear margin
+        if (string.Equals(answer, subject, StringComparison.OrdinalIgnoreCase)) return false;
+        return EmitField(answer, "field-directional", request, out result);
+    }
+
+    // GEOMETRY-NATIVE derivation (gated by GeometricReasoning): read the answer straight from the LATENT geometry — the
+    // subject's nearest content concept, generality-discounted, with a self-precision margin floor — instead of walking
+    // stored edges. LAST resort: it survives when the edge routes can't (an evicted intermediate, or a relation held only
+    // as a geometric trace with no discrete edge), and ABSTAINS on an undifferentiated/glue-only neighbourhood rather than
+    // fabricating. DecisionPath "field-geometric".
+    public bool GeometricReasoning { get; set; }
+
+    private bool TryFieldGeometricDerive(IReadOnlyList<string> toks, GenerationRequest request, out GenerationResult result)
+    {
+        result = default!;
+        if (_memory is not DialecticalSpace ds) return false;
+        // Subject = the DISCRIMINATIVE CUE (the same extraction relax uses), NOT RoleParse — RoleParse deliberately
+        // returns None on gym RETRIEVAL frames ("what kind of thing is X"), so keying on it left this rung UNREACHABLE
+        // (the routing gap: the direct call derived 'bird' but the ladder never invoked it). ExtractSpecific gets the real subject.
+        var subject = PlatonicConceptAnchors.ExtractSpecific(ds, request.Input ?? string.Empty)
+            .FirstOrDefault(a => !IsFiller(ds, a));
+        if (subject is null) return false;
+        if (!ds.TryGeometricDerive(subject, out var answer, out var conf)) return false;   // abstains in a low-density / undifferentiated region
+        if (string.Equals(answer, subject, StringComparison.OrdinalIgnoreCase)) return false;
+        return EmitField(answer, "field-geometric", request, out result);
+    }
+
+    private bool TryFieldBridge(IReadOnlyList<string> toks, GenerationRequest request, out GenerationResult r)
+    {
+        r = null!;
+        if (_memory is not DialecticalSpace ds) return false;
+        foreach (var t in toks)
+        {
+            if (TryOpToken(t, out _) || !ds.ContainsConcept(t)) continue;          // subjects only, not operators/framing
+            if (ds.TryBridgeInfer(t, out var answer, out var conf) && conf >= 0.34)
+            {
+                r = new GenerationResult(
+                    Output: answer,
+                    GeneratedTokens: _tokenizer.Encode(answer),
+                    UsedPlatonicQuery: true,
+                    UsedNeuralFallback: false,
+                    DecisionPath: "field-bridge",
+                    PlatonicConfidence: conf,
+                    AppliedBiasCount: 0,
+                    AverageBiasMagnitude: 0.0,
+                    ChunksGenerated: 0,
+                    PlatonicHopCount: 1);
+                RecordRouteDecision(0, 0, false, true, false, 1, r.DecisionPath, conf);
+                return true;
+            }
         }
         return false;
     }
@@ -1606,6 +1927,39 @@ public sealed partial class GenesisInferenceEngine
         };
         return (int)op >= 0;
     }
+
+    // UNIVERSAL MATH SYMBOLS — the ONLY operator triggers allowed to be hardcoded: a symbol IS the operation, so it works
+    // on a blank model the way a number line does (no memorised fact). ASCII compact forms count (* and x for ×, / for ÷).
+    // Operator WORDS (plus/minus/times/over) are NOT here — they are LEARNED via the op-cue, never baked in.
+    private static bool TrySymbolOp(string t, out GliderOp op)
+    {
+        op = t switch
+        {
+            "+" => GliderOp.Add,
+            "-" => GliderOp.Subtract,
+            "*" or "x" or "×" => GliderOp.Multiply,
+            "/" or "÷" => GliderOp.Divide,
+            _ => (GliderOp)(-1),
+        };
+        return (int)op >= 0;
+    }
+
+    // Resolve an INFIX operator token. Universal SYMBOLS are hardcoded (work untrained). WORDS are LEARNED via the op-cue
+    // (ResolveLearnedOp — the field learns "plus"→∘add like it learns "total") under LearnedCuesOnly, falling back to the
+    // legacy hardcoded word list only when de-hardcoding is off (byte-identical default). Under production this makes the
+    // hardcoded arithmetic SYMBOL-ONLY, exactly as required.
+    private bool ResolveInfixOp(string t, out GliderOp op)
+    {
+        if (TrySymbolOp(t, out op)) return true;
+        if (LearnedCuesOnly)
+            return _memory is DialecticalSpace d && ResolveLearnedOp(d, t, out op);
+        return TryOpToken(t, out op);
+    }
+
+    // "Does this token carry an EXPLICIT operator?" — the cue/heal learners skip explicit-operator examples. Under
+    // de-hardcoding only SYMBOLS count (so worded frames like "3 plus 4" stay LEARNABLE cues, no longer shadowed by a
+    // hardcoded word); off = legacy (symbols + words), byte-identical.
+    private bool ExplicitInfixOp(string t) => LearnedCuesOnly ? TrySymbolOp(t, out _) : TryOpToken(t, out _);
 
     private static bool IsCompareCue(string t) => t is "compared" or "compare" or "bigger" or "larger"
         or "smaller" or "greater" or "less" or "lesser" or "next" or "versus" or "vs";

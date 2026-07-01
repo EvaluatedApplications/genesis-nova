@@ -213,7 +213,7 @@ bands activate at `dim ≥ FaceLayout.AddressSpaceDim` (512); production runs at
    `PlatonicFaceDecoder.DecodeStructure`, `PlatonicFaceDecoder.cs:283`), with the 24-dim digest budget that bounds how
    deep the void stays free (§4).
 5. **`kind` / `op` decode** (`DecodeKind`, `PlatonicFaceDecoder.cs:227`; `DecodeOp`, `:248`) and the unified **void
-   decoder** `DialecticalSpace.TryDecodeCoordinate` (`DialecticalSpace.cs:578`) that routes a raw coordinate — realised
+   decoder** `DialecticalSpace.TryDecodeCoordinate` (`DialecticalSpace.cs:785`) that routes a raw coordinate — realised
    OR latent — to (kind, symbol, confidence): number off poly/log, operation off the op band, composite off the
    structure band, word/atom off the spelling band. Routing/retrieval read the frozen address for identity and the
    orbital tail only for learned similarity; abstain on undecodable-void-with-no-edge.

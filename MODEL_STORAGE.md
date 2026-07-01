@@ -78,7 +78,7 @@ The loader reads this sharded format. A one-time legacy-JSON migration path also
 checkpoint exists yet and the committed starter is present and consistent, the app copies the starter's pointer + model +
 substrate into the local gym dir, so a clone / fresh machine begins from the warmed model instead of an empty brain.
 It is a **no-op** once a local checkpoint exists (the local fork then evolves independently and is never overwritten) or
-if the starter is absent / torn. Called on startup from `MainWindow` (`MainWindow.cs:67`), before the runtime resumes.
+if the starter is absent / torn. Called on startup from `MainWindow` (`MainWindow.cs:75`), before the runtime resumes.
 
 **Promote** (`GenesisShardedCheckpointStore.PromoteToStarter`, `GenesisShardedCheckpointStore.cs:207`): copies a local
 fork's pointer + model + substrate (mirroring the destination) into the starter location (`models/genesis-nova{.json,/,.platonic/}`)

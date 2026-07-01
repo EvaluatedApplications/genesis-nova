@@ -339,10 +339,13 @@ public sealed partial class GenesisInferenceEngine
     /// </summary>
     public void DisruptWrongAnswer(string query, string output)
     {
-        if (!FunctionDisruptionEnabled || string.IsNullOrWhiteSpace(query) || string.IsNullOrWhiteSpace(output))
+        if (string.IsNullOrWhiteSpace(query) || string.IsNullOrWhiteSpace(output))
             return;
         var answer = output.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
         if (answer.Length != 1) // a single emitted concept is what got mis-retrieved; multi-token outputs aren't a retrieval
+            return;
+        ReinforceSelf(answer[0], -SelfReinforceRate);   // the self helped reach a WRONG answer → push it away (no-op unless SelfReinforcement)
+        if (!FunctionDisruptionEnabled)
             return;
         foreach (var anchor in ExtractConceptAnchors(query))
             _memory.DisruptAssociation(anchor, answer[0]);
@@ -357,7 +360,9 @@ public sealed partial class GenesisInferenceEngine
     /// </summary>
     public void TrainRetrievalToward(string query, IReadOnlyList<string> allowedAnswers)
     {
-        if (!FunctionGradientEnabled || string.IsNullOrWhiteSpace(query) || allowedAnswers is null)
+        if (string.IsNullOrWhiteSpace(query) || allowedAnswers is null)
+            return;
+        if (!FunctionGradientEnabled && !SelfReinforcement)   // nothing to do (byte-identical to the old !FunctionGradientEnabled guard)
             return;
         var anchors = ExtractConceptAnchors(query);
         if (anchors.Count == 0)
@@ -369,6 +374,9 @@ public sealed partial class GenesisInferenceEngine
             if (!string.IsNullOrEmpty(t) && _memory.ContainsConcept(t)) { target = t; break; } // first answer that's a real concept
         }
         if (target is null)
+            return;
+        ReinforceSelf(target, +SelfReinforceRate);   // the CORRECT target reinforces the self toward it (no-op unless SelfReinforcement)
+        if (!FunctionGradientEnabled)
             return;
         foreach (var anchor in anchors)
         {

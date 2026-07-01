@@ -26,6 +26,11 @@ namespace GenesisNova.Cognition.Navigator;
 /// the cued ancestor), and the cost-to-go value target.</summary>
 public readonly record struct NavQueryStep(float[] FeaturesFlat, float[] Mask, float[] Context, int TargetIdx, float Halt, float Value);
 
+/// <summary>Final-epoch mean training losses returned by <see cref="NavQueryDaggerTrainer.TrainQuery"/>: masked candidate
+/// cross-entropy, halt BCE, value MSE. (Shared record retained here after the superseded goal-conditioned generation was
+/// removed — it lived in the deleted NavigatorDaggerTrainer; this is its only remaining consumer.)</summary>
+public readonly record struct NavTrainLosses(double CrossEntropy, double HaltBce, double ValueMse);
+
 /// <summary>A query trajectory: the anchor face + cue (seed the self h₀ and the per-hop question-tension) and an
 /// ordered list of decisions (so the GRU self threads across hops exactly as the live walk threads it).</summary>
 public sealed class NavQueryTrajectory

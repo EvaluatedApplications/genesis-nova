@@ -83,6 +83,38 @@ public sealed record GenesisNovaConfig(
     // turns them on so the field REASONS over the substrate instead of only retrieving from it.
     bool FieldTicks = false,
     bool MeaningOps = false,
+    // BRIDGE-DIMENSIONS reasoning — when every route abstains, lift to the EMBEDDING view and infer a property the
+    // subject lacks from the relations its embedding-neighbours carry (inductive category etc.). Last resort only, so
+    // it can't regress a resolving route. Default off (byte-identical). ON in production.
+    bool BridgeReasoning = false,
+    // RELATIONAL FOLD — a multi-hop chain over fact edges (apple→fruit→food), stepping THROUGH the ⟨…⟩ fact composite to
+    // its value at each hop: a derivation the single-hop recall/relax cannot make. Additive last-resort (after relax),
+    // so it only turns an abstain into an answer. Default off (byte-identical). ON in production.
+    bool RelationalFold = false,
+    // GEOMETRY-NATIVE REASONING — read the answer straight from the LATENT geometry (subject's nearest content concept,
+    // generality-discounted, self-precision margin floor) instead of walking stored edges. Survives element eviction and
+    // abstains on a glue-only/low-density neighbourhood. Last resort. Default off (byte-identical). ON in production.
+    bool GeometricReasoning = false,
+    // DIRECTIONAL REASONING — COMPOSE the TRAINED relation direction (orbital(subject)+r_isa → genus): the fold-faithful
+    // primitive that reaches ancestors the raw-cloud nearest/relax routes can't. Self-gated (abstains without a trained
+    // direction / clear margin). Default off (byte-identical). ON in production (needs directions trained via TrainRelationDirection).
+    bool DirectionalReasoning = false,
+    // SELF-DISCRIMINATED INGESTION — the all-pairs coupling attenuates each edge by endpoint generality, so a hub/glue
+    // pair the model already predicts writes weakly and specific pairs write strongly (the self getting more discerning
+    // as it learns, no word list). Default off (flat all-pairs, byte-identical). ON in production.
+    bool SelfDiscriminatedIngestion = false,
+    // SELF REINFORCEMENT — outcome-reinforce the persistent self at the grade stage (pull toward correct answers, push
+    // away from wrong ones), closing the loop so the self LEARNS instead of only accumulating. Default off. ON in production.
+    bool SelfReinforcement = false,
+    // CHUNK-TRAVERSAL SPEECH — generative talk: compose a reply as a REPEATED-QUERY cascade over LEARNED chunk→next edges
+    // (autoregressive, self-directed), not single-chunk retrieval and not a template. The `field-traverse` rung is ALSO
+    // gated by TalkEnabled, so non-conversational inference (gym/REPL query) is unaffected. Default off. ON in production.
+    bool ChunkTraversalSpeech = false,
+    // RELATION-DIRECTION TRAINING — auto-train the TransE relation-directions from the observed (cue→output) couplings in
+    // the observe loop, so DirectionalReasoning has LIVE directions from real ingestion (not just a test call). Default off
+    // (inert, byte-identical). ON in production. HONEST LIMIT: without is-a typing it trains a MIXED-relation direction, and
+    // it writes entity orbitals back during training — validate at scale (the gym A/B) before fully trusting the prod-on default.
+    bool RelationDirectionTraining = false,
     // Substrate perf: deferred batched-GPU cloud recompute (Cloud = A·T on CUDA) replacing per-observation scalar
     // RecomputeCloud. Default false (byte-identical scalar path); when on, observations defer + flush in batches.
     bool BatchedCloudGpu = false,
@@ -100,6 +132,10 @@ public sealed record GenesisNovaConfig(
     // walk (TryLand) and reasoning (Reason) decode a missing concept back when they reach its address, instead of missing.
     // false (default) = the substrate misses on an evicted/latent coordinate, byte-identical. ON in WithProductionMechanisms.
     bool DecodeFromVoidRecovery = false,
+    // DERIVABILITY GATE — a fact you can COMPUTE from other facts is a DEBT, not knowledge. When true, the
+    // maintenance sweep evicts relation-edges derivable from a STRONGER alternative path (weighted transitive
+    // reduction) → the store converges to its irreducible core. Default off (byte-identical). ON in production.
+    bool DerivabilityGate = false,
     // SELF-HEAL MISROUTED CUES — the missing "learn from a WRONG ROUTE" signal in training. When true, a value-wrong
     // training probe whose TRUE answer is a NUMBER but whose produced answer is a compare WORD (an arithmetic query
     // hijacked to the predicate/compare route) CONTRADICTS the operator/cue that selected that route, so training
@@ -150,6 +186,19 @@ public sealed record GenesisNovaConfig(
         MeaningOps = true,            // generative compose/analogy in the large face — GATED by the LEARNED director
                                       // (attached in ApplyTo with a conservative prior → defaults to retrieval, opens
                                       // only as it learns; no free-form misfire).
+        BridgeReasoning = true,       // bridge-dimensions: last-resort embedding inference (turns an abstain into an answer)
+        RelationalFold = true,        // multi-hop relational chain fold (derives super-categories by chaining fact edges)
+        GeometricReasoning = true,    // read the answer from the latent geometry (edge-free, survives eviction, self-precision abstain)
+        DirectionalReasoning = true,  // compose the trained relation direction to reach ancestors (fold-faithful; needs trained directions)
+        SelfDiscriminatedIngestion = true, // attenuate all-pairs ingestion by endpoint generality (glue writes weakly, specific pairs strong)
+        SelfReinforcement = true,     // outcome-reinforce the self at the grade stage (the self learns, not just accumulates)
+        ChunkTraversalSpeech = true,  // generative talk: compose a reply by repeated-query chunk traversal (also gated by TalkEnabled → non-talk unaffected)
+        // RelationDirectionTraining stays OFF in prod pending validation: the held-out test proved it does NOT generalize
+        // (unseen-entity 1-hop 0/5 — a MEMORIZED fit, not a homomorphism), it writes entity orbitals during training (can
+        // interact with retrieval), and the accrued signal is MIXED-relation until is-a typing. Wiring is done
+        // (AccrueRelationDirection in the observe loop) — flip to true ONLY after entity-agnostic generalization + is-a
+        // typing + the scale A/B shows no retrieval regression. See nova-dangling-backlog.
+        RelationDirectionTraining = false,
         NavigatorDisambiguation = true, // M1 CUTOVER — the trained navigator owns the AMBIGUOUS branch of TryFieldRelax
                                       // (multi-hop walk), gated to a CONFIDENT halt: an untrained/cold walk does not
                                       // confidently resolve → falls through to the one-shot reason (cold-safe, proven).
